@@ -1,0 +1,82 @@
+server:
+  http_port: 8080
+  https_port: 8443
+  grpc_port: 9090
+  grpc_enabled: true
+  workers: 8
+  max_upload_size_mb: 1024
+  max_chunk_size_mb: 64
+  max_page_size: 1000
+  cors_allowed_origins: "*"
+  trusted_proxies: []
+
+tls:
+  enabled: false
+  cert_file: ""
+  key_file: ""
+
+storage:
+  type: local
+  local:
+    root_dir: /data/fsserver
+
+database:
+  type: sqlite
+  path: /data/fsserver/fsserver.db
+  host: ""
+  port: 5432
+  name: ""
+  user: ""
+  password: ""
+  sslmode: disable
+  pool_size: 10
+  connection_timeout_ms: 5000
+
+logging:
+  level: info
+  file: ""
+  format: json
+
+cache:
+  enabled: false
+  type: memory
+  ttl: 300
+  max_size: 1000
+
+redis:
+  enabled: false
+  address: "localhost:6379"
+  password: ""
+  db: 0
+  pool_size: 10
+
+etcd:
+  enabled: false
+  endpoints:
+    - "http://localhost:2379"
+  prefix: "/fsserver"
+
+consistency:
+  level: none
+  replica_count: 1
+  read_quorum: 1
+  write_quorum: 1
+  sync_interval_ms: 5000
+
+discovery:
+  enabled: false
+  type: etcd
+  address: "http://localhost:2379"
+  interval: 30
+
+auth:
+  enabled: false
+  secret: ""
+  token_expiry: 3600
+  refresh_expiry: 86400
+
+crypto:
+  enabled: false
+  algorithm: aes-256-gcm
+  key_file: ""
+  passphrase: ""

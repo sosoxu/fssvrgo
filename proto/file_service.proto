@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package fsserver;
+
+option go_package = "github.com/sosoxu/go-fsserver/proto";
+
+import "google/protobuf/timestamp.proto";
+
+message UploadMetadata {
+  string path = 1;
+  string name = 2;
+  int64 total_size = 3;
+  string hash = 4;
+}
+
+message UploadChunk {
+  bytes data = 1;
+  int64 offset = 2;
+}
+
+message UploadRequest {
+  oneof data {
+    UploadMetadata metadata = 1;
+    UploadChunk chunk = 2;
+  }
+}
+
+message UploadResponse {
+  string id = 1;
+  string path = 2;
+  string name = 3;
+  int64 size = 4;
+  string hash = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message DownloadRequest {
+  string path = 1;
+  int64 offset = 2;
+  int32 chunk_size = 3;
+}
+
+message DownloadResponse {
+  bytes data = 1;
+  int64 offset = 2;
+  int64 total_size = 3;
+}
+
+message ListFilesRequest {
+  string path = 1;
+  bool recursive = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+  string sort_by = 5;
+  string sort_order = 6;
+}
+
+message FileInfo {
+  string id = 1;
+  string path = 2;
+  string name = 3;
+  int64 size = 4;
+  string type = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message ListFilesResponse {
+  int32 total = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  repeated FileInfo items = 4;
+}
+
+message DeleteFileRequest {
+  string path = 1;
+}
+
+message DeleteFileResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RenameFileRequest {
+  string path = 1;
+  string new_name = 2;
+}
+
+message RenameFileResponse {
+  bool success = 1;
+  string message = 2;
+  string new_path = 3;
+}
+
+message CreateDirectoryRequest {
+  string path = 1;
+}
+
+message CreateDirectoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetMetadataRequest {
+  string path = 1;
+}
+
+message GetMetadataResponse {
+  string id = 1;
+  string path = 2;
+  string name = 3;
+  int64 size = 4;
+  string type = 5;
+  string hash = 6;
+  string storage_type = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+service FileService {
+  rpc UploadFile(stream UploadRequest) returns (UploadResponse);
+  rpc DownloadFile(DownloadRequest) returns (stream DownloadResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc RenameFile(RenameFileRequest) returns (RenameFileResponse);
+  rpc CreateDirectory(CreateDirectoryRequest) returns (CreateDirectoryResponse);
+  rpc GetMetadata(GetMetadataRequest) returns (GetMetadataResponse);
+}
