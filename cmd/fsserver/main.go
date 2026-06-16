@@ -13,9 +13,12 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/auth"
 	"github.com/sosoxu/fssvrgo/internal/cache"
 	"github.com/sosoxu/fssvrgo/internal/config"
+	"github.com/sosoxu/fssvrgo/internal/consistency"
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/discovery"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
+	"github.com/sosoxu/fssvrgo/internal/etcd"
 	"github.com/sosoxu/fssvrgo/internal/logger"
 	"github.com/sosoxu/fssvrgo/internal/metrics"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
@@ -115,6 +118,69 @@ func main() {
 		distLock = distributed.NewLocalDistributedLock()
 		sessionStore = distributed.NewMemorySessionStore()
 		logger.Info("Using local distributed lock and memory session store")
+	}
+
+	// Etcd
+	var etcdMgr *etcd.EtcdManager
+	if cfg.Etcd.Enabled {
+		var err error
+		etcdMgr, err = etcd.NewEtcdManager(cfg.Etcd.Endpoints, cfg.Etcd.Prefix)
+		if err != nil {
+			logger.Error("Failed to connect to etcd: %v", err)
+			os.Exit(1)
+		}
+		defer etcdMgr.Close()
+		logger.Info("Etcd connected (%v)", cfg.Etcd.Endpoints)
+	}
+
+	// Service Discovery
+	var discoverySvc *discovery.ServiceDiscovery
+	if cfg.Discovery.Enabled {
+		var err error
+		discoverySvc, err = discovery.NewServiceDiscovery(
+			cfg.Etcd.Endpoints,
+			cfg.Etcd.Prefix,
+			cfg.Discovery.Interval,
+		)
+		if err != nil {
+			logger.Error("Failed to initialize service discovery: %v", err)
+			os.Exit(1)
+		}
+		defer discoverySvc.Close()
+
+		// Register this instance
+		hostname, _ := os.Hostname()
+		instance := &discovery.ServiceInstance{
+			ID:      hostname + "-" + fmt.Sprintf("%d", cfg.Server.HTTPPort),
+			Name:    "fsserver",
+			Address: hostname,
+			Port:    cfg.Server.HTTPPort,
+			Metadata: map[string]string{
+				"grpc_port": fmt.Sprintf("%d", cfg.Server.GRPCPort),
+			},
+		}
+		if err := discoverySvc.Register(instance); err != nil {
+			logger.Error("Failed to register service: %v", err)
+			os.Exit(1)
+		}
+		logger.Info("Service discovery enabled (type=%s)", cfg.Discovery.Type)
+	}
+
+	// AuthConsistency
+	var consistencyMgr *consistency.ConsistencyManager
+	if cfg.Consistency.Level != "none" && cfg.Consistency.Level != "" {
+		if err := consistency.ValidateQuorum(cfg.Consistency.ReplicaCount, cfg.Consistency.ReadQuorum, cfg.Consistency.WriteQuorum); err != nil {
+			logger.Error("Invalid consistency configuration: %v", err)
+			os.Exit(1)
+		}
+		consistencyMgr = consistency.NewConsistencyManager(
+			cfg.Consistency.Level,
+			cfg.Consistency.ReplicaCount,
+			cfg.Consistency.ReadQuorum,
+			cfg.Consistency.WriteQuorum,
+			cfg.Consistency.SyncIntervalMs,
+		)
+		defer consistencyMgr.Stop()
 	}
 
 	// Auth
