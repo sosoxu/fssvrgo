@@ -48,7 +48,7 @@ type Instance struct {
 	Server      *httpserver.Server
 	Listener    net.Listener
 	AuthSvc     *auth.AuthService
-	CacheSvc    *cache.Cache
+	CacheSvc    cache.CacheAdapter
 	TransferSvc *transfer.FileTransferService
 	FM          *filemanager.FileManager
 	DirSvc      *directory.DirectoryManager

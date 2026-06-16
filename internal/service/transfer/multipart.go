@@ -233,14 +233,38 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		}
 	}
 
+	// Encrypt the temp file before writing to storage if encryption is enabled
+	storageTempPath := tempPath
+	storageHash := session.Hash
+	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
+		encTempPath := tempPath + ".enc"
+		if err := s.cryptoSvc.EncryptFile(tempPath, encTempPath); err != nil {
+			os.Remove(tempPath)
+			s.multipartSessions.Delete(sessionID)
+			return fmt.Errorf("failed to encrypt file: %w", err)
+		}
+		os.Remove(tempPath)
+
+		// Compute hash on encrypted data
+		var err error
+		storageHash, err = utils.SHA256File(encTempPath)
+		if err != nil {
+			os.Remove(encTempPath)
+			s.multipartSessions.Delete(sessionID)
+			return fmt.Errorf("failed to compute encrypted hash: %w", err)
+		}
+		storageTempPath = encTempPath
+	}
+
 	token, err := distributed.AcquireLock(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
+		os.Remove(storageTempPath)
 		return fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
 	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
 
-	if err := s.storage.WriteFromTempFile(session.FilePath, tempPath); err != nil {
-		os.Remove(tempPath)
+	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
+		os.Remove(storageTempPath)
 		s.multipartSessions.Delete(sessionID)
 		return fmt.Errorf("failed to write file from temp: %w", err)
 	}
@@ -251,7 +275,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 
 	if existingMeta != nil {
 		existingMeta.Size = session.TotalSize
-		existingMeta.Hash = session.Hash
+		existingMeta.Hash = storageHash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
 		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
@@ -263,7 +287,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 			Path:            session.FilePath,
 			Name:            session.FileName,
 			Size:            session.TotalSize,
-			Hash:            session.Hash,
+			Hash:            storageHash,
 			StorageType:     s.storage.StorageType(),
 			StorageLocation: "",
 			CreatedAt:       now,
@@ -281,7 +305,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	session.UpdatedAt = now
 	s.multipartSessions.Delete(sessionID)
 
-	os.Remove(tempPath)
+	os.Remove(storageTempPath)
 
 	ctx := context.Background()
 	s.sessionStore.Delete(ctx, "multipart_upload", sessionID)

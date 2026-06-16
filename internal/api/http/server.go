@@ -31,6 +31,7 @@ type Server struct {
 	tlsCfg         config.TLSConfig
 	engine         *gin.Engine
 	httpServer     *http.Server
+	httpsServer    *http.Server
 	fm             *filemanager.FileManager
 	dirSvc         *directory.DirectoryManager
 	flSvc          *filelist.FileListService
@@ -38,7 +39,7 @@ type Server struct {
 	authSvc        *auth.AuthService
 	cryptoSvc      *crypto.CryptoService
 	store          storage.StorageAdapter
-	cacheSvc       *cache.Cache
+	cacheSvc       cache.CacheAdapter
 	metricsSvc     *metrics.Metrics
 	db             *database.DB
 	corsOrigins    string
@@ -46,9 +47,10 @@ type Server struct {
 	maxChunkSize   int64
 	maxPageSize    int
 	startTime      time.Time
+	concurrencySem chan struct{}
 }
 
-func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, store storage.StorageAdapter, cacheSvc *cache.Cache, metricsSvc *metrics.Metrics, db *database.DB) *Server {
+func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, store storage.StorageAdapter, cacheSvc cache.CacheAdapter, metricsSvc *metrics.Metrics, db *database.DB) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.Use(gin.Recovery())
@@ -70,16 +72,32 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 		corsOrigins:   cfg.CORSAllowedOrigins,
 		maxUploadSize: int64(cfg.MaxUploadSizeMB) * 1024 * 1024,
 		maxChunkSize:  int64(cfg.MaxChunkSizeMB) * 1024 * 1024,
-		maxPageSize:   cfg.MaxPageSize,
-		startTime:     time.Now(),
+		maxPageSize:     cfg.MaxPageSize,
+		startTime:       time.Now(),
+		concurrencySem:  make(chan struct{}, cfg.Workers*4),
 	}
 
-	engine.MaxMultipartMemory = s.maxUploadSize
+	engine.MaxMultipartMemory = 32 << 20 // 32MB in-memory cache for multipart forms; excess spills to temp files
 	s.setupRoutes()
 
 	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler: engine,
+		Addr:           fmt.Sprintf(":%d", cfg.HTTPPort),
+		Handler:        engine,
+		MaxHeaderBytes: 1 << 20, // 1MB max header size
+		ReadTimeout:    60 * time.Second,
+		WriteTimeout:   120 * time.Second,
+		IdleTimeout:    120 * time.Second,
+	}
+
+	if tlsCfg.Enabled {
+		s.httpsServer = &http.Server{
+			Addr:           fmt.Sprintf(":%d", cfg.HTTPSPort),
+			Handler:        engine,
+			MaxHeaderBytes: 1 << 20,
+			ReadTimeout:    60 * time.Second,
+			WriteTimeout:   120 * time.Second,
+			IdleTimeout:    120 * time.Second,
+		}
 	}
 
 	return s
@@ -87,6 +105,7 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 
 func (s *Server) setupRoutes() {
 	s.engine.Use(s.corsMiddleware())
+	s.engine.Use(s.concurrencyMiddleware())
 
 	api := s.engine.Group("/api/v1")
 	api.Use(s.metricsMiddleware())
@@ -99,7 +118,10 @@ func (s *Server) setupRoutes() {
 		api.DELETE("/files/*path", s.handleDelete)
 		api.PATCH("/files/*path", s.handleRename)
 		api.POST("/directories", s.handleCreateDirectory)
+		api.DELETE("/directories/*path", s.handleDeleteDirectory)
+		api.PATCH("/directories/*path", s.handleRenameDirectory)
 		api.GET("/metadata/*path", s.handleGetMetadata)
+		api.GET("/audit-logs", s.handleListAuditLogs)
 
 		uploads := api.Group("/uploads")
 		{
@@ -110,6 +132,15 @@ func (s *Server) setupRoutes() {
 			uploads.DELETE("/:id", s.handleAbortUpload)
 		}
 
+		apiKeys := api.Group("/api-keys")
+		{
+			apiKeys.POST("", s.handleCreateApiKey)
+			apiKeys.GET("", s.handleListApiKeys)
+			apiKeys.GET("/:id", s.handleGetApiKey)
+			apiKeys.PATCH("/:id", s.handleUpdateApiKey)
+			apiKeys.DELETE("/:id", s.handleDeleteApiKey)
+		}
+
 		multipartUploads := api.Group("/multipart-uploads")
 		{
 			multipartUploads.POST("", s.handleCreateMultipartUpload)
@@ -117,6 +148,12 @@ func (s *Server) setupRoutes() {
 			multipartUploads.GET("/:id", s.handleGetMultipartUploadStatus)
 			multipartUploads.POST("/:id/complete", s.handleCompleteMultipartUpload)
 			multipartUploads.DELETE("/:id", s.handleAbortMultipartUpload)
+		}
+
+		authGroup := api.Group("/auth")
+		{
+			authGroup.POST("/token", s.handleGenerateToken)
+			authGroup.POST("/refresh", s.handleRefreshToken)
 		}
 	}
 
@@ -148,6 +185,19 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+func (s *Server) concurrencyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		select {
+		case s.concurrencySem <- struct{}{}:
+			defer func() { <-s.concurrencySem }()
+			c.Next()
+		default:
+			sendError(c, http.StatusServiceUnavailable, "Server is busy, please try again later")
+			c.Abort()
+		}
 	}
 }
 
@@ -307,7 +357,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
-	auditLog("upload", filePath, c, true, "")
+	s.auditLog("upload", filePath, c, true, "")
 	c.JSON(http.StatusCreated, meta)
 }
 
@@ -485,7 +535,7 @@ func (s *Server) handleDelete(c *gin.Context) {
 		return
 	}
 
-	auditLog("delete", filePath, c, true, "")
+	s.auditLog("delete", filePath, c, true, "")
 	c.JSON(http.StatusOK, gin.H{"message": "File deleted successfully"})
 }
 
@@ -526,7 +576,7 @@ func (s *Server) handleRename(c *gin.Context) {
 		return
 	}
 
-	auditLog("rename", filePath, c, true, fmt.Sprintf("new_name=%s", newName))
+	s.auditLog("rename", filePath, c, true, fmt.Sprintf("new_name=%s", newName))
 	c.JSON(http.StatusOK, gin.H{"message": "File renamed successfully"})
 }
 
@@ -549,8 +599,72 @@ func (s *Server) handleCreateDirectory(c *gin.Context) {
 		return
 	}
 
-	auditLog("create_directory", req.Path, c, true, "")
+	s.auditLog("create_directory", req.Path, c, true, "")
 	c.JSON(http.StatusCreated, gin.H{"message": "Directory created successfully"})
+}
+
+func (s *Server) handleDeleteDirectory(c *gin.Context) {
+	dirPath := c.Param("path")
+	if dirPath == "" {
+		sendError(c, http.StatusBadRequest, "Directory path is required")
+		return
+	}
+
+	if !isValidFilePath(dirPath) {
+		sendError(c, http.StatusBadRequest, "Invalid directory path")
+		return
+	}
+
+	recursive := c.Query("recursive") == "true"
+
+	if err := s.dirSvc.DeleteDirectory(dirPath, recursive); err != nil {
+		sendError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.auditLog("delete_directory", dirPath, c, true, fmt.Sprintf("recursive=%v", recursive))
+	c.JSON(http.StatusOK, gin.H{"message": "Directory deleted successfully"})
+}
+
+func (s *Server) handleRenameDirectory(c *gin.Context) {
+	dirPath := c.Param("path")
+	if dirPath == "" {
+		sendError(c, http.StatusBadRequest, "Directory path is required")
+		return
+	}
+
+	if !isValidFilePath(dirPath) {
+		sendError(c, http.StatusBadRequest, "Invalid directory path")
+		return
+	}
+
+	newName := c.PostForm("new_name")
+	if newName == "" {
+		var req struct {
+			NewName string `json:"new_name"`
+		}
+		if err := c.ShouldBindJSON(&req); err == nil && req.NewName != "" {
+			newName = req.NewName
+		}
+	}
+
+	if newName == "" {
+		sendError(c, http.StatusBadRequest, "New name is required")
+		return
+	}
+
+	if !isValidFileName(newName) {
+		sendError(c, http.StatusBadRequest, "Invalid directory name")
+		return
+	}
+
+	if err := s.dirSvc.RenameDirectory(dirPath, newName); err != nil {
+		sendError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.auditLog("rename_directory", dirPath, c, true, fmt.Sprintf("new_name=%s", newName))
+	c.JSON(http.StatusOK, gin.H{"message": "Directory renamed successfully"})
 }
 
 func (s *Server) handleGetMetadata(c *gin.Context) {
@@ -594,6 +708,48 @@ func (s *Server) handleGetMetadata(c *gin.Context) {
 	sendError(c, http.StatusNotFound, "Path not found")
 }
 
+func (s *Server) handleListAuditLogs(c *gin.Context) {
+	if s.db == nil {
+		sendError(c, http.StatusServiceUnavailable, "Database not available")
+		return
+	}
+
+	operation := c.Query("operation")
+	resourcePath := c.Query("resource_path")
+	pageStr := c.DefaultQuery("page", "1")
+	pageSizeStr := c.DefaultQuery("page_size", "20")
+
+	page, _ := strconv.Atoi(pageStr)
+	pageSize, _ := strconv.Atoi(pageSizeStr)
+
+	if pageSize > s.maxPageSize {
+		pageSize = s.maxPageSize
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	auditLogSvc := database.NewAuditLogService(s.db)
+	logs, err := auditLogSvc.List(operation, resourcePath, page, pageSize)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if logs == nil {
+		logs = []database.AuditLog{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"logs":      logs,
+		"page":      page,
+		"page_size": pageSize,
+	})
+}
+
 func (s *Server) handleCreateUploadSession(c *gin.Context) {
 	var req struct {
 		FilePath  string `json:"file_path" binding:"required"`
@@ -633,7 +789,7 @@ func (s *Server) handleCreateUploadSession(c *gin.Context) {
 		return
 	}
 
-	auditLog("create_upload_session", req.FilePath, c, true, fmt.Sprintf("session_id=%s", sessionID))
+	s.auditLog("create_upload_session", req.FilePath, c, true, fmt.Sprintf("session_id=%s", sessionID))
 	c.JSON(http.StatusCreated, gin.H{"session_id": sessionID})
 }
 
@@ -686,7 +842,7 @@ func (s *Server) handleCompleteUpload(c *gin.Context) {
 		return
 	}
 
-	auditLog("complete_upload", "", c, true, fmt.Sprintf("session_id=%s", sessionID))
+	s.auditLog("complete_upload", "", c, true, fmt.Sprintf("session_id=%s", sessionID))
 	c.JSON(http.StatusOK, gin.H{"message": "Upload completed successfully"})
 }
 
@@ -698,6 +854,216 @@ func (s *Server) handleAbortUpload(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Upload aborted"})
+}
+
+func (s *Server) handleCreateApiKey(c *gin.Context) {
+	var req struct {
+		Name        string `json:"name" binding:"required"`
+		Description string `json:"description"`
+		Permissions string `json:"permissions"`
+		ExpiresAt   string `json:"expires_at"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		sendError(c, http.StatusBadRequest, "Name is required")
+		return
+	}
+
+	keySvc := database.NewApiKeyService(s.db)
+
+	id := utils.GenerateUUID()
+	plainKey := s.authSvc.GenerateApiKey(id)
+	keyHash := utils.SHA256(plainKey)
+
+	apiKey := &database.ApiKey{
+		ID:          id,
+		KeyHash:     keyHash,
+		Name:        req.Name,
+		Description: req.Description,
+		Permissions: req.Permissions,
+		CreatedAt:   utils.GetCurrentTimestamp(),
+		ExpiresAt:   req.ExpiresAt,
+		IsActive:    true,
+	}
+
+	if err := keySvc.Create(apiKey); err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to create API key")
+		return
+	}
+
+	s.auditLog("create_api_key", id, c, true, fmt.Sprintf("name=%s", req.Name))
+	c.JSON(http.StatusCreated, gin.H{
+		"id":          apiKey.ID,
+		"name":        apiKey.Name,
+		"description": apiKey.Description,
+		"permissions": apiKey.Permissions,
+		"created_at":  apiKey.CreatedAt,
+		"expires_at":  apiKey.ExpiresAt,
+		"is_active":   apiKey.IsActive,
+		"key":         plainKey,
+	})
+}
+
+func (s *Server) handleListApiKeys(c *gin.Context) {
+	activeOnly := c.Query("active_only") == "true"
+	pageStr := c.DefaultQuery("page", "1")
+	pageSizeStr := c.DefaultQuery("page_size", "20")
+
+	page, _ := strconv.Atoi(pageStr)
+	pageSize, _ := strconv.Atoi(pageSizeStr)
+
+	if pageSize > s.maxPageSize {
+		pageSize = s.maxPageSize
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	keySvc := database.NewApiKeyService(s.db)
+
+	keys, err := keySvc.List(activeOnly, page, pageSize)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to list API keys")
+		return
+	}
+
+	result := make([]gin.H, 0, len(keys))
+	for _, k := range keys {
+		result = append(result, gin.H{
+			"id":          k.ID,
+			"name":        k.Name,
+			"description": k.Description,
+			"permissions": k.Permissions,
+			"created_at":  k.CreatedAt,
+			"expires_at":  k.ExpiresAt,
+			"last_used_at": k.LastUsedAt,
+			"is_active":   k.IsActive,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"keys": result,
+		"page": page,
+		"page_size": pageSize,
+	})
+}
+
+func (s *Server) handleGetApiKey(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		sendError(c, http.StatusBadRequest, "API key ID is required")
+		return
+	}
+
+	keySvc := database.NewApiKeyService(s.db)
+
+	key, err := keySvc.GetById(id)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to get API key")
+		return
+	}
+	if key == nil {
+		sendError(c, http.StatusNotFound, "API key not found")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":          key.ID,
+		"name":        key.Name,
+		"description": key.Description,
+		"permissions": key.Permissions,
+		"created_at":  key.CreatedAt,
+		"expires_at":  key.ExpiresAt,
+		"last_used_at": key.LastUsedAt,
+		"is_active":   key.IsActive,
+	})
+}
+
+func (s *Server) handleUpdateApiKey(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		sendError(c, http.StatusBadRequest, "API key ID is required")
+		return
+	}
+
+	var req struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+		IsActive    *bool   `json:"is_active"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		sendError(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	keySvc := database.NewApiKeyService(s.db)
+
+	key, err := keySvc.GetById(id)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to get API key")
+		return
+	}
+	if key == nil {
+		sendError(c, http.StatusNotFound, "API key not found")
+		return
+	}
+
+	if req.Name != nil {
+		key.Name = *req.Name
+	}
+	if req.Description != nil {
+		key.Description = *req.Description
+	}
+	if req.IsActive != nil {
+		key.IsActive = *req.IsActive
+	}
+
+	if err := keySvc.Update(key); err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to update API key")
+		return
+	}
+
+	s.auditLog("update_api_key", id, c, true, fmt.Sprintf("name=%s is_active=%v", key.Name, key.IsActive))
+	c.JSON(http.StatusOK, gin.H{
+		"id":          key.ID,
+		"name":        key.Name,
+		"description": key.Description,
+		"permissions": key.Permissions,
+		"created_at":  key.CreatedAt,
+		"expires_at":  key.ExpiresAt,
+		"last_used_at": key.LastUsedAt,
+		"is_active":   key.IsActive,
+	})
+}
+
+func (s *Server) handleDeleteApiKey(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		sendError(c, http.StatusBadRequest, "API key ID is required")
+		return
+	}
+
+	keySvc := database.NewApiKeyService(s.db)
+
+	key, err := keySvc.GetById(id)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to get API key")
+		return
+	}
+	if key == nil {
+		sendError(c, http.StatusNotFound, "API key not found")
+		return
+	}
+
+	if err := keySvc.Remove(id); err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to delete API key")
+		return
+	}
+
+	s.auditLog("delete_api_key", id, c, true, fmt.Sprintf("name=%s", key.Name))
+	c.JSON(http.StatusOK, gin.H{"message": "API key deleted successfully"})
 }
 
 func (s *Server) handleMetrics(c *gin.Context) {
@@ -713,12 +1079,20 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) ListenAndServe() error {
-	if s.tlsCfg.Enabled {
-		logger.Info("HTTP server listening on %s (TLS)", s.httpServer.Addr)
-		return s.httpServer.ListenAndServeTLS(s.tlsCfg.CertFile, s.tlsCfg.KeyFile)
-	}
 	logger.Info("HTTP server listening on %s", s.httpServer.Addr)
 	return s.httpServer.ListenAndServe()
+}
+
+func (s *Server) ListenAndServeTLS() error {
+	if s.httpsServer != nil {
+		logger.Info("HTTPS server listening on %s (TLS)", s.httpsServer.Addr)
+		go func() {
+			if err := s.httpsServer.ListenAndServeTLS(s.tlsCfg.CertFile, s.tlsCfg.KeyFile); err != nil && err != http.ErrServerClosed {
+				logger.Error("HTTPS server error: %v", err)
+			}
+		}()
+	}
+	return s.ListenAndServe()
 }
 
 func (s *Server) Serve(ln net.Listener) error {
@@ -728,7 +1102,14 @@ func (s *Server) Serve(ln net.Listener) error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	logger.Info("Shutting down HTTP server...")
-	return s.httpServer.Shutdown(ctx)
+	var err error
+	if s.httpsServer != nil {
+		if e := s.httpsServer.Shutdown(ctx); e != nil {
+			logger.Error("HTTPS server shutdown error: %v", e)
+		}
+	}
+	err = s.httpServer.Shutdown(ctx)
+	return err
 }
 
 func isValidFileName(name string) bool {
@@ -769,7 +1150,7 @@ func isValidFilePath(path string) bool {
 	return true
 }
 
-func auditLog(operation, resourcePath string, c *gin.Context, success bool, details string) {
+func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, success bool, details string) {
 	clientIP := c.ClientIP()
 	userAgent := c.GetHeader("User-Agent")
 
@@ -784,6 +1165,24 @@ func auditLog(operation, resourcePath string, c *gin.Context, success bool, deta
 
 	logger.Info("AUDIT: operation=%s resource=%s user=%s ip=%s ua=%s success=%v details=%s",
 		operation, resourcePath, userIdentifier, clientIP, userAgent, success, details)
+
+	if s.db != nil {
+		auditLogSvc := database.NewAuditLogService(s.db)
+		entry := &database.AuditLog{
+			ID:             utils.GenerateUUID(),
+			Timestamp:      utils.GetCurrentTimestamp(),
+			Operation:      operation,
+			ResourcePath:   resourcePath,
+			UserIdentifier: userIdentifier,
+			ClientIP:       clientIP,
+			UserAgent:      userAgent,
+			Success:        success,
+			Details:        details,
+		}
+		if err := auditLogSvc.Create(entry); err != nil {
+			logger.Error("Failed to persist audit log: %v", err)
+		}
+	}
 }
 
 func sendError(c *gin.Context, status int, msg string) {
@@ -829,7 +1228,7 @@ func (s *Server) handleCreateMultipartUpload(c *gin.Context) {
 		return
 	}
 
-	auditLog("create_multipart_upload", req.FilePath, c, true, fmt.Sprintf("session_id=%s part_size=%d", sessionID, partSize))
+	s.auditLog("create_multipart_upload", req.FilePath, c, true, fmt.Sprintf("session_id=%s part_size=%d", sessionID, partSize))
 	c.JSON(http.StatusCreated, gin.H{
 		"session_id": sessionID,
 		"part_size":  partSize,
@@ -903,7 +1302,7 @@ func (s *Server) handleCompleteMultipartUpload(c *gin.Context) {
 		return
 	}
 
-	auditLog("complete_multipart_upload", "", c, true, fmt.Sprintf("session_id=%s", sessionID))
+	s.auditLog("complete_multipart_upload", "", c, true, fmt.Sprintf("session_id=%s", sessionID))
 	c.JSON(http.StatusOK, gin.H{"message": "Multipart upload completed successfully"})
 }
 
@@ -915,4 +1314,54 @@ func (s *Server) handleAbortMultipartUpload(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Multipart upload aborted"})
+}
+
+func (s *Server) handleGenerateToken(c *gin.Context) {
+	if s.authSvc == nil || s.authSvc.GetJWTService() == nil {
+		sendError(c, http.StatusServiceUnavailable, "JWT authentication not configured")
+		return
+	}
+
+	var req struct {
+		UserID string `json:"user_id" binding:"required"`
+		Role   string `json:"role"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		sendError(c, http.StatusBadRequest, "Invalid request: user_id is required")
+		return
+	}
+	if req.Role == "" {
+		req.Role = "user"
+	}
+
+	tokenPair, err := s.authSvc.GetJWTService().GenerateTokenPair(req.UserID, req.Role)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to generate token")
+		return
+	}
+
+	c.JSON(http.StatusOK, tokenPair)
+}
+
+func (s *Server) handleRefreshToken(c *gin.Context) {
+	if s.authSvc == nil || s.authSvc.GetJWTService() == nil {
+		sendError(c, http.StatusServiceUnavailable, "JWT authentication not configured")
+		return
+	}
+
+	var req struct {
+		RefreshToken string `json:"refresh_token" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		sendError(c, http.StatusBadRequest, "Invalid request: refresh_token is required")
+		return
+	}
+
+	tokenPair, err := s.authSvc.GetJWTService().RefreshToken(req.RefreshToken)
+	if err != nil {
+		sendError(c, http.StatusUnauthorized, "Invalid or expired refresh token")
+		return
+	}
+
+	c.JSON(http.StatusOK, tokenPair)
 }

@@ -5,18 +5,23 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/auth"
 	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/logger"
+	"github.com/sosoxu/fssvrgo/internal/metrics"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
 	pb "github.com/sosoxu/fssvrgo/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -30,9 +35,10 @@ type Server struct {
 	transferSvc *transfer.FileTransferService
 	authSvc     *auth.AuthService
 	cryptoSvc   *crypto.CryptoService
+	metricsSvc  *metrics.Metrics
 }
 
-func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService) *Server {
+func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, metricsSvc *metrics.Metrics) *Server {
 	s := &Server{
 		config:      cfg,
 		fm:          fm,
@@ -41,11 +47,108 @@ func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *dir
 		transferSvc: transferSvc,
 		authSvc:     authSvc,
 		cryptoSvc:   cryptoSvc,
+		metricsSvc:  metricsSvc,
 	}
 
-	s.grpcServer = grpc.NewServer()
+	s.grpcServer = grpc.NewServer(
+		grpc.ChainUnaryInterceptor(s.unaryAuthInterceptor, s.unaryMetricsInterceptor),
+		grpc.ChainStreamInterceptor(s.streamAuthInterceptor, s.streamMetricsInterceptor),
+	)
 	pb.RegisterFileServiceServer(s.grpcServer, s)
 	return s
+}
+
+func (s *Server) unaryAuthInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	if err := s.authenticate(ctx); err != nil {
+		return nil, err
+	}
+	return handler(ctx, req)
+}
+
+func (s *Server) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if err := s.authenticate(ss.Context()); err != nil {
+		return err
+	}
+	return handler(srv, ss)
+}
+
+func (s *Server) unaryMetricsInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	if s.metricsSvc != nil {
+		start := time.Now()
+		resp, err := handler(ctx, req)
+		s.metricsSvc.RecordHTTPRequest("gRPC", info.FullMethod, statusCodeFromErr(err), time.Since(start))
+		return resp, err
+	}
+	return handler(ctx, req)
+}
+
+func (s *Server) streamMetricsInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if s.metricsSvc != nil {
+		start := time.Now()
+		err := handler(srv, ss)
+		s.metricsSvc.RecordHTTPRequest("gRPC", info.FullMethod, statusCodeFromErr(err), time.Since(start))
+		return err
+	}
+	return handler(srv, ss)
+}
+
+func statusCodeFromErr(err error) int {
+	if err == nil {
+		return 200
+	}
+	return 500
+}
+
+func (s *Server) authenticate(ctx context.Context) error {
+	if s.authSvc == nil {
+		return nil
+	}
+
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		if !s.authSvc.ValidateApiKey("") {
+			return status.Error(codes.Unauthenticated, "authentication required")
+		}
+		return nil
+	}
+
+	apiKeys := md.Get("x-api-key")
+	if len(apiKeys) > 0 && apiKeys[0] != "" {
+		if s.authSvc.ValidateApiKey(apiKeys[0]) {
+			return nil
+		}
+		return status.Error(codes.Unauthenticated, "invalid API key")
+	}
+
+	authHeaders := md.Get("authorization")
+	for _, ah := range authHeaders {
+		if strings.HasPrefix(ah, "Bearer ") {
+			token := strings.TrimPrefix(ah, "Bearer ")
+			if s.authSvc.ValidateApiKey(token) {
+				return nil
+			}
+			// After Bearer token API key check fails, try JWT
+			if s.authSvc.GetJWTService() != nil {
+				claims, err := s.authSvc.GetJWTService().ValidateToken(token)
+				if err == nil && claims != nil {
+					return nil
+				}
+			}
+			return status.Error(codes.Unauthenticated, "invalid token")
+		}
+		if strings.HasPrefix(ah, "Api-Key ") {
+			key := strings.TrimPrefix(ah, "Api-Key ")
+			if s.authSvc.ValidateApiKey(key) {
+				return nil
+			}
+			return status.Error(codes.Unauthenticated, "invalid API key")
+		}
+	}
+
+	if !s.authSvc.ValidateApiKey("") {
+		return status.Error(codes.Unauthenticated, "authentication required")
+	}
+	return nil
 }
 
 func (s *Server) Start() error {
