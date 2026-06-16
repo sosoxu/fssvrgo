@@ -39,7 +39,7 @@ type Server struct {
 	authSvc        *auth.AuthService
 	cryptoSvc      *crypto.CryptoService
 	store          storage.StorageAdapter
-	cacheSvc       *cache.Cache
+	cacheSvc       cache.CacheAdapter
 	metricsSvc     *metrics.Metrics
 	db             *database.DB
 	corsOrigins    string
@@ -50,7 +50,7 @@ type Server struct {
 	concurrencySem chan struct{}
 }
 
-func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, store storage.StorageAdapter, cacheSvc *cache.Cache, metricsSvc *metrics.Metrics, db *database.DB) *Server {
+func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, store storage.StorageAdapter, cacheSvc cache.CacheAdapter, metricsSvc *metrics.Metrics, db *database.DB) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.Use(gin.Recovery())
@@ -148,6 +148,12 @@ func (s *Server) setupRoutes() {
 			multipartUploads.GET("/:id", s.handleGetMultipartUploadStatus)
 			multipartUploads.POST("/:id/complete", s.handleCompleteMultipartUpload)
 			multipartUploads.DELETE("/:id", s.handleAbortMultipartUpload)
+		}
+
+		authGroup := api.Group("/auth")
+		{
+			authGroup.POST("/token", s.handleGenerateToken)
+			authGroup.POST("/refresh", s.handleRefreshToken)
 		}
 	}
 
@@ -1308,4 +1314,54 @@ func (s *Server) handleAbortMultipartUpload(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Multipart upload aborted"})
+}
+
+func (s *Server) handleGenerateToken(c *gin.Context) {
+	if s.authSvc == nil || s.authSvc.GetJWTService() == nil {
+		sendError(c, http.StatusServiceUnavailable, "JWT authentication not configured")
+		return
+	}
+
+	var req struct {
+		UserID string `json:"user_id" binding:"required"`
+		Role   string `json:"role"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		sendError(c, http.StatusBadRequest, "Invalid request: user_id is required")
+		return
+	}
+	if req.Role == "" {
+		req.Role = "user"
+	}
+
+	tokenPair, err := s.authSvc.GetJWTService().GenerateTokenPair(req.UserID, req.Role)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to generate token")
+		return
+	}
+
+	c.JSON(http.StatusOK, tokenPair)
+}
+
+func (s *Server) handleRefreshToken(c *gin.Context) {
+	if s.authSvc == nil || s.authSvc.GetJWTService() == nil {
+		sendError(c, http.StatusServiceUnavailable, "JWT authentication not configured")
+		return
+	}
+
+	var req struct {
+		RefreshToken string `json:"refresh_token" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		sendError(c, http.StatusBadRequest, "Invalid request: refresh_token is required")
+		return
+	}
+
+	tokenPair, err := s.authSvc.GetJWTService().RefreshToken(req.RefreshToken)
+	if err != nil {
+		sendError(c, http.StatusUnauthorized, "Invalid or expired refresh token")
+		return
+	}
+
+	c.JSON(http.StatusOK, tokenPair)
 }

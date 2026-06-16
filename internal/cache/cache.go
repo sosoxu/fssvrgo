@@ -5,6 +5,14 @@ import (
 	"time"
 )
 
+// CacheAdapter defines the interface for cache backends.
+type CacheAdapter interface {
+	Get(key string) (interface{}, bool)
+	Set(key string, value interface{})
+	Delete(key string)
+	Exists(key string) bool
+}
+
 type entry struct {
 	value     interface{}
 	expiresAt time.Time
@@ -13,16 +21,37 @@ type entry struct {
 type Cache struct {
 	mu      sync.RWMutex
 	items   map[string]*entry
-	ttl     int
+	ttl     int64
 	maxSize int
+	stopCh  chan struct{}
 }
 
-func NewCache(ttl, maxSize int) *Cache {
-	return &Cache{
+func NewCache(ttl int64, maxSize int) *Cache {
+	c := &Cache{
 		items:   make(map[string]*entry),
 		ttl:     ttl,
 		maxSize: maxSize,
+		stopCh:  make(chan struct{}),
 	}
+	go c.cleanupLoop()
+	return c
+}
+
+func (c *Cache) cleanupLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			c.Cleanup()
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
+func (c *Cache) Stop() {
+	close(c.stopCh)
 }
 
 func (c *Cache) Get(key string) (interface{}, bool) {
@@ -112,4 +141,8 @@ func (c *Cache) Has(key string) bool {
 	}
 
 	return true
+}
+
+func (c *Cache) Exists(key string) bool {
+	return c.Has(key)
 }

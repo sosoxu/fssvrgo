@@ -127,6 +127,13 @@ func (s *Server) authenticate(ctx context.Context) error {
 			if s.authSvc.ValidateApiKey(token) {
 				return nil
 			}
+			// After Bearer token API key check fails, try JWT
+			if s.authSvc.GetJWTService() != nil {
+				claims, err := s.authSvc.GetJWTService().ValidateToken(token)
+				if err == nil && claims != nil {
+					return nil
+				}
+			}
 			return status.Error(codes.Unauthenticated, "invalid token")
 		}
 		if strings.HasPrefix(ah, "Api-Key ") {

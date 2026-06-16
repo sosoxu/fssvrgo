@@ -6,12 +6,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/logger"
@@ -42,16 +44,18 @@ type UploadSession struct {
 }
 
 type DownloadSession struct {
-	SessionID      string
-	FileID         string
-	FilePath       string
-	TotalSize      int64
-	DownloadedSize int64
-	ClientID       string
-	Status         string
-	CreatedAt      string
-	UpdatedAt      string
-	chunkCount     int64
+	SessionID         string
+	FileID            string
+	FilePath          string
+	TotalSize         int64
+	DownloadedSize    int64
+	ClientID          string
+	Status            string
+	CreatedAt         string
+	UpdatedAt         string
+	chunkCount        int64
+	decryptedTempPath string
+	decryptedFile     *os.File
 }
 
 type FileTransferService struct {
@@ -66,6 +70,7 @@ type FileTransferService struct {
 	tempDir            string
 	sessionStore       distributed.SessionStore
 	distLock           distributed.DistributedLock
+	cryptoSvc          *crypto.CryptoService
 }
 
 func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.DB) *FileTransferService {
@@ -92,6 +97,10 @@ func NewFileTransferServiceWithRedis(storageAdapter storage.StorageAdapter, db *
 		sessionStore: sessionStore,
 		distLock:     distLock,
 	}
+}
+
+func (s *FileTransferService) SetCryptoService(cryptoSvc *crypto.CryptoService) {
+	s.cryptoSvc = cryptoSvc
 }
 
 func (s *FileTransferService) CreateUploadSession(filePath, fileName string, totalSize int64, clientID, hash string) (string, error) {
@@ -277,14 +286,38 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 		}
 	}
 
+	// Encrypt the temp file before writing to storage if encryption is enabled
+	storageTempPath := tempPath
+	storageHash := session.Hash
+	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
+		encTempPath := tempPath + ".enc"
+		if err := s.cryptoSvc.EncryptFile(tempPath, encTempPath); err != nil {
+			os.Remove(tempPath)
+			s.uploadSessions.Delete(sessionID)
+			return fmt.Errorf("failed to encrypt file: %w", err)
+		}
+		os.Remove(tempPath)
+
+		// Compute hash on encrypted data
+		var err error
+		storageHash, err = utils.SHA256File(encTempPath)
+		if err != nil {
+			os.Remove(encTempPath)
+			s.uploadSessions.Delete(sessionID)
+			return fmt.Errorf("failed to compute encrypted hash: %w", err)
+		}
+		storageTempPath = encTempPath
+	}
+
 	token, err := distributed.AcquireLock(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
+		os.Remove(storageTempPath)
 		return fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
 	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
 
-	if err := s.storage.WriteFromTempFile(session.FilePath, tempPath); err != nil {
-		os.Remove(tempPath)
+	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
+		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
 		return fmt.Errorf("failed to write file from temp: %w", err)
 	}
@@ -296,7 +329,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 	var meta *database.FileMetadata
 	if existingMeta != nil {
 		existingMeta.Size = session.TotalSize
-		existingMeta.Hash = session.Hash
+		existingMeta.Hash = storageHash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
 		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
@@ -309,7 +342,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 			Path:            session.FilePath,
 			Name:            session.FileName,
 			Size:            session.TotalSize,
-			Hash:            session.Hash,
+			Hash:            storageHash,
 			StorageType:     s.storage.StorageType(),
 			StorageLocation: "",
 			CreatedAt:       now,
@@ -329,7 +362,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 
 	s.uploadSessions.Delete(sessionID)
 
-	os.Remove(tempPath)
+	os.Remove(storageTempPath)
 
 	ctx := context.Background()
 	s.sessionStore.Delete(ctx, "upload", sessionID)
@@ -402,6 +435,38 @@ func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (
 		UpdatedAt: now,
 	}
 
+	// If encryption is enabled, decrypt the file to a temp location for reading
+	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
+		encData, err := s.storage.Read(filePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read encrypted file: %w", err)
+		}
+
+		decrypted, err := s.cryptoSvc.Decrypt(string(encData))
+		if err != nil {
+			return "", fmt.Errorf("failed to decrypt file: %w", err)
+		}
+
+		decTempPath := filepath.Join(s.tempDir, sessionID+".dec")
+		if err := os.WriteFile(decTempPath, []byte(decrypted), 0644); err != nil {
+			return "", fmt.Errorf("failed to write decrypted temp file: %w", err)
+		}
+
+		decFile, err := os.Open(decTempPath)
+		if err != nil {
+			os.Remove(decTempPath)
+			return "", fmt.Errorf("failed to open decrypted temp file: %w", err)
+		}
+
+		session.decryptedTempPath = decTempPath
+		session.decryptedFile = decFile
+
+		// Update total size to the decrypted (plaintext) size
+		if info, err := decFile.Stat(); err == nil {
+			session.TotalSize = info.Size()
+		}
+	}
+
 	s.downloadSessions.Store(sessionID, session)
 
 	ctx := context.Background()
@@ -438,9 +503,22 @@ func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset i
 		return nil, fmt.Errorf("offset beyond file size: %d >= %d", offset, session.TotalSize)
 	}
 
-	data, err := s.storage.ReadAt(session.FilePath, size, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file chunk: %w", err)
+	var data []byte
+	var err error
+
+	// If a decrypted temp file is available, read from it instead of storage
+	if session.decryptedFile != nil {
+		buf := make([]byte, size)
+		n, readErr := session.decryptedFile.ReadAt(buf, offset)
+		if readErr != nil && readErr != io.EOF {
+			return nil, fmt.Errorf("failed to read decrypted chunk: %w", readErr)
+		}
+		data = buf[:n]
+	} else {
+		data, err = s.storage.ReadAt(session.FilePath, size, offset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read file chunk: %w", err)
+		}
 	}
 
 	atomic.AddInt64(&session.DownloadedSize, int64(len(data)))
@@ -467,6 +545,15 @@ func (s *FileTransferService) CompleteDownload(sessionID string) error {
 	session := val.(*DownloadSession)
 	session.Status = "completed"
 	session.UpdatedAt = utils.GetCurrentTimestamp()
+
+	// Clean up decrypted temp file if present
+	if session.decryptedFile != nil {
+		session.decryptedFile.Close()
+	}
+	if session.decryptedTempPath != "" {
+		os.Remove(session.decryptedTempPath)
+	}
+
 	s.downloadSessions.Delete(sessionID)
 
 	ctx := context.Background()
@@ -484,6 +571,15 @@ func (s *FileTransferService) AbortDownload(sessionID string) error {
 	session := val.(*DownloadSession)
 	session.Status = "aborted"
 	session.UpdatedAt = utils.GetCurrentTimestamp()
+
+	// Clean up decrypted temp file if present
+	if session.decryptedFile != nil {
+		session.decryptedFile.Close()
+	}
+	if session.decryptedTempPath != "" {
+		os.Remove(session.decryptedTempPath)
+	}
+
 	s.downloadSessions.Delete(sessionID)
 
 	ctx := context.Background()
@@ -533,6 +629,12 @@ func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 		}
 		if createdAt.Before(expiryTime) {
 			session.Status = "expired"
+			if session.decryptedFile != nil {
+				session.decryptedFile.Close()
+			}
+			if session.decryptedTempPath != "" {
+				os.Remove(session.decryptedTempPath)
+			}
 			s.downloadSessions.Delete(key)
 			s.sessionStore.Delete(ctx, "download", key.(string))
 		}

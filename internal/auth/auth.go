@@ -33,6 +33,7 @@ type AuthService struct {
 	authFailures     map[string]*AuthFailureRecord
 	maxAuthFailures  int
 	rateLimitSeconds int
+	jwtService       *JWTService
 }
 
 func NewAuthService() *AuthService {
@@ -51,7 +52,16 @@ func (as *AuthService) Init(authEnabled bool, apiKey string) {
 	as.authEnabled = authEnabled
 	if authEnabled && apiKey != "" {
 		as.defaultApiKeyHash = hashApiKey(apiKey)
+		tokenExpiry := time.Duration(24) * time.Hour
+		refreshExpiry := time.Duration(168) * time.Hour
+		as.jwtService = NewJWTService(apiKey, tokenExpiry, refreshExpiry)
 	}
+}
+
+func (as *AuthService) GetJWTService() *JWTService {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
+	return as.jwtService
 }
 
 func (as *AuthService) ValidateApiKey(apiKey string) bool {
@@ -70,6 +80,14 @@ func (as *AuthService) ValidateApiKey(apiKey string) bool {
 
 	for _, user := range as.users {
 		if user.Enabled && user.ApiKeyHash == hashedKey {
+			return true
+		}
+	}
+
+	// After API key validation fails, try JWT
+	if as.jwtService != nil {
+		claims, err := as.jwtService.ValidateToken(apiKey)
+		if err == nil && claims != nil {
 			return true
 		}
 	}

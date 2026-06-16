@@ -141,10 +141,16 @@ func main() {
 	}
 
 	// Cache
-	var cacheSvc *cache.Cache
+	var cacheSvc cache.CacheAdapter
 	if cfg.Cache.Enabled {
-		cacheSvc = cache.NewCache(cfg.Cache.TTL, cfg.Cache.MaxSize)
-		logger.Info("Cache enabled (type=%s, ttl=%d, max_size=%d)", cfg.Cache.Type, cfg.Cache.TTL, cfg.Cache.MaxSize)
+		if cfg.Cache.Type == "redis" && cfg.Redis.Enabled {
+			cacheSvc = cache.NewRedisCache(cfg.Redis.Address, cfg.Redis.Password, cfg.Redis.DB, cfg.Redis.PoolSize, int64(cfg.Cache.TTL))
+			logger.Info("Cache enabled (type=redis, addr=%s)", cfg.Redis.Address)
+		} else {
+			c := cache.NewCache(int64(cfg.Cache.TTL), cfg.Cache.MaxSize)
+			cacheSvc = c
+			logger.Info("Cache enabled (type=memory, ttl=%d, max_size=%d)", cfg.Cache.TTL, cfg.Cache.MaxSize)
+		}
 	}
 
 	// Metrics
@@ -156,10 +162,16 @@ func main() {
 	dirSvc := directory.NewDirectoryManager(queryDB)
 	flSvc := filelist.NewFileListService(queryDB)
 	transferSvc := transfer.NewFileTransferServiceWithRedis(store, queryDB, sessionStore, distLock)
+	transferSvc.SetCryptoService(cryptoSvc)
 
 	// Start session cleanup
 	transferSvc.StartCleanupThread(60, 7200)
 	defer transferSvc.StopCleanupThread()
+
+	// Cleanup service
+	cleanupSvc := database.NewCleanupService(queryDB, store, 60, 30) // every 60 min, 30 day retention
+	cleanupSvc.Start()
+	defer cleanupSvc.Stop()
 
 	// HTTP server
 	httpServer := http.NewServer(
