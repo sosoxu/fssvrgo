@@ -46,6 +46,7 @@ type Server struct {
 	maxChunkSize   int64
 	maxPageSize    int
 	startTime      time.Time
+	concurrencySem chan struct{}
 }
 
 func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, store storage.StorageAdapter, cacheSvc *cache.Cache, metricsSvc *metrics.Metrics, db *database.DB) *Server {
@@ -70,16 +71,21 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 		corsOrigins:   cfg.CORSAllowedOrigins,
 		maxUploadSize: int64(cfg.MaxUploadSizeMB) * 1024 * 1024,
 		maxChunkSize:  int64(cfg.MaxChunkSizeMB) * 1024 * 1024,
-		maxPageSize:   cfg.MaxPageSize,
-		startTime:     time.Now(),
+		maxPageSize:     cfg.MaxPageSize,
+		startTime:       time.Now(),
+		concurrencySem:  make(chan struct{}, cfg.Workers*4),
 	}
 
-	engine.MaxMultipartMemory = s.maxUploadSize
+	engine.MaxMultipartMemory = 32 << 20 // 32MB in-memory cache for multipart forms; excess spills to temp files
 	s.setupRoutes()
 
 	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler: engine,
+		Addr:           fmt.Sprintf(":%d", cfg.HTTPPort),
+		Handler:        engine,
+		MaxHeaderBytes: 1 << 20, // 1MB max header size
+		ReadTimeout:    60 * time.Second,
+		WriteTimeout:   120 * time.Second,
+		IdleTimeout:    120 * time.Second,
 	}
 
 	return s
@@ -87,6 +93,7 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 
 func (s *Server) setupRoutes() {
 	s.engine.Use(s.corsMiddleware())
+	s.engine.Use(s.concurrencyMiddleware())
 
 	api := s.engine.Group("/api/v1")
 	api.Use(s.metricsMiddleware())
@@ -148,6 +155,19 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+func (s *Server) concurrencyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		select {
+		case s.concurrencySem <- struct{}{}:
+			defer func() { <-s.concurrencySem }()
+			c.Next()
+		default:
+			sendError(c, http.StatusServiceUnavailable, "Server is busy, please try again later")
+			c.Abort()
+		}
 	}
 }
 
