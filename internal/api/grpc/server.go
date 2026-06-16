@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/auth"
@@ -17,6 +18,9 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
 	pb "github.com/sosoxu/fssvrgo/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -43,9 +47,68 @@ func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *dir
 		cryptoSvc:   cryptoSvc,
 	}
 
-	s.grpcServer = grpc.NewServer()
+	s.grpcServer = grpc.NewServer(grpc.UnaryInterceptor(s.unaryAuthInterceptor), grpc.StreamInterceptor(s.streamAuthInterceptor))
 	pb.RegisterFileServiceServer(s.grpcServer, s)
 	return s
+}
+
+func (s *Server) unaryAuthInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	if err := s.authenticate(ctx); err != nil {
+		return nil, err
+	}
+	return handler(ctx, req)
+}
+
+func (s *Server) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if err := s.authenticate(ss.Context()); err != nil {
+		return err
+	}
+	return handler(srv, ss)
+}
+
+func (s *Server) authenticate(ctx context.Context) error {
+	if s.authSvc == nil {
+		return nil
+	}
+
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		if !s.authSvc.ValidateApiKey("") {
+			return status.Error(codes.Unauthenticated, "authentication required")
+		}
+		return nil
+	}
+
+	apiKeys := md.Get("x-api-key")
+	if len(apiKeys) > 0 && apiKeys[0] != "" {
+		if s.authSvc.ValidateApiKey(apiKeys[0]) {
+			return nil
+		}
+		return status.Error(codes.Unauthenticated, "invalid API key")
+	}
+
+	authHeaders := md.Get("authorization")
+	for _, ah := range authHeaders {
+		if strings.HasPrefix(ah, "Bearer ") {
+			token := strings.TrimPrefix(ah, "Bearer ")
+			if s.authSvc.ValidateApiKey(token) {
+				return nil
+			}
+			return status.Error(codes.Unauthenticated, "invalid token")
+		}
+		if strings.HasPrefix(ah, "Api-Key ") {
+			key := strings.TrimPrefix(ah, "Api-Key ")
+			if s.authSvc.ValidateApiKey(key) {
+				return nil
+			}
+			return status.Error(codes.Unauthenticated, "invalid API key")
+		}
+	}
+
+	if !s.authSvc.ValidateApiKey("") {
+		return status.Error(codes.Unauthenticated, "authentication required")
+	}
+	return nil
 }
 
 func (s *Server) Start() error {
