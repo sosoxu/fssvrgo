@@ -176,6 +176,7 @@ func main() {
 			cfg.Server,
 			fm, dirSvc, flSvc, transferSvc,
 			authSvc, cryptoSvc,
+			metricsSvc,
 		)
 	}
 
@@ -184,9 +185,16 @@ func main() {
 	defer cancel()
 
 	go func() {
-		if err := httpServer.ListenAndServe(); err != nil {
-			logger.Error("HTTP server error: %v", err)
-			cancel()
+		if cfg.TLS.Enabled {
+			if err := httpServer.ListenAndServeTLS(); err != nil {
+				logger.Error("HTTP/HTTPS server error: %v", err)
+				cancel()
+			}
+		} else {
+			if err := httpServer.ListenAndServe(); err != nil {
+				logger.Error("HTTP server error: %v", err)
+				cancel()
+			}
 		}
 	}()
 
