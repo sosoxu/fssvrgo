@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -64,8 +66,89 @@ func main() {
 	logger.Info("Database connected (%s)", cfg.Database.Type)
 
 	queryDB := dbObj.GetQueryDB()
-	if err := database.InitTables(queryDB); err != nil {
-		logger.Error("Failed to initialize database tables: %v", err)
+	migrationMgr := database.NewMigrationManager(queryDB)
+	migrationMgr.Register(database.Migration{
+		Version: 1,
+		Name:    "initial_schema",
+		Up: func() error {
+			statements := []string{
+				`CREATE TABLE IF NOT EXISTS files (
+					id VARCHAR(36) PRIMARY KEY,
+					path VARCHAR(1024) UNIQUE NOT NULL,
+					name VARCHAR(255) NOT NULL,
+					size BIGINT NOT NULL DEFAULT 0,
+					hash VARCHAR(64),
+					storage_type VARCHAR(32) NOT NULL DEFAULT 'local',
+					storage_location VARCHAR(512),
+					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)`,
+				`CREATE INDEX IF NOT EXISTS idx_files_name ON files(name)`,
+				`CREATE INDEX IF NOT EXISTS idx_files_is_deleted ON files(is_deleted)`,
+				`CREATE TABLE IF NOT EXISTS directories (
+					id VARCHAR(36) PRIMARY KEY,
+					path VARCHAR(1024) UNIQUE NOT NULL,
+					name VARCHAR(255) NOT NULL,
+					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_dirs_path ON directories(path)`,
+				`CREATE INDEX IF NOT EXISTS idx_dirs_is_deleted ON directories(is_deleted)`,
+				`CREATE TABLE IF NOT EXISTS transfer_tasks (
+					id VARCHAR(36) PRIMARY KEY,
+					type VARCHAR(16) NOT NULL,
+					file_id VARCHAR(36),
+					client_id VARCHAR(128),
+					"offset" BIGINT NOT NULL DEFAULT 0,
+					total_size BIGINT NOT NULL DEFAULT 0,
+					status VARCHAR(16) NOT NULL DEFAULT 'pending',
+					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_tasks_file_id ON transfer_tasks(file_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_tasks_client_id ON transfer_tasks(client_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_tasks_status ON transfer_tasks(status)`,
+				`CREATE TABLE IF NOT EXISTS audit_log (
+					id VARCHAR(36) PRIMARY KEY,
+					timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					operation VARCHAR(32) NOT NULL,
+					resource_path VARCHAR(1024) NOT NULL,
+					user_identifier VARCHAR(128),
+					client_ip VARCHAR(64),
+					user_agent VARCHAR(256),
+					success BOOLEAN NOT NULL DEFAULT TRUE,
+					details TEXT
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_operation ON audit_log(operation)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_log(resource_path)`,
+				`CREATE TABLE IF NOT EXISTS api_keys (
+					id VARCHAR(36) PRIMARY KEY,
+					key_hash VARCHAR(256) NOT NULL UNIQUE,
+					name VARCHAR(128) NOT NULL,
+					description VARCHAR(512),
+					permissions TEXT,
+					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					expires_at TIMESTAMP,
+					last_used_at TIMESTAMP,
+					is_active BOOLEAN NOT NULL DEFAULT TRUE
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`,
+				`CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(is_active)`,
+			}
+			for _, stmt := range statements {
+				if _, err := queryDB.Exec(stmt); err != nil {
+					return fmt.Errorf("failed to execute migration statement: %w", err)
+				}
+			}
+			return nil
+		},
+	})
+	if err := migrationMgr.RunMigrations(); err != nil {
+		logger.Error("Failed to run database migrations: %v", err)
 		os.Exit(1)
 	}
 
@@ -93,6 +176,18 @@ func main() {
 		}
 		store = storage.NewLocalStorage(cfg.Storage.Local.RootDir)
 		logger.Info("Storage: Local (%s)", cfg.Storage.Local.RootDir)
+	}
+
+	// Clean up orphaned temp directories from previous runs
+	tempDir := os.TempDir()
+	entries, _ := os.ReadDir(tempDir)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "fsserver-uploads-") {
+			oldPath := filepath.Join(tempDir, entry.Name())
+			if err := os.RemoveAll(oldPath); err != nil {
+				logger.Warn("Failed to clean up orphaned temp directory %s: %v", oldPath, err)
+			}
+		}
 	}
 
 	// Distributed components
@@ -294,6 +389,7 @@ func main() {
 	select {
 	case sig := <-sigCh:
 		logger.Info("Received signal: %v", sig)
+		cancel() // Cancel context to stop background goroutines
 	case <-ctx.Done():
 		logger.Info("Server context cancelled")
 	}

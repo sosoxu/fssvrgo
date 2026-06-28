@@ -25,6 +25,8 @@ const (
 	FileService_DeleteFile_FullMethodName      = "/fsserver.FileService/DeleteFile"
 	FileService_RenameFile_FullMethodName      = "/fsserver.FileService/RenameFile"
 	FileService_CreateDirectory_FullMethodName = "/fsserver.FileService/CreateDirectory"
+	FileService_DeleteDirectory_FullMethodName = "/fsserver.FileService/DeleteDirectory"
+	FileService_RenameDirectory_FullMethodName = "/fsserver.FileService/RenameDirectory"
 	FileService_GetMetadata_FullMethodName     = "/fsserver.FileService/GetMetadata"
 )
 
@@ -38,6 +40,10 @@ type FileServiceClient interface {
 	DeleteFile(ctx context.Context, in *DeleteFileRequest, opts ...grpc.CallOption) (*DeleteFileResponse, error)
 	RenameFile(ctx context.Context, in *RenameFileRequest, opts ...grpc.CallOption) (*RenameFileResponse, error)
 	CreateDirectory(ctx context.Context, in *CreateDirectoryRequest, opts ...grpc.CallOption) (*CreateDirectoryResponse, error)
+	// DeleteDirectory deletes a directory
+	DeleteDirectory(ctx context.Context, in *DeleteDirectoryRequest, opts ...grpc.CallOption) (*DeleteDirectoryResponse, error)
+	// RenameDirectory renames a directory
+	RenameDirectory(ctx context.Context, in *RenameDirectoryRequest, opts ...grpc.CallOption) (*RenameDirectoryResponse, error)
 	GetMetadata(ctx context.Context, in *GetMetadataRequest, opts ...grpc.CallOption) (*GetMetadataResponse, error)
 }
 
@@ -121,6 +127,26 @@ func (c *fileServiceClient) CreateDirectory(ctx context.Context, in *CreateDirec
 	return out, nil
 }
 
+func (c *fileServiceClient) DeleteDirectory(ctx context.Context, in *DeleteDirectoryRequest, opts ...grpc.CallOption) (*DeleteDirectoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteDirectoryResponse)
+	err := c.cc.Invoke(ctx, FileService_DeleteDirectory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *fileServiceClient) RenameDirectory(ctx context.Context, in *RenameDirectoryRequest, opts ...grpc.CallOption) (*RenameDirectoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenameDirectoryResponse)
+	err := c.cc.Invoke(ctx, FileService_RenameDirectory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *fileServiceClient) GetMetadata(ctx context.Context, in *GetMetadataRequest, opts ...grpc.CallOption) (*GetMetadataResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetMetadataResponse)
@@ -141,6 +167,10 @@ type FileServiceServer interface {
 	DeleteFile(context.Context, *DeleteFileRequest) (*DeleteFileResponse, error)
 	RenameFile(context.Context, *RenameFileRequest) (*RenameFileResponse, error)
 	CreateDirectory(context.Context, *CreateDirectoryRequest) (*CreateDirectoryResponse, error)
+	// DeleteDirectory deletes a directory
+	DeleteDirectory(context.Context, *DeleteDirectoryRequest) (*DeleteDirectoryResponse, error)
+	// RenameDirectory renames a directory
+	RenameDirectory(context.Context, *RenameDirectoryRequest) (*RenameDirectoryResponse, error)
 	GetMetadata(context.Context, *GetMetadataRequest) (*GetMetadataResponse, error)
 	mustEmbedUnimplementedFileServiceServer()
 }
@@ -169,6 +199,12 @@ func (UnimplementedFileServiceServer) RenameFile(context.Context, *RenameFileReq
 }
 func (UnimplementedFileServiceServer) CreateDirectory(context.Context, *CreateDirectoryRequest) (*CreateDirectoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDirectory not implemented")
+}
+func (UnimplementedFileServiceServer) DeleteDirectory(context.Context, *DeleteDirectoryRequest) (*DeleteDirectoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteDirectory not implemented")
+}
+func (UnimplementedFileServiceServer) RenameDirectory(context.Context, *RenameDirectoryRequest) (*RenameDirectoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenameDirectory not implemented")
 }
 func (UnimplementedFileServiceServer) GetMetadata(context.Context, *GetMetadataRequest) (*GetMetadataResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMetadata not implemented")
@@ -284,6 +320,42 @@ func _FileService_CreateDirectory_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FileService_DeleteDirectory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteDirectoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FileServiceServer).DeleteDirectory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FileService_DeleteDirectory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FileServiceServer).DeleteDirectory(ctx, req.(*DeleteDirectoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FileService_RenameDirectory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenameDirectoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FileServiceServer).RenameDirectory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FileService_RenameDirectory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FileServiceServer).RenameDirectory(ctx, req.(*RenameDirectoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _FileService_GetMetadata_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetMetadataRequest)
 	if err := dec(in); err != nil {
@@ -324,6 +396,14 @@ var FileService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateDirectory",
 			Handler:    _FileService_CreateDirectory_Handler,
+		},
+		{
+			MethodName: "DeleteDirectory",
+			Handler:    _FileService_DeleteDirectory_Handler,
+		},
+		{
+			MethodName: "RenameDirectory",
+			Handler:    _FileService_RenameDirectory_Handler,
 		},
 		{
 			MethodName: "GetMetadata",

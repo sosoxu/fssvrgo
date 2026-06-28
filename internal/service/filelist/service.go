@@ -32,6 +32,13 @@ func NewFileListService(db *database.DB) *FileListService {
 	return &FileListService{db: db}
 }
 
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
+}
+
 func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize int, sortBy, sortOrder string) (*FileListResult, error) {
 	path = utils.NormalizePath(path)
 	if path == "." {
@@ -66,12 +73,13 @@ func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize 
 		}
 	} else {
 		prefix := path + "/"
+		escapedPrefix := escapeLikePattern(prefix)
 		if recursive {
-			whereClause = "is_deleted = FALSE AND path LIKE ?"
-			args = append(args, prefix+"%")
+			whereClause = "is_deleted = FALSE AND path LIKE ? ESCAPE '\\'"
+			args = append(args, escapedPrefix+"%")
 		} else {
-			whereClause = "is_deleted = FALSE AND path LIKE ? AND path NOT LIKE ?"
-			args = append(args, prefix+"%", prefix+"%/%")
+			whereClause = "is_deleted = FALSE AND path LIKE ? ESCAPE '\\' AND path NOT LIKE ? ESCAPE '\\'"
+			args = append(args, escapedPrefix+"%", escapedPrefix+"%/%")
 		}
 	}
 

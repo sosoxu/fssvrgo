@@ -101,6 +101,26 @@ message CreateDirectoryResponse {
   string message = 2;
 }
 
+message DeleteDirectoryRequest {
+  string path = 1;
+  bool recursive = 2;
+}
+
+message DeleteDirectoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RenameDirectoryRequest {
+  string path = 1;
+  string new_name = 2;
+}
+
+message RenameDirectoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 message GetMetadataRequest {
   string path = 1;
 }
@@ -124,5 +144,12 @@ service FileService {
   rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
   rpc RenameFile(RenameFileRequest) returns (RenameFileResponse);
   rpc CreateDirectory(CreateDirectoryRequest) returns (CreateDirectoryResponse);
+
+  // DeleteDirectory deletes a directory
+  rpc DeleteDirectory(DeleteDirectoryRequest) returns (DeleteDirectoryResponse);
+
+  // RenameDirectory renames a directory
+  rpc RenameDirectory(RenameDirectoryRequest) returns (RenameDirectoryResponse);
+
   rpc GetMetadata(GetMetadataRequest) returns (GetMetadataResponse);
 }

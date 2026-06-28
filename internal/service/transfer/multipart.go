@@ -3,7 +3,9 @@ package transfer
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,15 +29,15 @@ type UploadPart struct {
 }
 
 type MultipartUploadSession struct {
-	SessionID    string
-	FilePath     string
-	FileName     string
-	TotalSize    int64
-	Hash         string
-	ClientID     string
-	Status       string
-	CreatedAt    string
-	UpdatedAt    string
+	SessionID string
+	FilePath  string
+	FileName  string
+	TotalSize int64
+	Hash      string
+	ClientID  string
+	Status    string
+	CreatedAt string
+	UpdatedAt string
 
 	tempFile     *os.File
 	parts        map[int]*UploadPart
@@ -213,6 +215,8 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	atomic.StoreInt32(&session.closed, 1)
 
 	if err := session.tempFile.Sync(); err != nil {
+		session.tempFile.Close()
+		os.Remove(filepath.Join(s.tempDir, sessionID+".tmp"))
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 	if err := session.tempFile.Close(); err != nil {
@@ -271,7 +275,11 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 
 	now := utils.GetCurrentTimestamp()
 
-	existingMeta, _ := database.NewFileMetadataService(s.db).GetByPath(session.FilePath)
+	existingMeta, err := database.NewFileMetadataService(s.db).GetByPath(session.FilePath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Log the error but continue - treat as new file
+		logger.Error("Failed to query existing metadata: %v", err)
+	}
 
 	if existingMeta != nil {
 		existingMeta.Size = session.TotalSize
@@ -308,7 +316,9 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	os.Remove(storageTempPath)
 
 	ctx := context.Background()
-	s.sessionStore.Delete(ctx, "multipart_upload", sessionID)
+	if err := s.sessionStore.Delete(ctx, "multipart_upload", sessionID); err != nil {
+		logger.Warn("Failed to delete session from store: %v", err)
+	}
 
 	return nil
 }
@@ -330,7 +340,9 @@ func (s *FileTransferService) AbortMultipartUpload(sessionID string) error {
 	os.Remove(tempPath)
 
 	ctx := context.Background()
-	s.sessionStore.Delete(ctx, "multipart_upload", sessionID)
+	if err := s.sessionStore.Delete(ctx, "multipart_upload", sessionID); err != nil {
+		logger.Warn("Failed to delete session from store: %v", err)
+	}
 
 	return nil
 }
@@ -376,6 +388,9 @@ func (s *FileTransferService) ParallelDownloadChunks(sessionID string, segments 
 			defer wg.Done()
 			defer func() { <-sem }()
 			data, err := s.DownloadChunk(sessionID, seg.Size, seg.Offset)
+			if err != nil {
+				logger.Error("failed to download chunk at offset %d (segment %d): %v", seg.Offset, idx, err)
+			}
 			results[idx] = &DownloadSegmentResult{
 				SegmentIndex: idx,
 				Offset:       seg.Offset,

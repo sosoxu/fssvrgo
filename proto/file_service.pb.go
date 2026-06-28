@@ -976,6 +976,214 @@ func (x *CreateDirectoryResponse) GetMessage() string {
 	return ""
 }
 
+type DeleteDirectoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Recursive     bool                   `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDirectoryRequest) Reset() {
+	*x = DeleteDirectoryRequest{}
+	mi := &file_proto_file_service_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDirectoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDirectoryRequest) ProtoMessage() {}
+
+func (x *DeleteDirectoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_service_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDirectoryRequest.ProtoReflect.Descriptor instead.
+func (*DeleteDirectoryRequest) Descriptor() ([]byte, []int) {
+	return file_proto_file_service_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *DeleteDirectoryRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *DeleteDirectoryRequest) GetRecursive() bool {
+	if x != nil {
+		return x.Recursive
+	}
+	return false
+}
+
+type DeleteDirectoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDirectoryResponse) Reset() {
+	*x = DeleteDirectoryResponse{}
+	mi := &file_proto_file_service_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDirectoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDirectoryResponse) ProtoMessage() {}
+
+func (x *DeleteDirectoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_service_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDirectoryResponse.ProtoReflect.Descriptor instead.
+func (*DeleteDirectoryResponse) Descriptor() ([]byte, []int) {
+	return file_proto_file_service_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DeleteDirectoryResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeleteDirectoryResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type RenameDirectoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	NewName       string                 `protobuf:"bytes,2,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenameDirectoryRequest) Reset() {
+	*x = RenameDirectoryRequest{}
+	mi := &file_proto_file_service_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenameDirectoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenameDirectoryRequest) ProtoMessage() {}
+
+func (x *RenameDirectoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_service_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenameDirectoryRequest.ProtoReflect.Descriptor instead.
+func (*RenameDirectoryRequest) Descriptor() ([]byte, []int) {
+	return file_proto_file_service_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RenameDirectoryRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *RenameDirectoryRequest) GetNewName() string {
+	if x != nil {
+		return x.NewName
+	}
+	return ""
+}
+
+type RenameDirectoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenameDirectoryResponse) Reset() {
+	*x = RenameDirectoryResponse{}
+	mi := &file_proto_file_service_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenameDirectoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenameDirectoryResponse) ProtoMessage() {}
+
+func (x *RenameDirectoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_service_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenameDirectoryResponse.ProtoReflect.Descriptor instead.
+func (*RenameDirectoryResponse) Descriptor() ([]byte, []int) {
+	return file_proto_file_service_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RenameDirectoryResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *RenameDirectoryResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 type GetMetadataRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -985,7 +1193,7 @@ type GetMetadataRequest struct {
 
 func (x *GetMetadataRequest) Reset() {
 	*x = GetMetadataRequest{}
-	mi := &file_proto_file_service_proto_msgTypes[15]
+	mi := &file_proto_file_service_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -997,7 +1205,7 @@ func (x *GetMetadataRequest) String() string {
 func (*GetMetadataRequest) ProtoMessage() {}
 
 func (x *GetMetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_file_service_proto_msgTypes[15]
+	mi := &file_proto_file_service_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1010,7 +1218,7 @@ func (x *GetMetadataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMetadataRequest.ProtoReflect.Descriptor instead.
 func (*GetMetadataRequest) Descriptor() ([]byte, []int) {
-	return file_proto_file_service_proto_rawDescGZIP(), []int{15}
+	return file_proto_file_service_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GetMetadataRequest) GetPath() string {
@@ -1037,7 +1245,7 @@ type GetMetadataResponse struct {
 
 func (x *GetMetadataResponse) Reset() {
 	*x = GetMetadataResponse{}
-	mi := &file_proto_file_service_proto_msgTypes[16]
+	mi := &file_proto_file_service_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1049,7 +1257,7 @@ func (x *GetMetadataResponse) String() string {
 func (*GetMetadataResponse) ProtoMessage() {}
 
 func (x *GetMetadataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_file_service_proto_msgTypes[16]
+	mi := &file_proto_file_service_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1062,7 +1270,7 @@ func (x *GetMetadataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMetadataResponse.ProtoReflect.Descriptor instead.
 func (*GetMetadataResponse) Descriptor() ([]byte, []int) {
-	return file_proto_file_service_proto_rawDescGZIP(), []int{16}
+	return file_proto_file_service_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *GetMetadataResponse) GetId() string {
@@ -1203,6 +1411,18 @@ const file_proto_file_service_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"M\n" +
 	"\x17CreateDirectoryResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"J\n" +
+	"\x16DeleteDirectoryRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
+	"\trecursive\x18\x02 \x01(\bR\trecursive\"M\n" +
+	"\x17DeleteDirectoryResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"G\n" +
+	"\x16RenameDirectoryRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x19\n" +
+	"\bnew_name\x18\x02 \x01(\tR\anewName\"M\n" +
+	"\x17RenameDirectoryResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"(\n" +
 	"\x12GetMetadataRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\xa2\x02\n" +
@@ -1217,7 +1437,7 @@ const file_proto_file_service_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt2\x95\x04\n" +
+	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt2\xc5\x05\n" +
 	"\vFileService\x12A\n" +
 	"\n" +
 	"UploadFile\x12\x17.fsserver.UploadRequest\x1a\x18.fsserver.UploadResponse(\x01\x12G\n" +
@@ -1227,8 +1447,10 @@ const file_proto_file_service_proto_rawDesc = "" +
 	"DeleteFile\x12\x1b.fsserver.DeleteFileRequest\x1a\x1c.fsserver.DeleteFileResponse\x12G\n" +
 	"\n" +
 	"RenameFile\x12\x1b.fsserver.RenameFileRequest\x1a\x1c.fsserver.RenameFileResponse\x12V\n" +
-	"\x0fCreateDirectory\x12 .fsserver.CreateDirectoryRequest\x1a!.fsserver.CreateDirectoryResponse\x12J\n" +
-	"\vGetMetadata\x12\x1c.fsserver.GetMetadataRequest\x1a\x1d.fsserver.GetMetadataResponseB%Z#github.com/sosoxu/fssvrgo/protob\x06proto3"
+	"\x0fCreateDirectory\x12 .fsserver.CreateDirectoryRequest\x1a!.fsserver.CreateDirectoryResponse\x12V\n" +
+	"\x0fDeleteDirectory\x12 .fsserver.DeleteDirectoryRequest\x1a!.fsserver.DeleteDirectoryResponse\x12V\n" +
+	"\x0fRenameDirectory\x12 .fsserver.RenameDirectoryRequest\x1a!.fsserver.RenameDirectoryResponse\x12J\n" +
+	"\vGetMetadata\x12\x1c.fsserver.GetMetadataRequest\x1a\x1d.fsserver.GetMetadataResponseB%Z#github.com/sosoxu/go-fsserver/protob\x06proto3"
 
 var (
 	file_proto_file_service_proto_rawDescOnce sync.Once
@@ -1242,7 +1464,7 @@ func file_proto_file_service_proto_rawDescGZIP() []byte {
 	return file_proto_file_service_proto_rawDescData
 }
 
-var file_proto_file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_proto_file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_proto_file_service_proto_goTypes = []any{
 	(*UploadMetadata)(nil),          // 0: fsserver.UploadMetadata
 	(*UploadChunk)(nil),             // 1: fsserver.UploadChunk
@@ -1259,35 +1481,43 @@ var file_proto_file_service_proto_goTypes = []any{
 	(*RenameFileResponse)(nil),      // 12: fsserver.RenameFileResponse
 	(*CreateDirectoryRequest)(nil),  // 13: fsserver.CreateDirectoryRequest
 	(*CreateDirectoryResponse)(nil), // 14: fsserver.CreateDirectoryResponse
-	(*GetMetadataRequest)(nil),      // 15: fsserver.GetMetadataRequest
-	(*GetMetadataResponse)(nil),     // 16: fsserver.GetMetadataResponse
-	(*timestamppb.Timestamp)(nil),   // 17: google.protobuf.Timestamp
+	(*DeleteDirectoryRequest)(nil),  // 15: fsserver.DeleteDirectoryRequest
+	(*DeleteDirectoryResponse)(nil), // 16: fsserver.DeleteDirectoryResponse
+	(*RenameDirectoryRequest)(nil),  // 17: fsserver.RenameDirectoryRequest
+	(*RenameDirectoryResponse)(nil), // 18: fsserver.RenameDirectoryResponse
+	(*GetMetadataRequest)(nil),      // 19: fsserver.GetMetadataRequest
+	(*GetMetadataResponse)(nil),     // 20: fsserver.GetMetadataResponse
+	(*timestamppb.Timestamp)(nil),   // 21: google.protobuf.Timestamp
 }
 var file_proto_file_service_proto_depIdxs = []int32{
 	0,  // 0: fsserver.UploadRequest.metadata:type_name -> fsserver.UploadMetadata
 	1,  // 1: fsserver.UploadRequest.chunk:type_name -> fsserver.UploadChunk
-	17, // 2: fsserver.UploadResponse.created_at:type_name -> google.protobuf.Timestamp
-	17, // 3: fsserver.FileInfo.created_at:type_name -> google.protobuf.Timestamp
-	17, // 4: fsserver.FileInfo.updated_at:type_name -> google.protobuf.Timestamp
+	21, // 2: fsserver.UploadResponse.created_at:type_name -> google.protobuf.Timestamp
+	21, // 3: fsserver.FileInfo.created_at:type_name -> google.protobuf.Timestamp
+	21, // 4: fsserver.FileInfo.updated_at:type_name -> google.protobuf.Timestamp
 	7,  // 5: fsserver.ListFilesResponse.items:type_name -> fsserver.FileInfo
-	17, // 6: fsserver.GetMetadataResponse.created_at:type_name -> google.protobuf.Timestamp
-	17, // 7: fsserver.GetMetadataResponse.updated_at:type_name -> google.protobuf.Timestamp
+	21, // 6: fsserver.GetMetadataResponse.created_at:type_name -> google.protobuf.Timestamp
+	21, // 7: fsserver.GetMetadataResponse.updated_at:type_name -> google.protobuf.Timestamp
 	2,  // 8: fsserver.FileService.UploadFile:input_type -> fsserver.UploadRequest
 	4,  // 9: fsserver.FileService.DownloadFile:input_type -> fsserver.DownloadRequest
 	6,  // 10: fsserver.FileService.ListFiles:input_type -> fsserver.ListFilesRequest
 	9,  // 11: fsserver.FileService.DeleteFile:input_type -> fsserver.DeleteFileRequest
 	11, // 12: fsserver.FileService.RenameFile:input_type -> fsserver.RenameFileRequest
 	13, // 13: fsserver.FileService.CreateDirectory:input_type -> fsserver.CreateDirectoryRequest
-	15, // 14: fsserver.FileService.GetMetadata:input_type -> fsserver.GetMetadataRequest
-	3,  // 15: fsserver.FileService.UploadFile:output_type -> fsserver.UploadResponse
-	5,  // 16: fsserver.FileService.DownloadFile:output_type -> fsserver.DownloadResponse
-	8,  // 17: fsserver.FileService.ListFiles:output_type -> fsserver.ListFilesResponse
-	10, // 18: fsserver.FileService.DeleteFile:output_type -> fsserver.DeleteFileResponse
-	12, // 19: fsserver.FileService.RenameFile:output_type -> fsserver.RenameFileResponse
-	14, // 20: fsserver.FileService.CreateDirectory:output_type -> fsserver.CreateDirectoryResponse
-	16, // 21: fsserver.FileService.GetMetadata:output_type -> fsserver.GetMetadataResponse
-	15, // [15:22] is the sub-list for method output_type
-	8,  // [8:15] is the sub-list for method input_type
+	15, // 14: fsserver.FileService.DeleteDirectory:input_type -> fsserver.DeleteDirectoryRequest
+	17, // 15: fsserver.FileService.RenameDirectory:input_type -> fsserver.RenameDirectoryRequest
+	19, // 16: fsserver.FileService.GetMetadata:input_type -> fsserver.GetMetadataRequest
+	3,  // 17: fsserver.FileService.UploadFile:output_type -> fsserver.UploadResponse
+	5,  // 18: fsserver.FileService.DownloadFile:output_type -> fsserver.DownloadResponse
+	8,  // 19: fsserver.FileService.ListFiles:output_type -> fsserver.ListFilesResponse
+	10, // 20: fsserver.FileService.DeleteFile:output_type -> fsserver.DeleteFileResponse
+	12, // 21: fsserver.FileService.RenameFile:output_type -> fsserver.RenameFileResponse
+	14, // 22: fsserver.FileService.CreateDirectory:output_type -> fsserver.CreateDirectoryResponse
+	16, // 23: fsserver.FileService.DeleteDirectory:output_type -> fsserver.DeleteDirectoryResponse
+	18, // 24: fsserver.FileService.RenameDirectory:output_type -> fsserver.RenameDirectoryResponse
+	20, // 25: fsserver.FileService.GetMetadata:output_type -> fsserver.GetMetadataResponse
+	17, // [17:26] is the sub-list for method output_type
+	8,  // [8:17] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name
 	8,  // [8:8] is the sub-list for extension extendee
 	0,  // [0:8] is the sub-list for field type_name
@@ -1308,7 +1538,7 @@ func file_proto_file_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_file_service_proto_rawDesc), len(file_proto_file_service_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
