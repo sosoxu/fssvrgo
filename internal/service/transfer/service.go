@@ -3,7 +3,9 @@ package transfer
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -59,23 +61,25 @@ type DownloadSession struct {
 }
 
 type FileTransferService struct {
-	storage            storage.StorageAdapter
-	db                 *database.DB
-	uploadSessions     sync.Map
-	downloadSessions   sync.Map
-	multipartSessions  sync.Map
-	cleanupRunning     int32
-	cleanupCancel      context.CancelFunc
-	mu                 sync.Mutex
-	tempDir            string
-	sessionStore       distributed.SessionStore
-	distLock           distributed.DistributedLock
-	cryptoSvc          *crypto.CryptoService
+	storage           storage.StorageAdapter
+	db                *database.DB
+	uploadSessions    sync.Map
+	downloadSessions  sync.Map
+	multipartSessions sync.Map
+	cleanupRunning    int32
+	cleanupCancel     context.CancelFunc
+	mu                sync.Mutex
+	tempDir           string
+	sessionStore      distributed.SessionStore
+	distLock          distributed.DistributedLock
+	cryptoSvc         *crypto.CryptoService
 }
 
 func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.DB) *FileTransferService {
 	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("fsserver-uploads-%d", time.Now().UnixNano()))
-	os.MkdirAll(tempDir, 0755)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		logger.Error("failed to create temp directory: %v", err)
+	}
 
 	return &FileTransferService{
 		storage:      storageAdapter,
@@ -88,7 +92,9 @@ func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.
 
 func NewFileTransferServiceWithRedis(storageAdapter storage.StorageAdapter, db *database.DB, sessionStore distributed.SessionStore, distLock distributed.DistributedLock) *FileTransferService {
 	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("fsserver-uploads-%d", time.Now().UnixNano()))
-	os.MkdirAll(tempDir, 0755)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		logger.Error("failed to create temp directory: %v", err)
+	}
 
 	return &FileTransferService{
 		storage:      storageAdapter,
@@ -257,6 +263,8 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 
 	if session.tempFile != nil {
 		if err := session.tempFile.Sync(); err != nil {
+			session.tempFile.Close()
+			os.Remove(filepath.Join(s.tempDir, sessionID+".tmp"))
 			return fmt.Errorf("failed to sync temp file: %w", err)
 		}
 		if err := session.tempFile.Close(); err != nil {
@@ -324,7 +332,11 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 
 	now := utils.GetCurrentTimestamp()
 
-	existingMeta, _ := database.NewFileMetadataService(s.db).GetByPath(session.FilePath)
+	existingMeta, err := database.NewFileMetadataService(s.db).GetByPath(session.FilePath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Log the error but continue - treat as new file
+		logger.Error("Failed to query existing metadata: %v", err)
+	}
 
 	var meta *database.FileMetadata
 	if existingMeta != nil {
@@ -365,7 +377,9 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 	os.Remove(storageTempPath)
 
 	ctx := context.Background()
-	s.sessionStore.Delete(ctx, "upload", sessionID)
+	if err := s.sessionStore.Delete(ctx, "upload", sessionID); err != nil {
+		logger.Warn("Failed to delete session from store: %v", err)
+	}
 
 	return nil
 }
@@ -389,7 +403,9 @@ func (s *FileTransferService) AbortUpload(sessionID string) error {
 	os.Remove(tempPath)
 
 	ctx := context.Background()
-	s.sessionStore.Delete(ctx, "upload", sessionID)
+	if err := s.sessionStore.Delete(ctx, "upload", sessionID); err != nil {
+		logger.Warn("Failed to delete session from store: %v", err)
+	}
 
 	return nil
 }
@@ -663,8 +679,11 @@ func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 }
 
 func (s *FileTransferService) StartCleanupThread(intervalSeconds, maxAgeSeconds int) {
-	if !atomic.CompareAndSwapInt32(&s.cleanupRunning, 0, 1) {
-		return
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.cleanupCancel != nil {
+		s.cleanupCancel()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

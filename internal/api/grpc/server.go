@@ -311,70 +311,99 @@ func (s *Server) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (*pb.L
 }
 
 func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb.DeleteFileResponse, error) {
-	if err := s.fm.DeleteFile(req.Path); err != nil {
-		return &pb.DeleteFileResponse{
-			Success: false,
-			Message: err.Error(),
-		}, nil
+	if req.Path == "" {
+		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
-
-	return &pb.DeleteFileResponse{
-		Success: true,
-		Message: "file deleted successfully",
-	}, nil
+	if err := s.fm.DeleteFile(req.Path); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.DeleteFileResponse{Success: true, Message: "File deleted successfully"}, nil
 }
 
 func (s *Server) RenameFile(ctx context.Context, req *pb.RenameFileRequest) (*pb.RenameFileResponse, error) {
-	if err := s.fm.RenameFile(req.Path, req.NewName); err != nil {
-		return &pb.RenameFileResponse{
-			Success: false,
-			Message: err.Error(),
-		}, nil
+	if req.Path == "" {
+		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
-
-	newPath := computeNewPath(req.Path, req.NewName)
-
-	return &pb.RenameFileResponse{
-		Success: true,
-		Message: "file renamed successfully",
-		NewPath: newPath,
-	}, nil
+	if req.NewName == "" {
+		return nil, status.Error(codes.InvalidArgument, "new_name is required")
+	}
+	if err := s.fm.RenameFile(req.Path, req.NewName); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.RenameFileResponse{Success: true, Message: "File renamed successfully"}, nil
 }
 
 func (s *Server) CreateDirectory(ctx context.Context, req *pb.CreateDirectoryRequest) (*pb.CreateDirectoryResponse, error) {
-	if err := s.dirSvc.CreateDirectory(req.Path); err != nil {
-		return &pb.CreateDirectoryResponse{
-			Success: false,
-			Message: err.Error(),
-		}, nil
+	if req.Path == "" {
+		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
-
-	return &pb.CreateDirectoryResponse{
-		Success: true,
-		Message: "directory created successfully",
-	}, nil
+	if err := s.dirSvc.CreateDirectory(req.Path); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.CreateDirectoryResponse{Success: true, Message: "Directory created successfully"}, nil
 }
 
 func (s *Server) GetMetadata(ctx context.Context, req *pb.GetMetadataRequest) (*pb.GetMetadataResponse, error) {
-	meta, err := s.fm.GetFileMetadata(req.Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get file metadata: %w", err)
+	// Try to get file metadata first
+	fileMeta, err := s.fm.GetFileMetadata(req.Path)
+	if err == nil && fileMeta != nil {
+		createdAt, _ := parseTimestamp(fileMeta.CreatedAt)
+		updatedAt, _ := parseTimestamp(fileMeta.UpdatedAt)
+		return &pb.GetMetadataResponse{
+			Id:          fileMeta.ID,
+			Path:        fileMeta.Path,
+			Name:        fileMeta.Name,
+			Size:        fileMeta.Size,
+			Type:        "file",
+			Hash:        fileMeta.Hash,
+			StorageType: fileMeta.StorageType,
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+		}, nil
 	}
 
-	createdAt, _ := parseTimestamp(meta.CreatedAt)
-	updatedAt, _ := parseTimestamp(meta.UpdatedAt)
+	// Try directory metadata
+	dirMeta, err := s.dirSvc.GetDirectoryMetadata(req.Path)
+	if err == nil && dirMeta != nil {
+		createdAt, _ := parseTimestamp(dirMeta.CreatedAt)
+		updatedAt, _ := parseTimestamp(dirMeta.UpdatedAt)
+		return &pb.GetMetadataResponse{
+			Id:          dirMeta.ID,
+			Path:        dirMeta.Path,
+			Name:        dirMeta.Name,
+			Size:        0,
+			Hash:        "",
+			Type:        "directory",
+			StorageType: "",
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+		}, nil
+	}
 
-	return &pb.GetMetadataResponse{
-		Id:          meta.ID,
-		Path:        meta.Path,
-		Name:        meta.Name,
-		Size:        meta.Size,
-		Type:        "file",
-		Hash:        meta.Hash,
-		StorageType: meta.StorageType,
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
-	}, nil
+	return nil, status.Error(codes.NotFound, fmt.Sprintf("path not found: %s", req.Path))
+}
+
+func (s *Server) DeleteDirectory(ctx context.Context, req *pb.DeleteDirectoryRequest) (*pb.DeleteDirectoryResponse, error) {
+	if req.Path == "" {
+		return nil, status.Error(codes.InvalidArgument, "path is required")
+	}
+	if err := s.dirSvc.DeleteDirectory(req.Path, req.Recursive); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.DeleteDirectoryResponse{Success: true, Message: "Directory deleted successfully"}, nil
+}
+
+func (s *Server) RenameDirectory(ctx context.Context, req *pb.RenameDirectoryRequest) (*pb.RenameDirectoryResponse, error) {
+	if req.Path == "" {
+		return nil, status.Error(codes.InvalidArgument, "path is required")
+	}
+	if req.NewName == "" {
+		return nil, status.Error(codes.InvalidArgument, "new_name is required")
+	}
+	if err := s.dirSvc.RenameDirectory(req.Path, req.NewName); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.RenameDirectoryResponse{Success: true, Message: "Directory renamed successfully"}, nil
 }
 
 func parseTimestamp(s string) (*timestamppb.Timestamp, error) {

@@ -183,6 +183,15 @@ func (c *Config) applyDefaults() {
 	if c.Database.ConnectionTimeoutMs == 0 {
 		c.Database.ConnectionTimeoutMs = 5000
 	}
+	if c.Logging.Level == "" {
+		c.Logging.Level = "info"
+	}
+	if c.Logging.Format == "" {
+		c.Logging.Format = "console"
+	}
+	if c.Redis.Enabled && c.Redis.PoolSize == 0 {
+		c.Redis.PoolSize = 10
+	}
 }
 
 func (c *Config) Validate() error {
@@ -269,8 +278,8 @@ func (c *Config) validateStorage() error {
 	}
 
 	if c.Storage.Type == "local" {
-		if c.Storage.Local.RootDir == "" {
-			return fmt.Errorf("storage.local.root_dir must not be empty")
+		if c.Storage.Local.RootDir == "" || c.Storage.Local.RootDir == "/" {
+			return fmt.Errorf("storage.local.root_dir cannot be empty or root '/'")
 		}
 	}
 
@@ -360,6 +369,11 @@ func (c *Config) validateConsistency() error {
 		valid := map[string]bool{"none": true, "eventual": true, "strong": true}
 		if !valid[c.Consistency.Level] {
 			return fmt.Errorf("consistency.level must be \"none\", \"eventual\", or \"strong\", got %q", c.Consistency.Level)
+		}
+	}
+	if c.Consistency.Level != "none" && c.Consistency.Level != "" {
+		if c.Consistency.SyncIntervalMs < 1 {
+			c.Consistency.SyncIntervalMs = 5000 // default 5 seconds
 		}
 	}
 	return nil

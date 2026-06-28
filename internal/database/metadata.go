@@ -67,6 +67,20 @@ type ApiKey struct {
 	IsActive    bool
 }
 
+// InitTables creates all the database tables and indexes directly.
+//
+// Deprecated: This function is retained for backward compatibility. New code
+// (including the production entrypoint in cmd/fsserver) should use the
+// MigrationManager (see internal/database/migration.go) and register a v1
+// migration with the same CREATE TABLE statements instead of calling this
+// function directly. This keeps schema changes versioned and idempotent.
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
+}
+
 func InitTables(db *DB) error {
 	if err := initFileTable(db); err != nil {
 		return err
@@ -101,10 +115,6 @@ func initFileTable(db *DB) error {
 	)`)
 	if err != nil {
 		return fmt.Errorf("failed to create files table: %w", err)
-	}
-	_, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)")
-	if err != nil {
-		return fmt.Errorf("failed to create files path index: %w", err)
 	}
 	_, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_files_name ON files(name)")
 	if err != nil {
@@ -294,8 +304,9 @@ func (s *FileMetadataService) List(directoryPath string, sortBy string, sortOrde
 	var args []interface{}
 
 	if directoryPath != "" {
-		query += " AND path LIKE ?"
-		args = append(args, directoryPath+"%")
+		escapedPath := escapeLikePattern(directoryPath)
+		query += " AND path LIKE ? ESCAPE '\\'"
+		args = append(args, escapedPath+"%")
 	}
 
 	allowedSortColumns := map[string]bool{"name": true, "path": true, "size": true, "created_at": true, "updated_at": true}
@@ -423,8 +434,9 @@ func (s *DirectoryMetadataService) List(parentPath string, page int, pageSize in
 	var args []interface{}
 
 	if parentPath != "" {
-		query += " AND path LIKE ?"
-		args = append(args, parentPath+"/%")
+		escapedPath := escapeLikePattern(parentPath)
+		query += " AND path LIKE ? ESCAPE '\\'"
+		args = append(args, escapedPath+"/%")
 	}
 
 	query += " ORDER BY name ASC LIMIT ? OFFSET ?"
@@ -612,8 +624,9 @@ func (s *AuditLogService) List(operation string, resourcePath string, page int, 
 	}
 
 	if resourcePath != "" {
-		query += " AND resource_path LIKE ?"
-		args = append(args, resourcePath+"%")
+		escapedPath := escapeLikePattern(resourcePath)
+		query += " AND resource_path LIKE ? ESCAPE '\\'"
+		args = append(args, escapedPath+"%")
 	}
 
 	query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1134,17 +1135,20 @@ func isValidFileName(name string) bool {
 }
 
 func isValidFilePath(path string) bool {
-	if path == "" {
+	if path == "" || path == "/" {
 		return false
 	}
-	cleaned := path
-	for strings.Contains(cleaned, "..") {
-		cleaned = strings.ReplaceAll(cleaned, "..", "")
-	}
-	if strings.Contains(path, "..") {
+	cleaned := filepath.Clean(path)
+	if cleaned == "." || cleaned == ".." || cleaned == "/" {
 		return false
 	}
-	if strings.Contains(path, "\\") {
+	parts := strings.Split(cleaned, string(filepath.Separator))
+	for _, part := range parts {
+		if part == ".." {
+			return false
+		}
+	}
+	if filepath.IsAbs(path) && !strings.HasPrefix(path, "/") {
 		return false
 	}
 	return true

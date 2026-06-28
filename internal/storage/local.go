@@ -61,7 +61,7 @@ func (ls *LocalStorage) ValidatePath(path string) error {
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
-	if !strings.HasPrefix(absFull, absRoot) {
+	if !strings.HasPrefix(absFull, absRoot+string(filepath.Separator)) && absFull != absRoot {
 		return fmt.Errorf("path traversal detected: %s", path)
 	}
 	return nil

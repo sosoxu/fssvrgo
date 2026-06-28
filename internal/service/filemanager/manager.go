@@ -3,6 +3,8 @@ package filemanager
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -87,7 +89,11 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 	defer fm.distUnlockFile(path, token)
 
 	if fm.Exists(path) {
-		existingMeta, _ := database.NewFileMetadataService(fm.db).GetByPath(path)
+		existingMeta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			// Log the error but continue - treat as new file
+			logger.Error("Failed to query existing metadata: %v", err)
+		}
 		if existingMeta != nil {
 			if err := fm.storage.Write(path, data); err != nil {
 				return nil, fmt.Errorf("failed to overwrite file: %w", err)
