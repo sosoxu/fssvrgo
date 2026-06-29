@@ -159,14 +159,32 @@ func (s *FileTransferService) CreateUploadSession(filePath, fileName string, tot
 }
 
 func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset int64) error {
+	// Use LoadOrStore to avoid a race where two goroutines both miss the cache
+	// and each creates an independent restored copy with its own mutex.
 	val, ok := s.uploadSessions.Load(sessionID)
 	if !ok {
 		ctx := context.Background()
 		var redisSession UploadSession
 		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
-			val = &redisSession
-			s.uploadSessions.Store(sessionID, val)
+			restored := &redisSession
+			// Re-open the temp file handle that was lost during JSON serialization.
+			tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
+			if f, err := os.OpenFile(tempPath, os.O_WRONLY, 0644); err == nil {
+				restored.tempFile = f
+			}
+			// hashWriter is non-serializable; mark hash as invalid so
+			// CompleteUpload falls back to full-file recompute.
+			atomic.StoreInt32(&restored.hashValid, 0)
+			restored.hashWriter = nil
+			// LoadOrStore ensures only the first restorer wins; others reuse it.
+			actual, loaded := s.uploadSessions.LoadOrStore(sessionID, restored)
+			val = actual
 			ok = true
+			if !loaded {
+				// We won the race; close the file handle we just opened if another
+				// goroutine's restored copy is already in use (shouldn't happen
+				// because LoadOrStore is atomic, but be safe).
+			}
 		}
 	}
 
@@ -175,6 +193,16 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 	}
 
 	session := val.(*UploadSession)
+
+	// Acquire a distributed lock so concurrent writes from different instances
+	// are serialized on the same session.
+	if s.distLock != nil {
+		token, err := distributed.AcquireLock(context.Background(), s.distLock, "upload:"+sessionID, 10*time.Second, 10, 100*time.Millisecond)
+		if err != nil {
+			return fmt.Errorf("failed to acquire session lock: %w", err)
+		}
+		defer s.distLock.Unlock(context.Background(), "upload:"+sessionID, token)
+	}
 
 	if atomic.LoadInt32(&session.closed) == 1 {
 		return fmt.Errorf("upload session is closed: %s", sessionID)
@@ -188,12 +216,13 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 		return fmt.Errorf("write beyond file size: offset=%d len=%d total=%d", offset, len(data), session.TotalSize)
 	}
 
+	session.tempFileMu.Lock()
 	if session.tempFile != nil {
 		if _, err := session.tempFile.WriteAt(data, offset); err != nil {
+			session.tempFileMu.Unlock()
 			return fmt.Errorf("failed to write chunk: %w", err)
 		}
 	} else {
-		session.tempFileMu.Lock()
 		tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 		file, err := os.OpenFile(tempPath, os.O_WRONLY, 0644)
 		if err != nil {
@@ -207,8 +236,8 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 			return fmt.Errorf("failed to write chunk: %w", err)
 		}
 		file.Close()
-		session.tempFileMu.Unlock()
 	}
+	session.tempFileMu.Unlock()
 
 	if session.hashWriter != nil && atomic.LoadInt32(&session.hashValid) == 1 {
 		expectedOffset := atomic.LoadInt64(&session.lastOffset)
@@ -243,8 +272,16 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 		ctx := context.Background()
 		var redisSession UploadSession
 		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
-			val = &redisSession
-			s.uploadSessions.Store(sessionID, val)
+			restored := &redisSession
+			// Re-open the temp file for syncing/closing.
+			tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
+			if f, err := os.OpenFile(tempPath, os.O_RDWR, 0644); err == nil {
+				restored.tempFile = f
+			}
+			atomic.StoreInt32(&restored.hashValid, 0)
+			restored.hashWriter = nil
+			actual, _ := s.uploadSessions.LoadOrStore(sessionID, restored)
+			val = actual
 			ok = true
 		}
 	}
@@ -261,16 +298,23 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 
 	atomic.StoreInt32(&session.closed, 1)
 
+	session.tempFileMu.Lock()
 	if session.tempFile != nil {
 		if err := session.tempFile.Sync(); err != nil {
 			session.tempFile.Close()
+			session.tempFile = nil
+			session.tempFileMu.Unlock()
 			os.Remove(filepath.Join(s.tempDir, sessionID+".tmp"))
 			return fmt.Errorf("failed to sync temp file: %w", err)
 		}
 		if err := session.tempFile.Close(); err != nil {
+			session.tempFile = nil
+			session.tempFileMu.Unlock()
 			return fmt.Errorf("failed to close temp file: %w", err)
 		}
+		session.tempFile = nil
 	}
+	session.tempFileMu.Unlock()
 
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 
@@ -451,22 +495,38 @@ func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (
 		UpdatedAt: now,
 	}
 
-	// If encryption is enabled, decrypt the file to a temp location for reading
+	// If encryption is enabled, decrypt the file to a temp location for reading.
+	// We stream the encrypted file from storage to a local temp file first
+	// (to avoid holding the full ciphertext in memory), then decrypt.
 	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
-		encData, err := s.storage.Read(filePath)
+		encTempPath := filepath.Join(s.tempDir, sessionID+".enc")
+		encFile, err := os.Create(encTempPath)
 		if err != nil {
-			return "", fmt.Errorf("failed to read encrypted file: %w", err)
+			return "", fmt.Errorf("failed to create temp file for encrypted data: %w", err)
 		}
 
-		decrypted, err := s.cryptoSvc.Decrypt(string(encData))
+		// Stream the encrypted file from storage to the local temp file.
+		reader, err := s.storage.OpenReader(filePath)
 		if err != nil {
-			return "", fmt.Errorf("failed to decrypt file: %w", err)
+			encFile.Close()
+			os.Remove(encTempPath)
+			return "", fmt.Errorf("failed to open encrypted file from storage: %w", err)
 		}
+		if _, err := io.Copy(encFile, reader); err != nil {
+			reader.Close()
+			encFile.Close()
+			os.Remove(encTempPath)
+			return "", fmt.Errorf("failed to stream encrypted file: %w", err)
+		}
+		reader.Close()
+		encFile.Close()
 
 		decTempPath := filepath.Join(s.tempDir, sessionID+".dec")
-		if err := os.WriteFile(decTempPath, []byte(decrypted), 0644); err != nil {
-			return "", fmt.Errorf("failed to write decrypted temp file: %w", err)
+		if err := s.cryptoSvc.DecryptFileStreaming(encTempPath, decTempPath); err != nil {
+			os.Remove(encTempPath)
+			return "", fmt.Errorf("failed to decrypt file: %w", err)
 		}
+		os.Remove(encTempPath)
 
 		decFile, err := os.Open(decTempPath)
 		if err != nil {

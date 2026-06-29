@@ -4,15 +4,23 @@ import (
 	"fmt"
 
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
 
 type DirectoryManager struct {
-	db *database.DB
+	db    *database.DB
+	store storage.StorageAdapter
 }
 
 func NewDirectoryManager(db *database.DB) *DirectoryManager {
 	return &DirectoryManager{db: db}
+}
+
+// NewDirectoryManagerWithStore creates a DirectoryManager that also synchronizes
+// storage objects when deleting or renaming directories.
+func NewDirectoryManagerWithStore(db *database.DB, store storage.StorageAdapter) *DirectoryManager {
+	return &DirectoryManager{db: db, store: store}
 }
 
 func (dm *DirectoryManager) CreateDirectory(path string) error {
@@ -75,58 +83,78 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	prefix := path + "/"
 
 	for {
-		rows, err := dm.db.Query("SELECT id FROM files WHERE path LIKE ? AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
+		rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
 		if err != nil {
 			return fmt.Errorf("failed to query files: %w", err)
 		}
 
-		var ids []string
+		type fileEntry struct {
+			id   string
+			path string
+		}
+		var entries []fileEntry
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var e fileEntry
+			if err := rows.Scan(&e.id, &e.path); err != nil {
 				rows.Close()
 				return fmt.Errorf("failed to scan file id: %w", err)
 			}
-			ids = append(ids, id)
+			entries = append(entries, e)
 		}
 		rows.Close()
 
-		if len(ids) == 0 {
+		if len(entries) == 0 {
 			break
 		}
 
 		svc := database.NewFileMetadataService(dm.db)
-		for _, id := range ids {
-			if err := svc.Remove(id); err != nil {
+		for _, e := range entries {
+			// Remove the storage object before soft-deleting the DB record.
+			if dm.store != nil {
+				if err := dm.store.Remove(e.path); err != nil {
+					// Log but continue - the DB record is the source of truth for metadata.
+				}
+			}
+			if err := svc.Remove(e.id); err != nil {
 				return fmt.Errorf("failed to delete file metadata: %w", err)
 			}
 		}
 	}
 
 	for {
-		rows, err := dm.db.Query("SELECT id FROM directories WHERE path LIKE ? AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
+		rows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
 		if err != nil {
 			return fmt.Errorf("failed to query directories: %w", err)
 		}
 
-		var ids []string
+		type dirEntry struct {
+			id   string
+			path string
+		}
+		var entries []dirEntry
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var e dirEntry
+			if err := rows.Scan(&e.id, &e.path); err != nil {
 				rows.Close()
 				return fmt.Errorf("failed to scan directory id: %w", err)
 			}
-			ids = append(ids, id)
+			entries = append(entries, e)
 		}
 		rows.Close()
 
-		if len(ids) == 0 {
+		if len(entries) == 0 {
 			break
 		}
 
 		svc := database.NewDirectoryMetadataService(dm.db)
-		for _, id := range ids {
-			if err := svc.Remove(id); err != nil {
+		for _, e := range entries {
+			// Remove the storage directory if supported.
+			if dm.store != nil {
+				if err := dm.store.RemoveDirectory(e.path); err != nil {
+					// Best effort - some backends treat empty dirs as no-ops.
+				}
+			}
+			if err := svc.Remove(e.id); err != nil {
 				return fmt.Errorf("failed to delete directory metadata: %w", err)
 			}
 		}
@@ -180,6 +208,12 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	for _, e := range fileEntries {
 		newItemPath := newPath + e.path[len(oldPath):]
 		newItemName := utils.GetFileName(newItemPath)
+		// Move the storage object before updating the DB record.
+		if dm.store != nil {
+			if err := dm.store.Rename(e.path, newItemPath); err != nil {
+				return fmt.Errorf("failed to rename storage object %s -> %s: %w", e.path, newItemPath, err)
+			}
+		}
 		_, err := dm.db.Exec("UPDATE files SET path = ?, name = ?, updated_at = ? WHERE id = ?", newItemPath, newItemName, now, e.id)
 		if err != nil {
 			return fmt.Errorf("failed to update file path: %w", err)
@@ -205,9 +239,17 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	for _, e := range dirEntries {
 		newItemPath := newPath + e.path[len(oldPath):]
 		newItemName := utils.GetFileName(newItemPath)
+		// Storage directories are logical; Rename on the store is best-effort for non-leaf dirs.
 		_, err := dm.db.Exec("UPDATE directories SET path = ?, name = ?, updated_at = ? WHERE id = ?", newItemPath, newItemName, now, e.id)
 		if err != nil {
 			return fmt.Errorf("failed to update directory path: %w", err)
+		}
+	}
+
+	// Move the target directory's own storage object (if it has one).
+	if dm.store != nil {
+		if err := dm.store.Rename(oldPath, newPath); err != nil {
+			// Best-effort: directory entries may not have a physical storage object.
 		}
 	}
 

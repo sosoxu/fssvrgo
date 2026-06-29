@@ -146,3 +146,34 @@ func IsValidFileName(name string) bool {
 	}
 	return true
 }
+
+// IsValidFilePath validates a logical file path against traversal attacks.
+// A valid path is non-empty, does not contain ".." segments, and uses "/"
+// as the separator. Leading "/" is stripped before validation.
+func IsValidFilePath(p string) bool {
+	if p == "" || p == "/" {
+		return false
+	}
+	// Normalize: strip leading slashes.
+	for strings.HasPrefix(p, "/") {
+		p = p[1:]
+	}
+	if p == "" {
+		return false
+	}
+	// Reject paths that resolve to the current or parent directory.
+	cleaned := path.Clean(p)
+	if cleaned == "." || cleaned == ".." || cleaned == "/" {
+		return false
+	}
+	// Inspect the original (pre-clean) segments so that ".." traversal
+	// attempts and empty segments (double slashes) are rejected even when
+	// path.Clean would resolve them to a safe path.
+	parts := strings.Split(p, "/")
+	for _, part := range parts {
+		if part == ".." || part == "" {
+			return false
+		}
+	}
+	return true
+}

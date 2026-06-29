@@ -17,6 +17,7 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
+	"github.com/sosoxu/fssvrgo/internal/utils"
 	pb "github.com/sosoxu/fssvrgo/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -202,6 +203,12 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 		switch data := req.Data.(type) {
 		case *pb.UploadRequest_Metadata:
 			meta := data.Metadata
+			if !utils.IsValidFilePath(meta.Path) {
+				return status.Error(codes.InvalidArgument, "invalid file path")
+			}
+			if !utils.IsValidFileName(meta.Name) {
+				return status.Error(codes.InvalidArgument, "invalid file name")
+			}
 			filePath = meta.Path
 			sessionID, err = s.transferSvc.CreateUploadSession(meta.Path, meta.Name, meta.TotalSize, "", meta.Hash)
 			if err != nil {
@@ -245,6 +252,9 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 }
 
 func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreamingServer[pb.DownloadResponse]) error {
+	if !utils.IsValidFilePath(req.Path) {
+		return status.Error(codes.InvalidArgument, "invalid file path")
+	}
 	meta, err := s.fm.GetFileMetadata(req.Path)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata: %w", err)
@@ -314,6 +324,9 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 	if req.Path == "" {
 		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
+	if !utils.IsValidFilePath(req.Path) {
+		return nil, status.Error(codes.InvalidArgument, "invalid file path")
+	}
 	if err := s.fm.DeleteFile(req.Path); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -327,6 +340,12 @@ func (s *Server) RenameFile(ctx context.Context, req *pb.RenameFileRequest) (*pb
 	if req.NewName == "" {
 		return nil, status.Error(codes.InvalidArgument, "new_name is required")
 	}
+	if !utils.IsValidFilePath(req.Path) {
+		return nil, status.Error(codes.InvalidArgument, "invalid file path")
+	}
+	if !utils.IsValidFileName(req.NewName) {
+		return nil, status.Error(codes.InvalidArgument, "invalid new name")
+	}
 	if err := s.fm.RenameFile(req.Path, req.NewName); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -337,6 +356,9 @@ func (s *Server) CreateDirectory(ctx context.Context, req *pb.CreateDirectoryReq
 	if req.Path == "" {
 		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
+	if !utils.IsValidFilePath(req.Path) {
+		return nil, status.Error(codes.InvalidArgument, "invalid directory path")
+	}
 	if err := s.dirSvc.CreateDirectory(req.Path); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -344,6 +366,9 @@ func (s *Server) CreateDirectory(ctx context.Context, req *pb.CreateDirectoryReq
 }
 
 func (s *Server) GetMetadata(ctx context.Context, req *pb.GetMetadataRequest) (*pb.GetMetadataResponse, error) {
+	if !utils.IsValidFilePath(req.Path) {
+		return nil, status.Error(codes.InvalidArgument, "invalid path")
+	}
 	// Try to get file metadata first
 	fileMeta, err := s.fm.GetFileMetadata(req.Path)
 	if err == nil && fileMeta != nil {
@@ -387,6 +412,9 @@ func (s *Server) DeleteDirectory(ctx context.Context, req *pb.DeleteDirectoryReq
 	if req.Path == "" {
 		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
+	if !utils.IsValidFilePath(req.Path) {
+		return nil, status.Error(codes.InvalidArgument, "invalid directory path")
+	}
 	if err := s.dirSvc.DeleteDirectory(req.Path, req.Recursive); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -399,6 +427,12 @@ func (s *Server) RenameDirectory(ctx context.Context, req *pb.RenameDirectoryReq
 	}
 	if req.NewName == "" {
 		return nil, status.Error(codes.InvalidArgument, "new_name is required")
+	}
+	if !utils.IsValidFilePath(req.Path) {
+		return nil, status.Error(codes.InvalidArgument, "invalid directory path")
+	}
+	if !utils.IsValidFileName(req.NewName) {
+		return nil, status.Error(codes.InvalidArgument, "invalid new name")
 	}
 	if err := s.dirSvc.RenameDirectory(req.Path, req.NewName); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())

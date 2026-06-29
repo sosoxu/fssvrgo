@@ -104,7 +104,7 @@ func TestGetFileName(t *testing.T) {
 }
 
 func TestIsValidFileName(t *testing.T) {
-	validNames := []string{"test.txt", "hello world.doc", "file_1.csv", "my-file.json", "数据.xlsx"}
+	validNames := []string{"test.txt", "hello world.doc", "file_1.csv", "my-file.json", "数据.xlsx", "file.txt", "文档.pdf"}
 	for _, name := range validNames {
 		if !IsValidFileName(name) {
 			t.Errorf("IsValidFileName(%q) should be true", name)
@@ -112,7 +112,7 @@ func TestIsValidFileName(t *testing.T) {
 	}
 
 	invalidNames := []struct {
-		name  string
+		name   string
 		reason string
 	}{
 		{"", "empty"},
@@ -122,6 +122,8 @@ func TestIsValidFileName(t *testing.T) {
 		{"foo..bar", "contains double dot"},
 		{"foo/bar", "contains slash"},
 		{"foo\\bar", "contains backslash"},
+		{"a/b", "contains slash"},
+		{"a\\b", "contains backslash"},
 		{"foo\x00bar", "control char null"},
 		{"foo\nbar", "control char newline"},
 		{"foo\rbar", "control char carriage return"},
@@ -130,6 +132,32 @@ func TestIsValidFileName(t *testing.T) {
 	for _, tt := range invalidNames {
 		if IsValidFileName(tt.name) {
 			t.Errorf("IsValidFileName(%q) should be false (%s)", tt.name, tt.reason)
+		}
+	}
+}
+
+func TestIsValidFilePath(t *testing.T) {
+	validPaths := []string{"file.txt", "dir/file.txt", "/dir/file.txt"}
+	for _, p := range validPaths {
+		if !IsValidFilePath(p) {
+			t.Errorf("IsValidFilePath(%q) should be true", p)
+		}
+	}
+
+	invalidPaths := []struct {
+		path   string
+		reason string
+	}{
+		{"", "empty"},
+		{"/", "root only"},
+		{"..", "parent directory"},
+		{"../etc/passwd", "traversal"},
+		{"dir/../etc", "traversal in middle"},
+		{"dir//file", "double slash"},
+	}
+	for _, tt := range invalidPaths {
+		if IsValidFilePath(tt.path) {
+			t.Errorf("IsValidFilePath(%q) should be false (%s)", tt.path, tt.reason)
 		}
 	}
 }
