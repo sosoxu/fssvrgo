@@ -14,8 +14,9 @@ type JWTService struct {
 }
 
 type Claims struct {
-	UserID string `json:"user_id"`
-	Role   string `json:"role"`
+	UserID    string `json:"user_id"`
+	Role      string `json:"role"`
+	TokenType string `json:"token_type,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -38,8 +39,9 @@ func (s *JWTService) GenerateTokenPair(userID, role string) (*TokenPair, error) 
 	accessExpiry := now.Add(s.tokenExpiry)
 
 	accessClaims := Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:    userID,
+		Role:      role,
+		TokenType: "access",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(accessExpiry),
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -57,8 +59,9 @@ func (s *JWTService) GenerateTokenPair(userID, role string) (*TokenPair, error) 
 
 	refreshExpiry := now.Add(s.refreshExpiry)
 	refreshClaims := Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:    userID,
+		Role:      role,
+		TokenType: "refresh",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(refreshExpiry),
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -104,6 +107,11 @@ func (s *JWTService) RefreshToken(refreshTokenStr string) (*TokenPair, error) {
 	claims, err := s.ValidateToken(refreshTokenStr)
 	if err != nil {
 		return nil, err
+	}
+
+	// Only refresh tokens may be used to obtain a new token pair.
+	if claims.TokenType != "" && claims.TokenType != "refresh" {
+		return nil, errors.New("not a refresh token")
 	}
 
 	return s.GenerateTokenPair(claims.UserID, claims.Role)

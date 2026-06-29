@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
 
@@ -25,6 +27,9 @@ type AuthFailureRecord struct {
 	LastFailure  time.Time
 }
 
+// apiKeyLookup is a function type for looking up API keys from external stores (e.g. database).
+type apiKeyLookup func(ctx context.Context, keyHash string) (*database.ApiKey, error)
+
 type AuthService struct {
 	mu               sync.RWMutex
 	users            map[string]*User
@@ -34,6 +39,7 @@ type AuthService struct {
 	maxAuthFailures  int
 	rateLimitSeconds int
 	jwtService       *JWTService
+	apiKeyLookupFn   apiKeyLookup
 }
 
 func NewAuthService() *AuthService {
@@ -45,6 +51,14 @@ func NewAuthService() *AuthService {
 	}
 }
 
+// SetApiKeyLookup registers a database-backed lookup function so ValidateApiKey
+// can verify keys created through the API Key management endpoints.
+func (as *AuthService) SetApiKeyLookup(fn func(ctx context.Context, keyHash string) (*database.ApiKey, error)) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.apiKeyLookupFn = fn
+}
+
 func (as *AuthService) Init(authEnabled bool, apiKey string) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
@@ -52,9 +66,11 @@ func (as *AuthService) Init(authEnabled bool, apiKey string) {
 	as.authEnabled = authEnabled
 	if authEnabled && apiKey != "" {
 		as.defaultApiKeyHash = hashApiKey(apiKey)
+		// JWT signing secret is derived independently from the admin API key value
+		// to avoid key reuse (defense in depth). We hash it to obtain a 32-byte key.
 		tokenExpiry := time.Duration(24) * time.Hour
 		refreshExpiry := time.Duration(168) * time.Hour
-		as.jwtService = NewJWTService(apiKey, tokenExpiry, refreshExpiry)
+		as.jwtService = NewJWTService(hashApiKey(apiKey), tokenExpiry, refreshExpiry)
 	}
 }
 
@@ -65,30 +81,50 @@ func (as *AuthService) GetJWTService() *JWTService {
 }
 
 func (as *AuthService) ValidateApiKey(apiKey string) bool {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
-
 	if !as.authEnabled {
 		return true
 	}
 
+	if apiKey == "" {
+		return false
+	}
+
 	hashedKey := hashApiKey(apiKey)
 
-	if as.defaultApiKeyHash != "" && hashedKey == as.defaultApiKeyHash {
+	as.mu.RLock()
+	defaultHash := as.defaultApiKeyHash
+	users := as.users
+	jwtSvc := as.jwtService
+	lookupFn := as.apiKeyLookupFn
+	as.mu.RUnlock()
+
+	if defaultHash != "" && hashedKey == defaultHash {
 		return true
 	}
 
-	for _, user := range as.users {
+	for _, user := range users {
 		if user.Enabled && user.ApiKeyHash == hashedKey {
 			return true
 		}
 	}
 
-	// After API key validation fails, try JWT
-	if as.jwtService != nil {
-		claims, err := as.jwtService.ValidateToken(apiKey)
-		if err == nil && claims != nil {
+	// Query the database for API keys created via the management API.
+	if lookupFn != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if key, err := lookupFn(ctx, hashedKey); err == nil && key != nil && key.IsActive {
 			return true
+		}
+	}
+
+	// After API key validation fails, try JWT
+	if jwtSvc != nil {
+		claims, err := jwtSvc.ValidateToken(apiKey)
+		if err == nil && claims != nil {
+			// Only access tokens are accepted for API authentication.
+			if claims.TokenType == "" || claims.TokenType == "access" {
+				return true
+			}
 		}
 	}
 
@@ -96,16 +132,24 @@ func (as *AuthService) ValidateApiKey(apiKey string) bool {
 }
 
 func (as *AuthService) GetUserByApiKey(apiKey string) *User {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
-
 	if !as.authEnabled {
+		return nil
+	}
+
+	if apiKey == "" {
 		return nil
 	}
 
 	hashedKey := hashApiKey(apiKey)
 
-	if as.defaultApiKeyHash != "" && hashedKey == as.defaultApiKeyHash {
+	as.mu.RLock()
+	defaultHash := as.defaultApiKeyHash
+	users := as.users
+	jwtSvc := as.jwtService
+	lookupFn := as.apiKeyLookupFn
+	as.mu.RUnlock()
+
+	if defaultHash != "" && hashedKey == defaultHash {
 		return &User{
 			ID:      "default",
 			Name:    "Default Admin",
@@ -114,9 +158,42 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 		}
 	}
 
-	for _, user := range as.users {
+	for _, user := range users {
 		if user.Enabled && user.ApiKeyHash == hashedKey {
 			return user
+		}
+	}
+
+	// Query the database for API keys created via the management API.
+	if lookupFn != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if key, err := lookupFn(ctx, hashedKey); err == nil && key != nil && key.IsActive {
+			role := "user"
+			if key.Permissions == "admin" || strings.Contains(key.Permissions, "admin") {
+				role = "admin"
+			}
+			return &User{
+				ID:      key.ID,
+				Name:    key.Name,
+				Role:    role,
+				Enabled: true,
+			}
+		}
+	}
+
+	// Try JWT
+	if jwtSvc != nil {
+		claims, err := jwtSvc.ValidateToken(apiKey)
+		if err == nil && claims != nil {
+			if claims.TokenType == "" || claims.TokenType == "access" {
+				return &User{
+					ID:      claims.UserID,
+					Name:    claims.UserID,
+					Role:    claims.Role,
+					Enabled: true,
+				}
+			}
 		}
 	}
 
@@ -124,14 +201,11 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 }
 
 func (as *AuthService) HasPermission(apiKey, resource, action string) bool {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
-
 	if !as.authEnabled {
 		return true
 	}
 
-	user := as.getUserByApiKeyInternal(apiKey)
+	user := as.GetUserByApiKey(apiKey)
 	if user == nil || !user.Enabled {
 		return false
 	}
@@ -145,27 +219,6 @@ func (as *AuthService) HasPermission(apiKey, resource, action string) bool {
 	}
 
 	return false
-}
-
-func (as *AuthService) getUserByApiKeyInternal(apiKey string) *User {
-	hashedKey := hashApiKey(apiKey)
-
-	if as.defaultApiKeyHash != "" && hashedKey == as.defaultApiKeyHash {
-		return &User{
-			ID:      "default",
-			Name:    "Default Admin",
-			Role:    "admin",
-			Enabled: true,
-		}
-	}
-
-	for _, user := range as.users {
-		if user.ApiKeyHash == hashedKey {
-			return user
-		}
-	}
-
-	return nil
 }
 
 func (as *AuthService) GenerateApiKey(userId string) string {

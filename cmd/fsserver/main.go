@@ -281,6 +281,10 @@ func main() {
 	// Auth
 	authSvc := auth.NewAuthService()
 	authSvc.Init(cfg.Auth.Enabled, cfg.Auth.Secret)
+	// Wire API key lookup so keys created via the management API are validated against the database.
+	authSvc.SetApiKeyLookup(func(ctx context.Context, keyHash string) (*database.ApiKey, error) {
+		return database.NewApiKeyService(queryDB).GetByKeyHash(keyHash)
+	})
 
 	// Crypto
 	cryptoSvc := crypto.NewCryptoService()
@@ -320,7 +324,7 @@ func main() {
 
 	// Services
 	fm := filemanager.NewFileManagerWithDistLock(store, queryDB, distLock)
-	dirSvc := directory.NewDirectoryManager(queryDB)
+	dirSvc := directory.NewDirectoryManagerWithStore(queryDB, store)
 	flSvc := filelist.NewFileListService(queryDB)
 	transferSvc := transfer.NewFileTransferServiceWithRedis(store, queryDB, sessionStore, distLock)
 	transferSvc.SetCryptoService(cryptoSvc)

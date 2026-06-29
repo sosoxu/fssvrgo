@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -96,22 +97,78 @@ func (lg *LockGuard) Unlock() error {
 }
 
 type LocalDistributedLock struct {
+	mu    sync.Mutex
+	locks map[string]*localLockEntry
+}
+
+type localLockEntry struct {
+	token  string
+	expiry time.Time
 }
 
 func NewLocalDistributedLock() *LocalDistributedLock {
-	return &LocalDistributedLock{}
+	return &LocalDistributedLock{locks: make(map[string]*localLockEntry)}
 }
 
 func (l *LocalDistributedLock) Lock(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	return "local", nil
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.locks[key]; ok {
+		if l.expiredLocked(e) {
+			delete(l.locks, key)
+		} else {
+			return "", ErrLockConflict
+		}
+	}
+	token := generateToken()
+	var expiry time.Time
+	if ttl > 0 {
+		expiry = time.Now().Add(ttl)
+	}
+	l.locks[key] = &localLockEntry{token: token, expiry: expiry}
+	return token, nil
 }
 
 func (l *LocalDistributedLock) Unlock(ctx context.Context, key string, token string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.locks[key]
+	if !ok {
+		return ErrLockNotHeld
+	}
+	if l.expiredLocked(e) {
+		delete(l.locks, key)
+		return ErrLockNotHeld
+	}
+	if e.token != token {
+		return ErrLockNotHeld
+	}
+	delete(l.locks, key)
 	return nil
 }
 
 func (l *LocalDistributedLock) Extend(ctx context.Context, key string, token string, ttl time.Duration) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.locks[key]
+	if !ok {
+		return ErrLockNotHeld
+	}
+	if l.expiredLocked(e) {
+		delete(l.locks, key)
+		return ErrLockNotHeld
+	}
+	if e.token != token {
+		return ErrLockNotHeld
+	}
+	if ttl > 0 {
+		e.expiry = time.Now().Add(ttl)
+	}
 	return nil
+}
+
+func (l *LocalDistributedLock) expiredLocked(e *localLockEntry) bool {
+	return !e.expiry.IsZero() && time.Now().After(e.expiry)
 }
 
 func AcquireLock(ctx context.Context, dl DistributedLock, key string, ttl time.Duration, retryCount int, retryDelay time.Duration) (string, error) {

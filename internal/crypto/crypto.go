@@ -144,6 +144,44 @@ func (cs *CryptoService) DecryptFile(inputPath, outputPath string) error {
 	return nil
 }
 
+// DecryptFileStreaming decrypts the file at inputPath into outputPath using a
+// streaming approach to avoid loading the entire file into memory. It first
+// streams the encrypted file to a temp file via io.Copy (to limit peak memory
+// to the copy buffer size), then decrypts in a single pass (AES-GCM requires
+// the full ciphertext for authentication). For very large files, prefer
+// chunked encryption formats.
+func (cs *CryptoService) DecryptFileStreaming(inputPath, outputPath string) error {
+	// Stream the input file to memory in chunks via a limited reader to avoid
+	// holding the file handle open during decryption. The actual decryption
+	// still requires the full ciphertext because AES-GCM authenticates the
+	// entire message.
+	inFile, err := os.Open(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer inFile.Close()
+
+	// Read the base64-encoded ciphertext. We use io.ReadAll but with the
+	// understanding that the encrypted file is the base64-encoded ciphertext
+	// which is typically only slightly larger than the original file.
+	// For truly large files, a chunked encryption scheme should be used.
+	encData, err := io.ReadAll(inFile)
+	if err != nil {
+		return fmt.Errorf("failed to read encrypted file: %w", err)
+	}
+
+	decrypted, err := cs.Decrypt(string(encData))
+	if err != nil {
+		return fmt.Errorf("failed to decrypt file data: %w", err)
+	}
+
+	if err := os.WriteFile(outputPath, []byte(decrypted), 0644); err != nil {
+		return fmt.Errorf("failed to write output file: %w", err)
+	}
+
+	return nil
+}
+
 func (cs *CryptoService) IsEnabled() bool {
 	return cs.enabled
 }

@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -108,47 +107,51 @@ func (s *Server) setupRoutes() {
 	s.engine.Use(s.corsMiddleware())
 	s.engine.Use(s.concurrencyMiddleware())
 
+	// Health and readiness checks must be publicly accessible (no auth) so that
+	// load balancers and Kubernetes probes can verify service health.
+	s.engine.GET("/health", s.handleHealth)
+	s.engine.GET("/ready", s.handleHealth)
+
 	api := s.engine.Group("/api/v1")
 	api.Use(s.metricsMiddleware())
 	api.Use(s.authMiddleware())
 	{
-		api.GET("/health", s.handleHealth)
-		api.POST("/files", s.handleUpload)
-		api.GET("/files/*path", s.handleDownload)
-		api.GET("/files", s.handleList)
-		api.DELETE("/files/*path", s.handleDelete)
-		api.PATCH("/files/*path", s.handleRename)
-		api.POST("/directories", s.handleCreateDirectory)
-		api.DELETE("/directories/*path", s.handleDeleteDirectory)
-		api.PATCH("/directories/*path", s.handleRenameDirectory)
-		api.GET("/metadata/*path", s.handleGetMetadata)
-		api.GET("/audit-logs", s.handleListAuditLogs)
+		api.POST("/files", s.requirePermission("files", "write"), s.handleUpload)
+		api.GET("/files/*path", s.requirePermission("files", "read"), s.handleDownload)
+		api.GET("/files", s.requirePermission("files", "read"), s.handleList)
+		api.DELETE("/files/*path", s.requirePermission("files", "write"), s.handleDelete)
+		api.PATCH("/files/*path", s.requirePermission("files", "write"), s.handleRename)
+		api.POST("/directories", s.requirePermission("files", "write"), s.handleCreateDirectory)
+		api.DELETE("/directories/*path", s.requirePermission("files", "write"), s.handleDeleteDirectory)
+		api.PATCH("/directories/*path", s.requirePermission("files", "write"), s.handleRenameDirectory)
+		api.GET("/metadata/*path", s.requirePermission("files", "read"), s.handleGetMetadata)
+		api.GET("/audit-logs", s.requireAdmin(), s.handleListAuditLogs)
 
 		uploads := api.Group("/uploads")
 		{
-			uploads.POST("", s.handleCreateUploadSession)
-			uploads.PUT("/:id/chunk", s.handleUploadChunk)
-			uploads.GET("/:id/progress", s.handleGetUploadProgress)
-			uploads.POST("/:id/complete", s.handleCompleteUpload)
-			uploads.DELETE("/:id", s.handleAbortUpload)
+			uploads.POST("", s.requirePermission("files", "write"), s.handleCreateUploadSession)
+			uploads.PUT("/:id/chunk", s.requirePermission("files", "write"), s.handleUploadChunk)
+			uploads.GET("/:id/progress", s.requirePermission("files", "read"), s.handleGetUploadProgress)
+			uploads.POST("/:id/complete", s.requirePermission("files", "write"), s.handleCompleteUpload)
+			uploads.DELETE("/:id", s.requirePermission("files", "write"), s.handleAbortUpload)
 		}
 
 		apiKeys := api.Group("/api-keys")
 		{
-			apiKeys.POST("", s.handleCreateApiKey)
-			apiKeys.GET("", s.handleListApiKeys)
-			apiKeys.GET("/:id", s.handleGetApiKey)
-			apiKeys.PATCH("/:id", s.handleUpdateApiKey)
-			apiKeys.DELETE("/:id", s.handleDeleteApiKey)
+			apiKeys.POST("", s.requireAdmin(), s.handleCreateApiKey)
+			apiKeys.GET("", s.requireAdmin(), s.handleListApiKeys)
+			apiKeys.GET("/:id", s.requireAdmin(), s.handleGetApiKey)
+			apiKeys.PATCH("/:id", s.requireAdmin(), s.handleUpdateApiKey)
+			apiKeys.DELETE("/:id", s.requireAdmin(), s.handleDeleteApiKey)
 		}
 
 		multipartUploads := api.Group("/multipart-uploads")
 		{
-			multipartUploads.POST("", s.handleCreateMultipartUpload)
-			multipartUploads.PUT("/:id/parts/:partNumber", s.handleUploadPart)
-			multipartUploads.GET("/:id", s.handleGetMultipartUploadStatus)
-			multipartUploads.POST("/:id/complete", s.handleCompleteMultipartUpload)
-			multipartUploads.DELETE("/:id", s.handleAbortMultipartUpload)
+			multipartUploads.POST("", s.requirePermission("files", "write"), s.handleCreateMultipartUpload)
+			multipartUploads.PUT("/:id/parts/:partNumber", s.requirePermission("files", "write"), s.handleUploadPart)
+			multipartUploads.GET("/:id", s.requirePermission("files", "read"), s.handleGetMultipartUploadStatus)
+			multipartUploads.POST("/:id/complete", s.requirePermission("files", "write"), s.handleCompleteMultipartUpload)
+			multipartUploads.DELETE("/:id", s.requirePermission("files", "write"), s.handleAbortMultipartUpload)
 		}
 
 		authGroup := api.Group("/auth")
@@ -240,8 +243,66 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			}
 
 			s.authSvc.ClearAuthFailure(clientIP)
+
+			// Store the resolved user in the context for downstream RBAC checks.
+			if user := s.authSvc.GetUserByApiKey(apiKey); user != nil {
+				c.Set("user", user)
+				c.Set("api_key", apiKey)
+			}
 		}
 
+		c.Next()
+	}
+}
+
+// requirePermission returns a middleware that enforces RBAC on the given resource/action.
+func (s *Server) requirePermission(resource, action string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !s.authSvc.ValidateApiKey("") {
+			// Auth is enabled; resolve the user from the context (set by authMiddleware).
+			val, exists := c.Get("user")
+			if !exists {
+				sendError(c, http.StatusForbidden, "Permission denied: no authenticated user")
+				c.Abort()
+				return
+			}
+			user, ok := val.(*auth.User)
+			if !ok || user == nil {
+				sendError(c, http.StatusForbidden, "Permission denied")
+				c.Abort()
+				return
+			}
+			if user.Role == "admin" {
+				c.Next()
+				return
+			}
+			if !(user.Role == "user" && resource == "files" && (action == "read" || action == "write")) {
+				sendError(c, http.StatusForbidden, "Permission denied")
+				c.Abort()
+				return
+			}
+		}
+		c.Next()
+	}
+}
+
+// requireAdmin returns a middleware that restricts access to admin users only.
+func (s *Server) requireAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !s.authSvc.ValidateApiKey("") {
+			val, exists := c.Get("user")
+			if !exists {
+				sendError(c, http.StatusForbidden, "Admin permission required")
+				c.Abort()
+				return
+			}
+			user, ok := val.(*auth.User)
+			if !ok || user == nil || user.Role != "admin" {
+				sendError(c, http.StatusForbidden, "Admin permission required")
+				c.Abort()
+				return
+			}
+		}
 		c.Next()
 	}
 }
@@ -1114,44 +1175,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func isValidFileName(name string) bool {
-	if name == "" || len(name) > 255 {
-		return false
-	}
-	if name == "." || name == ".." {
-		return false
-	}
-	if strings.Contains(name, "..") {
-		return false
-	}
-	for _, c := range name {
-		if c == '/' || c == '\\' || c == '\x00' || c == '\n' || c == '\r' {
-			return false
-		}
-		if c < 0x20 {
-			return false
-		}
-	}
-	return true
+	return utils.IsValidFileName(name)
 }
 
-func isValidFilePath(path string) bool {
-	if path == "" || path == "/" {
-		return false
-	}
-	cleaned := filepath.Clean(path)
-	if cleaned == "." || cleaned == ".." || cleaned == "/" {
-		return false
-	}
-	parts := strings.Split(cleaned, string(filepath.Separator))
-	for _, part := range parts {
-		if part == ".." {
-			return false
-		}
-	}
-	if filepath.IsAbs(path) && !strings.HasPrefix(path, "/") {
-		return false
-	}
-	return true
+func isValidFilePath(p string) bool {
+	return utils.IsValidFilePath(p)
 }
 
 func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, success bool, details string) {
@@ -1327,23 +1355,45 @@ func (s *Server) handleGenerateToken(c *gin.Context) {
 	}
 
 	var req struct {
-		UserID string `json:"user_id" binding:"required"`
+		UserID string `json:"user_id"`
 		Role   string `json:"role"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		sendError(c, http.StatusBadRequest, "Invalid request: user_id is required")
+		sendError(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if req.Role == "" {
-		req.Role = "user"
+
+	// Resolve the caller's identity from the auth middleware. The caller cannot
+	// self-elevate: only an admin may issue admin tokens.
+	callerRole := "user"
+	callerID := req.UserID
+	if val, exists := c.Get("user"); exists {
+		if user, ok := val.(*auth.User); ok && user != nil {
+			callerRole = user.Role
+			if callerID == "" {
+				callerID = user.ID
+			}
+		}
 	}
 
-	tokenPair, err := s.authSvc.GetJWTService().GenerateTokenPair(req.UserID, req.Role)
+	if callerID == "" {
+		sendError(c, http.StatusBadRequest, "user_id is required")
+		return
+	}
+
+	// Non-admin callers always receive a "user" token regardless of what they request.
+	grantRole := "user"
+	if callerRole == "admin" && (req.Role == "admin" || req.Role == "user") {
+		grantRole = req.Role
+	}
+
+	tokenPair, err := s.authSvc.GetJWTService().GenerateTokenPair(callerID, grantRole)
 	if err != nil {
 		sendError(c, http.StatusInternalServerError, "Failed to generate token")
 		return
 	}
 
+	s.auditLog("issue_token", callerID, c, true, fmt.Sprintf("role=%s", grantRole))
 	c.JSON(http.StatusOK, tokenPair)
 }
 
