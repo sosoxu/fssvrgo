@@ -1,7 +1,6 @@
 package database
 
 import (
-	"os"
 	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/logger"
@@ -61,8 +60,10 @@ func (s *CleanupService) cleanup() {
 	}
 
 	for _, file := range files {
-		// Delete storage file
-		if err := s.store.Remove(file.Path); err != nil && !os.IsNotExist(err) {
+		// Delete storage file. storage.IsNotExist works for both local
+		// (os.ErrNotExist) and MinIO (NoSuchKey) backends; using os.IsNotExist
+		// here would only handle the local filesystem backend.
+		if err := s.store.Remove(file.Path); err != nil && !storage.IsNotExist(err) {
 			logger.Error("Failed to remove storage file %s: %v", file.Path, err)
 			continue
 		}

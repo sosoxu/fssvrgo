@@ -61,11 +61,19 @@ func (ms *MinIOStorage) ValidatePath(objectKey string) error {
 	if objectKey == "" {
 		return fmt.Errorf("object key cannot be empty")
 	}
-	if strings.Contains(objectKey, "..") {
-		return fmt.Errorf("path traversal detected: %s", objectKey)
-	}
 	if strings.HasPrefix(objectKey, "/") {
 		return fmt.Errorf("object key must not start with /: %s", objectKey)
+	}
+	// Inspect each path segment so that legitimate names containing ".." as a
+	// substring (e.g. "file..txt", "ver..1.0") are not falsely rejected as a
+	// traversal. Only a complete ".." segment denotes a parent-directory
+	// traversal. A trailing "/" is allowed because it is used as a directory
+	// marker by CreateDirectory/RemoveDirectory.
+	segments := strings.Split(strings.TrimSuffix(objectKey, "/"), "/")
+	for _, part := range segments {
+		if part == ".." {
+			return fmt.Errorf("path traversal detected: %s", objectKey)
+		}
 	}
 	return nil
 }
@@ -156,6 +164,12 @@ func (ms *MinIOStorage) WriteAt(objectKey string, data []byte, offset int64) err
 
 func (ms *MinIOStorage) WriteFromTempFile(objectKey string, tempFilePath string) error {
 	if err := ms.validatePath(objectKey); err != nil {
+		return err
+	}
+	// Validate that the temp file is inside the system temp directory, mirroring
+	// LocalStorage. Without this, the MinIO backend would happily upload any
+	// local file (e.g. /etc/shadow) referenced by an untrusted caller.
+	if err := validateTempFilePath(tempFilePath); err != nil {
 		return err
 	}
 
@@ -305,13 +319,40 @@ func (ms *MinIOStorage) Exists(objectKey string) bool {
 	}
 
 	key := ms.normalizeKey(objectKey)
-	if strings.HasSuffix(objectKey, "/") && !strings.HasSuffix(key, "/") {
-		key = key + "/"
-	}
 	ctx := context.Background()
 
-	_, err := ms.client.StatObject(ctx, ms.bucket, key, minio.StatObjectOptions{})
-	return err == nil
+	// Try exact object match first (covers both leaf objects and explicit
+	// directory markers written as "<key>/").
+	lookupKey := key
+	if strings.HasSuffix(objectKey, "/") && !strings.HasSuffix(key, "/") {
+		lookupKey = key + "/"
+	}
+	if _, err := ms.client.StatObject(ctx, ms.bucket, lookupKey, minio.StatObjectOptions{}); err == nil {
+		return true
+	}
+
+	// No exact object exists. For a non-marker key (not ending with "/"), fall
+	// back to checking whether any child object exists under the "<key>/"
+	// prefix. This makes Exists("foo") consistent with LocalStorage, where a
+	// directory is reported as existing whenever it contains children.
+	if !strings.HasSuffix(key, "/") {
+		listCtx, cancel := context.WithCancel(ctx)
+		objectCh := ms.client.ListObjects(listCtx, ms.bucket, minio.ListObjectsOptions{
+			Prefix:    key + "/",
+			Recursive: false,
+		})
+		found := false
+		for obj := range objectCh {
+			if obj.Err != nil {
+				break
+			}
+			found = true
+			break
+		}
+		cancel()
+		return found
+	}
+	return false
 }
 
 func (ms *MinIOStorage) List(prefix string) ([]string, error) {

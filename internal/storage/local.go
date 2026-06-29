@@ -133,12 +133,8 @@ func (ls *LocalStorage) WriteFromTempFile(path string, tempFilePath string) erro
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
-	absTemp, err := filepath.Abs(tempFilePath)
-	if err != nil {
-		return fmt.Errorf("invalid temp file path: %w", err)
-	}
-	if !strings.HasPrefix(absTemp, os.TempDir()) && !strings.HasPrefix(absTemp, "/tmp/") {
-		return fmt.Errorf("temp file must be in system temp directory: %s", tempFilePath)
+	if err := validateTempFilePath(tempFilePath); err != nil {
+		return err
 	}
 	mu := ls.getLock(path)
 	mu.Lock()
@@ -150,7 +146,7 @@ func (ls *LocalStorage) WriteFromTempFile(path string, tempFilePath string) erro
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	err = os.Rename(tempFilePath, fullPath)
+	err := os.Rename(tempFilePath, fullPath)
 	if err == nil {
 		return nil
 	}

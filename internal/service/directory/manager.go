@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/logger"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
@@ -41,7 +42,23 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 		IsDeleted: false,
 	}
 
-	return database.NewDirectoryMetadataService(dm.db).Create(meta)
+	if err := database.NewDirectoryMetadataService(dm.db).Create(meta); err != nil {
+		return err
+	}
+
+	// Create the directory marker in the storage backend so that the directory
+	// is visible to store-level operations (Exists/List) on both backends.
+	// On MinIO this creates a 0-byte "<path>/" marker object; on LocalStorage
+	// this creates the physical directory. Failure is best-effort: the DB
+	// record is the source of truth and LocalStorage will also auto-create the
+	// directory on first file write, so we only warn.
+	if dm.store != nil {
+		if err := dm.store.CreateDirectory(path); err != nil {
+			logger.Warn("failed to create directory marker in storage for %s: %v", path, err)
+		}
+	}
+
+	return nil
 }
 
 func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
