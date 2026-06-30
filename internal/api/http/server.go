@@ -55,6 +55,15 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 	engine := gin.New()
 	engine.Use(gin.Recovery())
 
+	// Mirror config.applyDefaults: when NewServer is constructed directly
+	// (e.g. in tests that bypass config.Load), Workers may be 0, which
+	// would make the concurrency semaphore unbuffered and reject every
+	// request with 503. Guard against that footgun.
+	workers := cfg.Workers
+	if workers < 1 {
+		workers = 8
+	}
+
 	s := &Server{
 		config:        cfg,
 		tlsCfg:        tlsCfg,
@@ -74,7 +83,7 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 		maxChunkSize:  int64(cfg.MaxChunkSizeMB) * 1024 * 1024,
 		maxPageSize:     cfg.MaxPageSize,
 		startTime:       time.Now(),
-		concurrencySem:  make(chan struct{}, cfg.Workers*4),
+		concurrencySem:  make(chan struct{}, workers*4),
 	}
 
 	engine.MaxMultipartMemory = 32 << 20 // 32MB in-memory cache for multipart forms; excess spills to temp files

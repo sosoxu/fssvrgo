@@ -128,7 +128,9 @@ func TestHealthCheck(t *testing.T) {
 	defer ts.Cleanup()
 
 	t.Run("returns 200 with status ok database ok storage ok", func(t *testing.T) {
-		resp, err := http.Get(ts.BaseURL + "/api/v1/health")
+		// /ready (readiness probe) returns both database and storage status;
+		// /health (liveness probe) only returns database status.
+		resp, err := http.Get(ts.BaseURL + "/ready")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -264,7 +266,9 @@ func TestUploadDuplicateFile(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	t.Run("second upload returns 500", func(t *testing.T) {
+	t.Run("second upload overwrites (idempotent)", func(t *testing.T) {
+		// Per design: idempotent upload — uploading to an existing path
+		// overwrites the file and returns 201, not 500.
 		data := []byte("duplicate content")
 		resp1 := doUpload(t, ts, "dup.txt", "dup.txt", data)
 		resp1.Body.Close()
@@ -276,8 +280,8 @@ func TestUploadDuplicateFile(t *testing.T) {
 		resp2 := doUpload(t, ts, "dup.txt", "dup.txt", data)
 		defer resp2.Body.Close()
 
-		if resp2.StatusCode != http.StatusInternalServerError {
-			t.Fatalf("second upload expected status 500, got %d", resp2.StatusCode)
+		if resp2.StatusCode != http.StatusCreated {
+			t.Fatalf("second upload expected status 201 (idempotent overwrite), got %d", resp2.StatusCode)
 		}
 	})
 }
