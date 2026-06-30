@@ -1,4 +1,4 @@
-# go-fsserver 设计文档
+# fssvrgo 设计文档
 
 ## 1. 系统架构
 

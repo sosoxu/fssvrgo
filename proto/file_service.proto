@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package fsserver;
 
-option go_package = "github.com/sosoxu/go-fsserver/proto";
+option go_package = "github.com/sosoxu/fssvrgo/proto";
 
 import "google/protobuf/timestamp.proto";
 

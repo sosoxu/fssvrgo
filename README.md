@@ -1,4 +1,4 @@
-# go-fsserver
+# fssvrgo
 
 高性能分布式文件存储服务，支持 HTTP 和 gRPC 双协议访问，提供大文件分段并发传输、多实例部署数据一致性保障。
 
@@ -53,7 +53,7 @@
 ## 项目结构
 
 ```
-go-fsserver/
+fssvrgo/
 ├── cmd/
 │   └── fsserver/          # 程序入口
 │       └── main.go

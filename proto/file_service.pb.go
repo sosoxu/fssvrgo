@@ -1450,7 +1450,7 @@ const file_proto_file_service_proto_rawDesc = "" +
 	"\x0fCreateDirectory\x12 .fsserver.CreateDirectoryRequest\x1a!.fsserver.CreateDirectoryResponse\x12V\n" +
 	"\x0fDeleteDirectory\x12 .fsserver.DeleteDirectoryRequest\x1a!.fsserver.DeleteDirectoryResponse\x12V\n" +
 	"\x0fRenameDirectory\x12 .fsserver.RenameDirectoryRequest\x1a!.fsserver.RenameDirectoryResponse\x12J\n" +
-	"\vGetMetadata\x12\x1c.fsserver.GetMetadataRequest\x1a\x1d.fsserver.GetMetadataResponseB%Z#github.com/sosoxu/go-fsserver/protob\x06proto3"
+	"\vGetMetadata\x12\x1c.fsserver.GetMetadataRequest\x1a\x1d.fsserver.GetMetadataResponseB!Z\x1fgithub.com/sosoxu/fssvrgo/protob\x06proto3"
 
 var (
 	file_proto_file_service_proto_rawDescOnce sync.Once
