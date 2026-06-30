@@ -136,7 +136,7 @@ func TestCompleteUpload(t *testing.T) {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	if err := svc.CompleteUpload(sessionID); err != nil {
+	if _, err := svc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestCompleteUploadSizeMismatch(t *testing.T) {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	err = svc.CompleteUpload(sessionID)
+	_, err = svc.CompleteUpload(sessionID)
 	if err == nil {
 		t.Errorf("expected size mismatch error, got nil")
 	}
@@ -186,7 +186,7 @@ func TestCompleteUploadHashMismatch(t *testing.T) {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	err = svc.CompleteUpload(sessionID)
+	_, err = svc.CompleteUpload(sessionID)
 	if err == nil {
 		t.Errorf("expected hash mismatch error, got nil")
 	}
@@ -447,7 +447,7 @@ func TestLargeFileStreamingUpload(t *testing.T) {
 		offset = end
 	}
 
-	if err := svc.CompleteUpload(sessionID); err != nil {
+	if _, err := svc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 

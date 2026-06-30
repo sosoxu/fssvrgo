@@ -233,7 +233,7 @@ func TestPostgreSQL_StreamingUploadDownload(t *testing.T) {
 		offset = end
 	}
 
-	if err := transferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := transferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 

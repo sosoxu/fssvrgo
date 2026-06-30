@@ -266,7 +266,21 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 	return nil
 }
 
-func (s *FileTransferService) CompleteUpload(sessionID string) error {
+// CompleteUploadResult describes the outcome of a completed upload, including
+// whether a client-provided hash was present and verified. This makes the
+// integrity-check semantics explicit: a client that omits the hash gets
+// HashProvided=false (no verification performed), while one that supplies a
+// hash gets HashProvided=true and HashVerified=true (or the call fails with
+// a hash mismatch error before returning).
+type CompleteUploadResult struct {
+	FileID        string
+	HashProvided  bool
+	HashVerified  bool
+	UploadedSize  int64
+	StorageType   string
+}
+
+func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadResult, error) {
 	val, ok := s.uploadSessions.Load(sessionID)
 	if !ok {
 		ctx := context.Background()
@@ -287,13 +301,13 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 	}
 
 	if !ok {
-		return fmt.Errorf("upload session not found: %s", sessionID)
+		return nil, fmt.Errorf("upload session not found: %s", sessionID)
 	}
 
 	session := val.(*UploadSession)
 
 	if atomic.LoadInt64(&session.UploadedSize) != session.TotalSize {
-		return fmt.Errorf("upload incomplete: expected %d bytes, got %d bytes", session.TotalSize, atomic.LoadInt64(&session.UploadedSize))
+		return nil, fmt.Errorf("upload incomplete: expected %d bytes, got %d bytes", session.TotalSize, atomic.LoadInt64(&session.UploadedSize))
 	}
 
 	atomic.StoreInt32(&session.closed, 1)
@@ -305,12 +319,12 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 			session.tempFile = nil
 			session.tempFileMu.Unlock()
 			os.Remove(filepath.Join(s.tempDir, sessionID+".tmp"))
-			return fmt.Errorf("failed to sync temp file: %w", err)
+			return nil, fmt.Errorf("failed to sync temp file: %w", err)
 		}
 		if err := session.tempFile.Close(); err != nil {
 			session.tempFile = nil
 			session.tempFileMu.Unlock()
-			return fmt.Errorf("failed to close temp file: %w", err)
+			return nil, fmt.Errorf("failed to close temp file: %w", err)
 		}
 		session.tempFile = nil
 	}
@@ -318,6 +332,12 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 
+	// Hash verification: when the client supplied a hash (session.Hash != "")
+	// the computed hash MUST match, otherwise the upload is rejected. When the
+	// client did not supply a hash, verification is skipped and the result
+	// reports HashProvided=false so callers can tell the two cases apart.
+	hashProvided := session.Hash != ""
+	hashVerified := false
 	if session.Hash != "" {
 		var computedHash string
 		if session.hashWriter != nil && atomic.LoadInt32(&session.hashValid) == 1 {
@@ -328,14 +348,15 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 			var err error
 			computedHash, err = utils.SHA256File(tempPath)
 			if err != nil {
-				return fmt.Errorf("failed to compute hash: %w", err)
+				return nil, fmt.Errorf("failed to compute hash: %w", err)
 			}
 		}
 		if computedHash != session.Hash {
 			os.Remove(tempPath)
 			s.uploadSessions.Delete(sessionID)
-			return fmt.Errorf("hash mismatch: expected %s, got %s", session.Hash, computedHash)
+			return nil, fmt.Errorf("hash mismatch: expected %s, got %s", session.Hash, computedHash)
 		}
+		hashVerified = true
 	}
 
 	// Encrypt the temp file before writing to storage if encryption is enabled
@@ -346,7 +367,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 		if err := s.cryptoSvc.EncryptFile(tempPath, encTempPath); err != nil {
 			os.Remove(tempPath)
 			s.uploadSessions.Delete(sessionID)
-			return fmt.Errorf("failed to encrypt file: %w", err)
+			return nil, fmt.Errorf("failed to encrypt file: %w", err)
 		}
 		os.Remove(tempPath)
 
@@ -356,7 +377,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 		if err != nil {
 			os.Remove(encTempPath)
 			s.uploadSessions.Delete(sessionID)
-			return fmt.Errorf("failed to compute encrypted hash: %w", err)
+			return nil, fmt.Errorf("failed to compute encrypted hash: %w", err)
 		}
 		storageTempPath = encTempPath
 	}
@@ -364,14 +385,14 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 	token, err := distributed.AcquireLock(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
-		return fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
+		return nil, fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
 	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
 
 	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
-		return fmt.Errorf("failed to write file from temp: %w", err)
+		return nil, fmt.Errorf("failed to write file from temp: %w", err)
 	}
 
 	now := utils.GetCurrentTimestamp()
@@ -389,7 +410,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
 		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
-			return fmt.Errorf("failed to update file metadata: %w", err)
+			return nil, fmt.Errorf("failed to update file metadata: %w", err)
 		}
 		meta = existingMeta
 	} else {
@@ -408,7 +429,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 
 		if err := database.NewFileMetadataService(s.db).Create(meta); err != nil {
 			s.storage.Remove(session.FilePath)
-			return fmt.Errorf("failed to create file metadata: %w", err)
+			return nil, fmt.Errorf("failed to create file metadata: %w", err)
 		}
 	}
 
@@ -425,7 +446,13 @@ func (s *FileTransferService) CompleteUpload(sessionID string) error {
 		logger.Warn("Failed to delete session from store: %v", err)
 	}
 
-	return nil
+	return &CompleteUploadResult{
+		FileID:        meta.ID,
+		HashProvided:  hashProvided,
+		HashVerified:  hashVerified,
+		UploadedSize:  session.TotalSize,
+		StorageType:   s.storage.StorageType(),
+	}, nil
 }
 
 func (s *FileTransferService) AbortUpload(sessionID string) error {

@@ -723,7 +723,7 @@ func benchmarkGRPCStreamingUpload(b *testing.B, size int) {
 			}
 		}
 
-		if err := inst.TransferSvc.CompleteUpload(sessionID); err != nil {
+		if _, err := inst.TransferSvc.CompleteUpload(sessionID); err != nil {
 			b.Fatalf("complete upload failed: %v", err)
 		}
 	}
@@ -753,7 +753,7 @@ func benchmarkGRPCStreamingDownload(b *testing.B, size int) {
 		}
 		inst.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
 	}
-	inst.TransferSvc.CompleteUpload(sessionID)
+	_, _ = inst.TransferSvc.CompleteUpload(sessionID)
 
 	b.ResetTimer()
 	b.SetBytes(int64(size))
@@ -987,7 +987,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 				}
 				inst.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
 			}
-			err = inst.TransferSvc.CompleteUpload(sessionID)
+			_, err = inst.TransferSvc.CompleteUpload(sessionID)
 			dur := time.Since(start)
 			if err != nil {
 				results = append(results, PerfResult{Operation: "StreamUpload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})

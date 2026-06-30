@@ -230,9 +230,11 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 		return fmt.Errorf("no metadata received in upload stream")
 	}
 
-	if err := s.transferSvc.CompleteUpload(sessionID); err != nil {
+	result, err := s.transferSvc.CompleteUpload(sessionID)
+	if err != nil {
 		return fmt.Errorf("failed to complete upload: %w", err)
 	}
+	_ = result // hash verification status is surfaced via HTTP API; gRPC response already carries file metadata
 
 	meta, err := s.fm.GetFileMetadata(filePath)
 	if err != nil {

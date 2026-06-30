@@ -474,7 +474,7 @@ func testTransfer_EmptyFileUpload(t *testing.T) {
 	}
 
 	// No chunks needed for an empty file (UploadedSize 0 == TotalSize 0).
-	if err := env.transferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.transferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
@@ -506,7 +506,7 @@ func testTransfer_SingleChunkUpload(t *testing.T) {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	if err := env.transferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.transferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
@@ -538,7 +538,7 @@ func testTransfer_HashMismatch(t *testing.T) {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	err = env.transferSvc.CompleteUpload(sessionID)
+	_, err = env.transferSvc.CompleteUpload(sessionID)
 	if err == nil {
 		t.Fatalf("expected hash mismatch error, got nil")
 	}

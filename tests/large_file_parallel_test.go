@@ -397,7 +397,7 @@ func TestIncrementalHash_SequentialUpload(t *testing.T) {
 	}
 
 	start := time.Now()
-	if err := env.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 	completeDuration := time.Since(start)
@@ -583,7 +583,7 @@ func TestSequentialVsParallel_Upload(t *testing.T) {
 		}
 		uploadDuration := time.Since(start)
 
-		if err := env.TransferSvc.CompleteUpload(sessionID); err != nil {
+		if _, err := env.TransferSvc.CompleteUpload(sessionID); err != nil {
 			t.Fatalf("CompleteUpload failed: %v", err)
 		}
 
