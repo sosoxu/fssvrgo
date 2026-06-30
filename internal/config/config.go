@@ -165,8 +165,14 @@ func (c *Config) applyDefaults() {
 	if c.Server.MaxPageSize == 0 {
 		c.Server.MaxPageSize = 1000
 	}
+	// CORS: do NOT default to "*" (wildcard) — that would silently allow any
+	// origin in production. Leaving the field empty disables the
+	// Access-Control-Allow-Origin response header entirely, which is the safe
+	// default; operators must explicitly opt into cross-origin access by
+	// setting cors_allowed_origins to a specific origin list (or "*" only for
+	// trusted/internal deployments).
 	if c.Server.CORSAllowedOrigins == "" {
-		c.Server.CORSAllowedOrigins = "*"
+		c.Server.CORSAllowedOrigins = ""
 	}
 	if c.Storage.Type == "" {
 		c.Storage.Type = "local"

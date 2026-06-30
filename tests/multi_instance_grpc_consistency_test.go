@@ -428,7 +428,7 @@ func TestMultiInstance_GRPCStreamingUploadSessionIsolation(t *testing.T) {
 		offset = end
 	}
 
-	if err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 
@@ -545,7 +545,7 @@ func TestMultiInstance_GRPCStreamingUploadWithHashVerification(t *testing.T) {
 		offset = end
 	}
 
-	if err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("Complete upload with hash verification failed: %v", err)
 	}
 
@@ -676,7 +676,7 @@ func TestMultiInstance_GRPCCrossInstanceStreamingUploadDownload(t *testing.T) {
 		offset = end
 	}
 
-	if err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 

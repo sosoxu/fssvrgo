@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -135,6 +137,88 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 	if err := database.NewFileMetadataService(fm.db).Create(meta); err != nil {
 		fm.storage.Remove(path)
 		return nil, fmt.Errorf("failed to create file metadata: %w", err)
+	}
+
+	return meta, nil
+}
+
+// UploadFileFromReader streams the upload into storage without holding the full
+// file content in memory. It uses store.WriteFromReader and a streaming SHA-256
+// (io.TeeReader) so peak memory is bounded by the copy buffer rather than the
+// file size. Use this for large uploads instead of UploadFile.
+//
+// If the storage backend does not support streaming (WriteFromReader returns
+// ErrStreamingUnsupported), the caller should fall back to UploadFile.
+//
+// Unlike UploadFile, this path does NOT re-hash the existing file on overwrite;
+// the hash is computed once from the incoming stream.
+func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*database.FileMetadata, error) {
+	path = utils.NormalizePath(path)
+	fm.lockFile(path)
+	defer fm.unlockFile(path)
+
+	token, err := fm.distLockFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fm.distUnlockFile(path, token)
+
+	// Tee the stream through a SHA-256 writer so we compute the hash as bytes
+	// flow into storage, without buffering the whole file in memory.
+	hashWriter := sha256.New()
+	teeReader := io.TeeReader(reader, hashWriter)
+
+	if err := fm.storage.WriteFromReader(path, teeReader); err != nil {
+		return nil, fmt.Errorf("failed to write file from reader: %w", err)
+	}
+
+	// storage.WriteFromReader does not report bytes written, so re-stat the
+	// object to get its size rather than trusting the caller's size hint.
+	size, err := fm.storage.GetSize(path)
+	if err != nil {
+		// Fall back to a best-effort unknown size rather than failing the
+		// already-completed upload.
+		size = 0
+	}
+
+	hash := hex.EncodeToString(hashWriter.Sum(nil))
+	now := utils.GetCurrentTimestamp()
+	name := utils.GetFileName(path)
+
+	// Overwrite existing metadata if present (same overwrite semantics as
+	// UploadFile), otherwise create a new record.
+	existingMeta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		logger.Error("Failed to query existing metadata: %v", err)
+	}
+
+	var meta *database.FileMetadata
+	if existingMeta != nil {
+		existingMeta.Size = size
+		existingMeta.Hash = hash
+		existingMeta.UpdatedAt = now
+		existingMeta.IsDeleted = false
+		if err := database.NewFileMetadataService(fm.db).Update(existingMeta); err != nil {
+			return nil, fmt.Errorf("failed to update file metadata: %w", err)
+		}
+		meta = existingMeta
+	} else {
+		meta = &database.FileMetadata{
+			ID:              utils.GenerateUUID(),
+			Path:            path,
+			Name:            name,
+			Size:            size,
+			Hash:            hash,
+			StorageType:     fm.storage.StorageType(),
+			StorageLocation: "",
+			CreatedAt:       now,
+			UpdatedAt:       now,
+			IsDeleted:       false,
+		}
+		if err := database.NewFileMetadataService(fm.db).Create(meta); err != nil {
+			fm.storage.Remove(path)
+			return nil, fmt.Errorf("failed to create file metadata: %w", err)
+		}
 	}
 
 	return meta, nil

@@ -414,7 +414,8 @@ func grpcSequentialUpload(svc *transfer.FileTransferService, filePath string, da
 		}
 	}
 
-	return svc.CompleteUpload(sessionID)
+	_, err = svc.CompleteUpload(sessionID)
+	return err
 }
 
 func grpcMultipartUpload(svc *transfer.FileTransferService, filePath string, data []byte, concurrency int) error {
@@ -675,7 +676,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 			}
 			env.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
 		}
-		env.TransferSvc.CompleteUpload(sessionID)
+		_, _ = env.TransferSvc.CompleteUpload(sessionID)
 
 		for _, concurrency := range concurrencyLevels {
 			var durations []time.Duration
@@ -1127,7 +1128,7 @@ func benchmarkCompareHTTPDownload(b *testing.B, fileSize int64, segmented bool, 
 		}
 		env.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
 	}
-	env.TransferSvc.CompleteUpload(sessionID)
+	_, _ = env.TransferSvc.CompleteUpload(sessionID)
 
 	b.ResetTimer()
 	b.SetBytes(fileSize)
@@ -1190,7 +1191,7 @@ func benchmarkCompareGRPCDownload(b *testing.B, fileSize int64, segmented bool, 
 		}
 		env.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
 	}
-	env.TransferSvc.CompleteUpload(sessionID)
+	_, _ = env.TransferSvc.CompleteUpload(sessionID)
 
 	b.ResetTimer()
 	b.SetBytes(fileSize)

@@ -379,7 +379,7 @@ func TestGRPCStreamingUpload(t *testing.T) {
 		offset = end
 	}
 
-	if err := ts.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := ts.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
@@ -463,7 +463,7 @@ func TestGRPCUploadHashVerification(t *testing.T) {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	err = ts.TransferSvc.CompleteUpload(sessionID)
+	_, err = ts.TransferSvc.CompleteUpload(sessionID)
 	if err == nil {
 		t.Errorf("expected hash mismatch error, got nil")
 	}
@@ -477,7 +477,7 @@ func TestGRPCUploadHashVerification(t *testing.T) {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	if err := ts.TransferSvc.CompleteUpload(sessionID2); err != nil {
+	if _, err := ts.TransferSvc.CompleteUpload(sessionID2); err != nil {
 		t.Fatalf("CompleteUpload with correct hash failed: %v", err)
 	}
 }

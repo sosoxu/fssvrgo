@@ -899,7 +899,7 @@ func TestRedisLock_GRPCStreamingUploadWithRedisSession(t *testing.T) {
 		offset = end
 	}
 
-	if err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 
@@ -1187,7 +1187,7 @@ func TestRedisLock_GRPCStreamingUploadWithHashVerification(t *testing.T) {
 		offset = end
 	}
 
-	if err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("Complete upload with hash verification failed: %v", err)
 	}
 
@@ -1235,7 +1235,7 @@ func TestRedisLock_CrossInstanceStreamingUploadDownload(t *testing.T) {
 		offset = end
 	}
 
-	if err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 

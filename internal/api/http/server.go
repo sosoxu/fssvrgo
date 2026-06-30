@@ -104,13 +104,18 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 }
 
 func (s *Server) setupRoutes() {
+	// Request ID must run before everything else so logs, audit entries, and
+	// error responses can all reference the same correlation id.
+	s.engine.Use(s.requestIDMiddleware())
 	s.engine.Use(s.corsMiddleware())
 	s.engine.Use(s.concurrencyMiddleware())
 
 	// Health and readiness checks must be publicly accessible (no auth) so that
-	// load balancers and Kubernetes probes can verify service health.
+	// load balancers and Kubernetes probes can verify service health. /health is
+	// a cheap liveness probe (DB only); /ready additionally probes storage
+	// reachability, so it should be used as the readiness probe.
 	s.engine.GET("/health", s.handleHealth)
-	s.engine.GET("/ready", s.handleHealth)
+	s.engine.GET("/ready", s.handleReady)
 
 	api := s.engine.Group("/api/v1")
 	api.Use(s.metricsMiddleware())
@@ -167,21 +172,33 @@ func (s *Server) setupRoutes() {
 func (s *Server) corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
-		if s.corsOrigins == "*" || s.corsOrigins == "" {
-			c.Header("Access-Control-Allow-Origin", "*")
-		} else if origin != "" {
-			allowed := strings.Split(s.corsOrigins, ",")
-			for _, o := range allowed {
+
+		// Only emit Access-Control-Allow-Origin when an explicit allowlist is
+		// configured. An empty cors_allowed_origins (the safe default) means
+		// no CORS headers are sent, so browsers will block cross-origin
+		// requests — which is the desired posture for a production file
+		// service unless the operator explicitly opts in.
+		allowedOrigin := ""
+		if s.corsOrigins == "*" {
+			allowedOrigin = "*"
+		} else if s.corsOrigins != "" && origin != "" {
+			for _, o := range strings.Split(s.corsOrigins, ",") {
 				if strings.TrimSpace(o) == origin {
-					c.Header("Access-Control-Allow-Origin", origin)
+					allowedOrigin = origin
 					break
 				}
 			}
 		}
 
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
-		c.Header("Access-Control-Max-Age", "86400")
+		if allowedOrigin != "" {
+			c.Header("Access-Control-Allow-Origin", allowedOrigin)
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			c.Header("Access-Control-Max-Age", "86400")
+			if allowedOrigin != "*" {
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
+		}
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -202,6 +219,23 @@ func (s *Server) concurrencyMiddleware() gin.HandlerFunc {
 			sendError(c, http.StatusServiceUnavailable, "Server is busy, please try again later")
 			c.Abort()
 		}
+	}
+}
+
+// requestIDMiddleware ensures every request carries an X-Request-Id. If the
+// client supplied one it is honored (after trimming to a sane length);
+// otherwise a new UUID is generated. The id is stored in the gin.Context
+// ("request_id") and echoed back on the response so logs, audit entries, and
+// client-side correlation all share the same identifier.
+func (s *Server) requestIDMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		reqID := strings.TrimSpace(c.GetHeader("X-Request-Id"))
+		if reqID == "" || len(reqID) > 128 {
+			reqID = utils.GenerateUUID()
+		}
+		c.Set("request_id", reqID)
+		c.Header("X-Request-Id", reqID)
+		c.Next()
 	}
 }
 
@@ -321,6 +355,23 @@ func (s *Server) metricsMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
+	s.handleHealthCheck(c, false)
+}
+
+func (s *Server) handleReady(c *gin.Context) {
+	s.handleHealthCheck(c, true)
+}
+
+// handleHealthCheck implements a tiered probe:
+//   - liveness (/health): process + DB only — cheap, safe for high-frequency
+//     Kubernetes liveness probes.
+//   - readiness (/ready): also verifies storage reachability. To avoid the
+//     write/read/remove churn the previous implementation performed on every
+//     probe (which produced significant I/O under high-frequency probes), the
+//     storage check now issues a single lightweight GetSize on a probe key and
+//     treats "not exist" as healthy (the backend is reachable; the probe key
+//     simply does not exist). Other errors mark storage as degraded.
+func (s *Server) handleHealthCheck(c *gin.Context, includeStorage bool) {
 	status := gin.H{
 		"status":    "ok",
 		"timestamp": utils.GetCurrentTimestamp(),
@@ -338,21 +389,15 @@ func (s *Server) handleHealth(c *gin.Context) {
 		}
 	}
 
-	if s.store != nil {
-		healthPath := fmt.Sprintf("/health-check-%d", time.Now().UnixNano())
-		healthData := []byte("health")
-		if err := s.store.Write(healthPath, healthData); err == nil {
-			if readData, err := s.store.Read(healthPath); err == nil && string(readData) == "health" {
-				s.store.Remove(healthPath)
-				status["storage"] = "ok"
-			} else {
-				status["storage"] = "error"
-				status["status"] = "degraded"
-				s.store.Remove(healthPath)
-			}
-		} else {
+	if includeStorage && s.store != nil {
+		// Probe storage reachability without writing or deleting any object.
+		// A NoSuchKey/NotFound (or a successful stat) means the backend is
+		// reachable; only non-not-exist errors are treated as degraded.
+		if _, err := s.store.GetSize(".health-probe"); err != nil && !storage.IsNotExist(err) {
 			status["storage"] = "error"
 			status["status"] = "degraded"
+		} else {
+			status["storage"] = "ok"
 		}
 	}
 
@@ -393,29 +438,49 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
-	data, err := io.ReadAll(io.LimitReader(file, s.maxUploadSize+1))
-	if err != nil {
-		sendError(c, http.StatusInternalServerError, "Failed to read file data")
-		return
-	}
-
-	if int64(len(data)) > s.maxUploadSize {
-		sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
-		return
-	}
-
+	// Encryption requires the full plaintext in memory (AES-GCM authenticates
+	// the whole message), so for the encrypted path we still read the body —
+	// but bounded by maxUploadSize. For the non-encrypted path we stream the
+	// multipart body straight into storage via UploadFileFromReader so peak
+	// memory stays bounded by the copy buffer instead of the file size,
+	// avoiding OOM under concurrent large uploads (#33).
 	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
+		data, err := io.ReadAll(io.LimitReader(file, s.maxUploadSize+1))
+		if err != nil {
+			sendError(c, http.StatusInternalServerError, "Failed to read file data")
+			return
+		}
+		if int64(len(data)) > s.maxUploadSize {
+			sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
+			return
+		}
 		encrypted, err := s.cryptoSvc.Encrypt(string(data))
 		if err != nil {
 			sendError(c, http.StatusInternalServerError, "Failed to encrypt file")
 			return
 		}
-		data = []byte(encrypted)
+		meta, err := s.fm.UploadFile(filePath, []byte(encrypted))
+		if err != nil {
+			sendInternalError(c, err, "Failed to upload file")
+			return
+		}
+		s.auditLog("upload", filePath, c, true, "")
+		c.JSON(http.StatusCreated, meta)
+		return
 	}
 
-	meta, err := s.fm.UploadFile(filePath, data)
+	// Non-encrypted path: stream into storage. Cap the reader so a
+	// misbehaving client cannot stream past the limit; the actual size is
+	// verified against the stat returned after the upload.
+	limited := io.LimitReader(file, s.maxUploadSize+1)
+	meta, err := s.fm.UploadFileFromReader(filePath, limited)
 	if err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Failed to upload file")
+		return
+	}
+	if meta != nil && meta.Size > s.maxUploadSize {
+		_ = s.fm.DeleteFile(filePath)
+		sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
 		return
 	}
 
@@ -434,6 +499,11 @@ func (s *Server) handleDownload(c *gin.Context) {
 		sendError(c, http.StatusBadRequest, "Invalid file path")
 		return
 	}
+
+	// Normalize once at the entry so every downstream call (including the
+	// large-file streaming branch that calls store.OpenReader directly, which
+	// would otherwise reject a leading "/" on MinIO) sees a clean object key.
+	filePath = utils.NormalizePath(filePath)
 
 	meta, err := s.fm.GetFileMetadata(filePath)
 	if err != nil {
@@ -573,7 +643,7 @@ func (s *Server) handleList(c *gin.Context) {
 
 	result, err := s.flSvc.ListFiles(dirPath, false, page, pageSize, sortBy, sortOrder)
 	if err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -593,7 +663,7 @@ func (s *Server) handleDelete(c *gin.Context) {
 	}
 
 	if err := s.fm.DeleteFile(filePath); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -634,7 +704,7 @@ func (s *Server) handleRename(c *gin.Context) {
 	}
 
 	if err := s.fm.RenameFile(filePath, newName); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -657,7 +727,7 @@ func (s *Server) handleCreateDirectory(c *gin.Context) {
 	}
 
 	if err := s.dirSvc.CreateDirectory(req.Path); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -680,7 +750,7 @@ func (s *Server) handleDeleteDirectory(c *gin.Context) {
 	recursive := c.Query("recursive") == "true"
 
 	if err := s.dirSvc.DeleteDirectory(dirPath, recursive); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -721,7 +791,7 @@ func (s *Server) handleRenameDirectory(c *gin.Context) {
 	}
 
 	if err := s.dirSvc.RenameDirectory(dirPath, newName); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -797,7 +867,7 @@ func (s *Server) handleListAuditLogs(c *gin.Context) {
 	auditLogSvc := database.NewAuditLogService(s.db)
 	logs, err := auditLogSvc.List(operation, resourcePath, page, pageSize)
 	if err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -847,7 +917,7 @@ func (s *Server) handleCreateUploadSession(c *gin.Context) {
 	clientID := c.ClientIP()
 	sessionID, err := s.transferSvc.CreateUploadSession(req.FilePath, req.FileName, req.TotalSize, clientID, req.Hash)
 	if err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -884,7 +954,7 @@ func (s *Server) handleUploadChunk(c *gin.Context) {
 	}
 
 	if err := s.transferSvc.UploadChunk(sessionID, data, offset); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -899,19 +969,30 @@ func (s *Server) handleGetUploadProgress(c *gin.Context) {
 
 func (s *Server) handleCompleteUpload(c *gin.Context) {
 	sessionID := c.Param("id")
-	if err := s.transferSvc.CompleteUpload(sessionID); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+	result, err := s.transferSvc.CompleteUpload(sessionID)
+	if err != nil {
+		sendInternalError(c, err, "Failed to complete upload")
 		return
 	}
 
-	s.auditLog("complete_upload", "", c, true, fmt.Sprintf("session_id=%s", sessionID))
-	c.JSON(http.StatusOK, gin.H{"message": "Upload completed successfully"})
+	s.auditLog("complete_upload", "", c, true, fmt.Sprintf("session_id=%s hash_provided=%v hash_verified=%v", sessionID, result.HashProvided, result.HashVerified))
+	// Explicitly report hash verification status so callers can tell whether
+	// the uploaded content was integrity-checked (#29: hash verification is
+	// optional but the outcome is now explicit in the response).
+	c.JSON(http.StatusOK, gin.H{
+		"message":         "Upload completed successfully",
+		"file_id":         result.FileID,
+		"hash_provided":   result.HashProvided,
+		"hash_verified":   result.HashVerified,
+		"uploaded_bytes": result.UploadedSize,
+		"storage_type":    result.StorageType,
+	})
 }
 
 func (s *Server) handleAbortUpload(c *gin.Context) {
 	sessionID := c.Param("id")
 	if err := s.transferSvc.AbortUpload(sessionID); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -1185,6 +1266,7 @@ func isValidFilePath(p string) bool {
 func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, success bool, details string) {
 	clientIP := c.ClientIP()
 	userAgent := c.GetHeader("User-Agent")
+	reqID := c.GetString("request_id")
 
 	userIdentifier := "anonymous"
 	apiKeyHeader := c.GetHeader("X-API-Key")
@@ -1195,8 +1277,8 @@ func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, succes
 		userIdentifier = "bearer:***"
 	}
 
-	logger.Info("AUDIT: operation=%s resource=%s user=%s ip=%s ua=%s success=%v details=%s",
-		operation, resourcePath, userIdentifier, clientIP, userAgent, success, details)
+	logger.Info("AUDIT: req_id=%s operation=%s resource=%s user=%s ip=%s ua=%s success=%v details=%s",
+		reqID, operation, resourcePath, userIdentifier, clientIP, userAgent, success, details)
 
 	if s.db != nil {
 		auditLogSvc := database.NewAuditLogService(s.db)
@@ -1219,6 +1301,20 @@ func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, succes
 
 func sendError(c *gin.Context, status int, msg string) {
 	c.JSON(status, gin.H{"error": msg})
+}
+
+// sendInternalError logs the underlying error (with request context) and
+// returns a generic message to the client. Use this instead of
+// sendError(c, 500, err.Error()) so internal details (paths, SQL errors,
+// stack hints) are not leaked to API consumers.
+func sendInternalError(c *gin.Context, err error, publicMsg string) {
+	if publicMsg == "" {
+		publicMsg = "Internal server error"
+	}
+	reqID := c.GetString("request_id")
+	logger.Error("internal error: req_id=%s method=%s path=%s err=%v",
+		reqID, c.Request.Method, c.Request.URL.Path, err)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": publicMsg})
 }
 
 func (s *Server) handleCreateMultipartUpload(c *gin.Context) {
@@ -1256,7 +1352,7 @@ func (s *Server) handleCreateMultipartUpload(c *gin.Context) {
 	clientID := c.ClientIP()
 	sessionID, partSize, err := s.transferSvc.CreateMultipartUpload(req.FilePath, req.FileName, req.TotalSize, clientID, req.Hash)
 	if err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -1306,7 +1402,7 @@ func (s *Server) handleUploadPart(c *gin.Context) {
 	}
 
 	if err := s.transferSvc.UploadPartData(sessionID, partNumber, offset, data); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -1330,7 +1426,7 @@ func (s *Server) handleGetMultipartUploadStatus(c *gin.Context) {
 func (s *Server) handleCompleteMultipartUpload(c *gin.Context) {
 	sessionID := c.Param("id")
 	if err := s.transferSvc.CompleteMultipartUpload(sessionID); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 
@@ -1341,7 +1437,7 @@ func (s *Server) handleCompleteMultipartUpload(c *gin.Context) {
 func (s *Server) handleAbortMultipartUpload(c *gin.Context) {
 	sessionID := c.Param("id")
 	if err := s.transferSvc.AbortMultipartUpload(sessionID); err != nil {
-		sendError(c, http.StatusInternalServerError, err.Error())
+		sendInternalError(c, err, "Internal server error")
 		return
 	}
 

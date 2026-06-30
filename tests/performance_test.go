@@ -459,7 +459,7 @@ func TestStress_LargeFileStreaming(t *testing.T) {
 		offset = end
 	}
 
-	if err := env.transferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.transferSvc.CompleteUpload(sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
