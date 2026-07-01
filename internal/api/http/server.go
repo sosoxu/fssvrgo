@@ -424,7 +424,15 @@ func (s *Server) handleHealthCheck(c *gin.Context, includeStorage bool) {
 // PutObject instead of multipart upload (3 HTTP round-trips), eliminating the
 // ~47x write throughput penalty observed for small objects. Files above this
 // threshold continue to stream via UploadFileFromReader to bound peak memory.
-const smallUploadThreshold = 32 * 1024 * 1024 // 32 MB
+//
+// Kept small on purpose: the concurrency semaphore holds up to Workers*4
+// in-flight uploads, so peak memory ≈ smallUploadThreshold * Workers * 4.
+// At 1MB this is 32MB * Workers (e.g. 3.2GB at Workers=100) — comparable to
+// the streaming path's buffer footprint. A larger cutoff (e.g. 32MB) would
+// allow 12.8GB at Workers=100 and reintroduce the OOM risk (#33) that the
+// streaming path was designed to avoid. The 1KB benchmark target is well
+// below this cutoff, so the MinIO optimization still applies.
+const smallUploadThreshold = 1 * 1024 * 1024 // 1 MB
 
 func (s *Server) handleUpload(c *gin.Context) {
 	file, header, err := c.Request.FormFile("file")
@@ -503,7 +511,11 @@ func (s *Server) handleUpload(c *gin.Context) {
 			return
 		}
 		if int64(len(data)) > smallUploadThreshold {
-			sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
+			// header.Size was forged or the stream ran past the threshold; the
+			// streaming path will re-check against maxUploadSize, so report
+			// the actual limiting threshold here rather than maxUploadSizeMB
+			// to avoid a misleading message.
+			sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Inline upload size exceeds %d bytes; use streaming upload for larger files", smallUploadThreshold))
 			return
 		}
 		meta, err := s.fm.UploadFile(filePath, data)

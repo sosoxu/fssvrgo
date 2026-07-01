@@ -226,8 +226,13 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 	// 小文件会产生大量额外开销：临时文件创建/预分配/fsync/重命名/删除、
 	// 会话级分布式锁（额外 Redis 往返）、会话 Redis 存取、冗余元数据查询。
 	// 绕过后 Redis 操作从 ~6 降至 ~2，磁盘操作从 ~6 降至 1，无 fsync。
+	//
+	// 大小守卫：仅当单块大小不超过 grpcFastPathMaxSize 时才走快速路径，
+	// 否则继续走会话机制（基于临时文件，内存占用受控）。当前 gRPC 默认
+	// 单消息上限 4MB 已隐式约束，但显式守卫可防御未来调大 MaxRecvMsgSize
+	// 的配置变更导致大文件全量驻留内存。
 	nextReq, nextErr := stream.Recv()
-	if nextErr == io.EOF && firstChunk.Offset == 0 && int64(len(firstChunk.Data)) == meta.TotalSize {
+	if nextErr == io.EOF && firstChunk.Offset == 0 && int64(len(firstChunk.Data)) == meta.TotalSize && int64(len(firstChunk.Data)) <= grpcFastPathMaxSize {
 		return s.uploadFileFastPath(stream, meta, firstChunk.Data)
 	}
 
@@ -299,6 +304,14 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 		CreatedAt: createdAt,
 	})
 }
+
+// grpcFastPathMaxSize is the upper bound on a single chunk for the fast path.
+// Uploads whose single chunk exceeds this fall back to the session-based
+// path (temp file on disk) to keep memory bounded. Set above gRPC's default
+// per-message limit (4MB) so legitimate single-chunk uploads under the
+// default config still take the fast path, but a future bump of
+// MaxRecvMsgSize will not let large files fill memory unguarded.
+const grpcFastPathMaxSize = 16 * 1024 * 1024 // 16 MB
 
 // uploadFileFastPath 处理单分块完整上传（小文件），直接调用 FileManager，
 // 绕过 transferSvc 的会话机制。若客户端提供了 hash 则先校验再写入，保持
