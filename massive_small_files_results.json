@@ -1,0 +1,116 @@
+{
+  "generated_at": "2026-07-01T05:53:40Z",
+  "environment": {
+    "database": "postgresql",
+    "go_version": "go1.25.1",
+    "gomaxprocs": 2,
+    "lock": "redis (distributed SET NX + Lua unlock)",
+    "os": "linux/amd64",
+    "storage": "local (centralized)"
+  },
+  "config": {
+    "file_count": 500000,
+    "file_size": 1024,
+    "grpc_concurrency": 8,
+    "http_concurrency": 12
+  },
+  "phases": [
+    {
+      "name": "HTTP Write",
+      "protocol": "HTTP",
+      "operation": "write",
+      "file_count": 500000,
+      "file_size": 1024,
+      "concurrency": 12,
+      "duration_sec": 460.980945439,
+      "success": 500000,
+      "fail": 0,
+      "files_per_sec": 1084.6435301655288,
+      "mb_per_sec": 1.0592221974272742,
+      "latency": {
+        "min_us": 1997,
+        "max_us": 246410,
+        "avg_us": 11062,
+        "p50_us": 7005,
+        "p95_us": 29250,
+        "p99_us": 44332,
+        "sample": 500000
+      }
+    },
+    {
+      "name": "HTTP Read",
+      "protocol": "HTTP",
+      "operation": "read",
+      "file_count": 500000,
+      "file_size": 1024,
+      "concurrency": 12,
+      "duration_sec": 85.901302526,
+      "success": 500000,
+      "fail": 0,
+      "files_per_sec": 5820.633509586931,
+      "mb_per_sec": 5.684212411705987,
+      "latency": {
+        "min_us": 207,
+        "max_us": 297019,
+        "avg_us": 2053,
+        "p50_us": 1665,
+        "p95_us": 3825,
+        "p99_us": 11398,
+        "sample": 500000
+      }
+    },
+    {
+      "name": "gRPC Write",
+      "protocol": "gRPC",
+      "operation": "write",
+      "file_count": 500000,
+      "file_size": 1024,
+      "concurrency": 8,
+      "duration_sec": 792.221650519,
+      "success": 500000,
+      "fail": 0,
+      "files_per_sec": 631.1365003372985,
+      "mb_per_sec": 0.616344238610643,
+      "latency": {
+        "min_us": 3017,
+        "max_us": 1009493,
+        "avg_us": 12674,
+        "p50_us": 11896,
+        "p95_us": 17882,
+        "p99_us": 27218,
+        "sample": 500000
+      }
+    },
+    {
+      "name": "gRPC Read",
+      "protocol": "gRPC",
+      "operation": "read",
+      "file_count": 500000,
+      "file_size": 1024,
+      "concurrency": 8,
+      "duration_sec": 88.919121434,
+      "success": 500000,
+      "fail": 0,
+      "files_per_sec": 5623.087497227733,
+      "mb_per_sec": 5.491296384011458,
+      "latency": {
+        "min_us": 264,
+        "max_us": 77938,
+        "avg_us": 1420,
+        "p50_us": 1196,
+        "p95_us": 2557,
+        "p99_us": 5653,
+        "sample": 500000
+      }
+    }
+  ],
+  "summary": {
+    "grpc_read_files_per_sec": 5623.087497227733,
+    "grpc_write_files_per_sec": 631.1365003372985,
+    "http_read_files_per_sec": 5820.633509586931,
+    "http_write_files_per_sec": 1084.6435301655288,
+    "total_errors": 0,
+    "total_files_read": 1000000,
+    "total_files_written": 1000000
+  }
+}
