@@ -418,6 +418,14 @@ func (s *Server) handleHealthCheck(c *gin.Context, includeStorage bool) {
 	c.JSON(code, status)
 }
 
+// smallUploadThreshold is the cutoff below which handleUpload buffers the
+// body in memory and calls FileManager.UploadFile (which hands the storage
+// layer a bytes.Reader — an io.ReadSeeker). For MinIO this triggers a single
+// PutObject instead of multipart upload (3 HTTP round-trips), eliminating the
+// ~47x write throughput penalty observed for small objects. Files above this
+// threshold continue to stream via UploadFileFromReader to bound peak memory.
+const smallUploadThreshold = 32 * 1024 * 1024 // 32 MB
+
 func (s *Server) handleUpload(c *gin.Context) {
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
@@ -478,7 +486,37 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
-	// Non-encrypted path: stream into storage. Cap the reader so a
+	// Non-encrypted path. Two strategies based on size:
+	//  - Small files (<= smallUploadThreshold): buffer in memory and call
+	//    UploadFile so the storage layer receives a bytes.Reader (io.ReadSeeker).
+	//    This is critical for MinIO: a Seeker makes minio-go issue a single
+	//    PutObject (1 HTTP round-trip) instead of multipart upload (3
+	//    round-trips), which is ~47x faster for 1KB objects. The TeeReader
+	//    used by UploadFileFromReader is not a Seeker, forcing multipart.
+	//  - Large files: stream via UploadFileFromReader to keep peak memory
+	//    bounded by the copy buffer (avoids OOM under concurrent large
+	//    uploads, #33).
+	if header.Size >= 0 && header.Size <= smallUploadThreshold {
+		data, err := io.ReadAll(io.LimitReader(file, smallUploadThreshold+1))
+		if err != nil {
+			sendError(c, http.StatusInternalServerError, "Failed to read file data")
+			return
+		}
+		if int64(len(data)) > smallUploadThreshold {
+			sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
+			return
+		}
+		meta, err := s.fm.UploadFile(filePath, data)
+		if err != nil {
+			sendInternalError(c, err, "Failed to upload file")
+			return
+		}
+		s.auditLog("upload", filePath, c, true, "")
+		c.JSON(http.StatusCreated, meta)
+		return
+	}
+
+	// Large file path: stream into storage. Cap the reader so a
 	// misbehaving client cannot stream past the limit; the actual size is
 	// verified against the stat returned after the upload.
 	limited := io.LimitReader(file, s.maxUploadSize+1)
