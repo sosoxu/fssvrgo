@@ -42,10 +42,11 @@ import (
 )
 
 // ====================================================================================
-// Massive small-file performance test (centralized storage: Local FS).
+// Massive small-file performance test.
 //   - Database:   PostgreSQL (shared)
 //   - Lock:       Redis distributed lock (consistency lock)
-//   - Storage:    Local filesystem (centralized storage only)
+//   - Storage:    Local filesystem (centralized) or MinIO object storage,
+//                 selected via FSS_BENCH_STORAGE (default "local", or "minio")
 //   - Protocols:  HTTP (REST single-shot) and RPC (real gRPC streaming over TCP)
 //
 // The test writes N x 1KB files then reads them back, for each protocol.
@@ -123,6 +124,8 @@ type massiveCluster struct {
 	httpClient   *http.Client
 	grpcConn     *grpc.ClientConn
 	grpcClient   pb.FileServiceClient
+	storageType  string // "local" or "minio"
+	minioBucket  string // populated when storageType == "minio"
 }
 
 func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
@@ -166,7 +169,33 @@ func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	store := storage.NewLocalStorage(storageDir)
+	// Storage backend: local (centralized) or MinIO (object storage), selected
+	// via FSS_BENCH_STORAGE. Local is the default; "minio" connects to a real
+	// MinIO server configured by FSS_BENCH_MINIO_* env vars.
+	storageType := envStr("FSS_BENCH_STORAGE", "local")
+	var store storage.StorageAdapter
+	var minioBucket string
+	switch storageType {
+	case "minio":
+		minioCfg := storage.MinIOConfig{
+			Endpoint:  envStr("FSS_BENCH_MINIO_ENDPOINT", "localhost:9000"),
+			AccessKey: envStr("FSS_BENCH_MINIO_ACCESS_KEY", "minioadmin"),
+			SecretKey: envStr("FSS_BENCH_MINIO_SECRET_KEY", "minioadmin"),
+			Bucket:    fmt.Sprintf("fssbench-%d", time.Now().UnixNano()),
+			UseSSL:    false,
+		}
+		minioBucket = minioCfg.Bucket
+		ms, mErr := storage.NewMinIOStorage(minioCfg)
+		if mErr != nil {
+			dbObj.Close()
+			os.RemoveAll(tempDir)
+			t.Skipf("MinIO not available: %v", mErr)
+		}
+		store = ms
+	default:
+		storageType = "local"
+		store = storage.NewLocalStorage(storageDir)
+	}
 
 	// Redis distributed lock + session store (consistency lock)
 	redisAddr := envStr("FSS_BENCH_REDIS_ADDR", "localhost:6379")
@@ -253,6 +282,8 @@ func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
 		httpClient:  httpClient,
 		grpcConn:    conn,
 		grpcClient:  grpcClient,
+		storageType: storageType,
+		minioBucket: minioBucket,
 	}
 }
 
@@ -288,9 +319,18 @@ func (c *massiveCluster) shutdown() {
 func (c *massiveCluster) cleanState() {
 	resetMassiveDB(c.qdb)
 	flushRedis(c.redisMgr)
-	removeDirContents(c.storageDir)
-	if ls, ok := c.store.(*storage.LocalStorage); ok {
-		ls.CleanPathLocks()
+	if c.storageType == "minio" {
+		// MinIO: empty the bucket so each phase starts clean. CleanPathLocks
+		// is a no-op for MinIO (objects removed via API), but call it for
+		// parity with local cleanup of the in-memory path-lock map.
+		if ms, ok := c.store.(*storage.MinIOStorage); ok {
+			ms.CleanPathLocks()
+		}
+	} else {
+		removeDirContents(c.storageDir)
+		if ls, ok := c.store.(*storage.LocalStorage); ok {
+			ls.CleanPathLocks()
+		}
 	}
 }
 
@@ -695,8 +735,8 @@ func TestMassiveSmallFiles_Performance(t *testing.T) {
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
 
 	t.Logf("=== Massive small-file performance test ===")
-	t.Logf("files=%d size=%dB (%s) storage=local(center) db=postgresql lock=redis",
-		fileCount, fileSize, formatSize(int64(fileSize)))
+	t.Logf("files=%d size=%dB (%s) storage=%s db=postgresql lock=redis",
+		fileCount, fileSize, formatSize(int64(fileSize)), envStr("FSS_BENCH_STORAGE", "local"))
 	t.Logf("http_concurrency=%d grpc_concurrency=%d", httpConcurrency, grpcConcurrency)
 	t.Logf("go version=%s GOMAXPROCS=%d", runtime.Version(), runtime.GOMAXPROCS(0))
 
@@ -722,7 +762,7 @@ func TestMassiveSmallFiles_Performance(t *testing.T) {
 			"go_version":  runtime.Version(),
 			"gomaxprocs":  runtime.GOMAXPROCS(0),
 			"os":          runtime.GOOS + "/" + runtime.GOARCH,
-			"storage":     "local (centralized)",
+			"storage":     envStr("FSS_BENCH_STORAGE", "local"),
 			"database":    "postgresql",
 			"lock":        "redis (distributed SET NX + Lua unlock)",
 		},
