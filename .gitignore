@@ -1,3 +1,8 @@
 perfbench
 tests.test
 fsserver
+
+# 性能测试产物（日志、Redis 转储）
+*.log
+dump.rdb
+massive_bench.log
