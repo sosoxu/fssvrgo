@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
@@ -188,46 +189,92 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, pb.UploadResponse]) error {
-	var sessionID string
-	var filePath string
+	// 读取元数据（必须为第一条消息）
+	req, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("failed to receive metadata: %w", err)
+	}
+	metaMsg, ok := req.Data.(*pb.UploadRequest_Metadata)
+	if !ok {
+		return fmt.Errorf("metadata must be sent first in upload stream")
+	}
+	meta := metaMsg.Metadata
+	if !utils.IsValidFilePath(meta.Path) {
+		return status.Error(codes.InvalidArgument, "invalid file path")
+	}
+	if !utils.IsValidFileName(meta.Name) {
+		return status.Error(codes.InvalidArgument, "invalid file name")
+	}
 
+	// 读取第一个分块
+	req, err = stream.Recv()
+	if err == io.EOF {
+		return fmt.Errorf("no chunk received in upload stream")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to receive first chunk: %w", err)
+	}
+	chunkMsg, ok := req.Data.(*pb.UploadRequest_Chunk)
+	if !ok {
+		return fmt.Errorf("expected chunk after metadata")
+	}
+	firstChunk := chunkMsg.Chunk
+
+	// 探测下一条消息。若为 EOF 且首块从 offset 0 开始覆盖整个文件，则为
+	// 单分块完整上传（小文件常见场景），走快速路径直接调用 FileManager，
+	// 绕过 transferSvc 的会话机制。会话机制为断点续传大文件设计，对 1KB
+	// 小文件会产生大量额外开销：临时文件创建/预分配/fsync/重命名/删除、
+	// 会话级分布式锁（额外 Redis 往返）、会话 Redis 存取、冗余元数据查询。
+	// 绕过后 Redis 操作从 ~6 降至 ~2，磁盘操作从 ~6 降至 1，无 fsync。
+	nextReq, nextErr := stream.Recv()
+	if nextErr == io.EOF && firstChunk.Offset == 0 && int64(len(firstChunk.Data)) == meta.TotalSize {
+		return s.uploadFileFastPath(stream, meta, firstChunk.Data)
+	}
+
+	// 多分块上传：走会话机制（断点续传大文件场景），需回放已消费的首块和探测消息
+	sessionID, err := s.transferSvc.CreateUploadSession(meta.Path, meta.Name, meta.TotalSize, "", meta.Hash)
+	if err != nil {
+		return fmt.Errorf("failed to create upload session: %w", err)
+	}
+
+	// 回放第一个分块
+	if err := s.transferSvc.UploadChunk(sessionID, firstChunk.Data, firstChunk.Offset); err != nil {
+		s.transferSvc.AbortUpload(sessionID)
+		return fmt.Errorf("failed to upload chunk: %w", err)
+	}
+
+	// 回放探测时读取的消息（若有且为分块）
+	if nextErr == nil {
+		if rc, ok := nextReq.Data.(*pb.UploadRequest_Chunk); ok {
+			if err := s.transferSvc.UploadChunk(sessionID, rc.Chunk.Data, rc.Chunk.Offset); err != nil {
+				s.transferSvc.AbortUpload(sessionID)
+				return fmt.Errorf("failed to upload chunk: %w", err)
+			}
+		}
+	} else if nextErr != io.EOF {
+		s.transferSvc.AbortUpload(sessionID)
+		return fmt.Errorf("failed to receive upload request: %w", nextErr)
+	}
+
+	// 继续读取剩余分块
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			s.transferSvc.AbortUpload(sessionID)
 			return fmt.Errorf("failed to receive upload request: %w", err)
 		}
-
-		switch data := req.Data.(type) {
-		case *pb.UploadRequest_Metadata:
-			meta := data.Metadata
-			if !utils.IsValidFilePath(meta.Path) {
-				return status.Error(codes.InvalidArgument, "invalid file path")
-			}
-			if !utils.IsValidFileName(meta.Name) {
-				return status.Error(codes.InvalidArgument, "invalid file name")
-			}
-			filePath = meta.Path
-			sessionID, err = s.transferSvc.CreateUploadSession(meta.Path, meta.Name, meta.TotalSize, "", meta.Hash)
-			if err != nil {
-				return fmt.Errorf("failed to create upload session: %w", err)
-			}
-		case *pb.UploadRequest_Chunk:
-			if sessionID == "" {
-				return fmt.Errorf("metadata must be sent before chunks")
-			}
-			chunk := data.Chunk
-			if err := s.transferSvc.UploadChunk(sessionID, chunk.Data, chunk.Offset); err != nil {
-				s.transferSvc.AbortUpload(sessionID)
-				return fmt.Errorf("failed to upload chunk: %w", err)
-			}
+		cm, ok := req.Data.(*pb.UploadRequest_Chunk)
+		if !ok {
+			s.transferSvc.AbortUpload(sessionID)
+			return fmt.Errorf("expected chunk in multi-chunk upload")
 		}
-	}
-
-	if sessionID == "" {
-		return fmt.Errorf("no metadata received in upload stream")
+		if err := s.transferSvc.UploadChunk(sessionID, cm.Chunk.Data, cm.Chunk.Offset); err != nil {
+			s.transferSvc.AbortUpload(sessionID)
+			return fmt.Errorf("failed to upload chunk: %w", err)
+		}
 	}
 
 	result, err := s.transferSvc.CompleteUpload(sessionID)
@@ -236,19 +283,44 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 	}
 	_ = result // hash verification status is surfaced via HTTP API; gRPC response already carries file metadata
 
-	meta, err := s.fm.GetFileMetadata(filePath)
+	fileMeta, err := s.fm.GetFileMetadata(meta.Path)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata after upload: %w", err)
 	}
 
-	createdAt, _ := parseTimestamp(meta.CreatedAt)
+	createdAt, _ := parseTimestamp(fileMeta.CreatedAt)
 
 	return stream.SendAndClose(&pb.UploadResponse{
-		Id:        meta.ID,
-		Path:      meta.Path,
-		Name:      meta.Name,
-		Size:      meta.Size,
-		Hash:      meta.Hash,
+		Id:        fileMeta.ID,
+		Path:      fileMeta.Path,
+		Name:      fileMeta.Name,
+		Size:      fileMeta.Size,
+		Hash:      fileMeta.Hash,
+		CreatedAt: createdAt,
+	})
+}
+
+// uploadFileFastPath 处理单分块完整上传（小文件），直接调用 FileManager，
+// 绕过 transferSvc 的会话机制。若客户端提供了 hash 则先校验再写入，保持
+// 与会话路径一致的完整性校验语义。
+func (s *Server) uploadFileFastPath(stream grpc.ClientStreamingServer[pb.UploadRequest, pb.UploadResponse], meta *pb.UploadMetadata, data []byte) error {
+	if meta.Hash != "" {
+		computed := fmt.Sprintf("%x", sha256.Sum256(data))
+		if computed != meta.Hash {
+			return status.Error(codes.InvalidArgument, fmt.Sprintf("hash mismatch: expected %s, got %s", meta.Hash, computed))
+		}
+	}
+	fileMeta, err := s.fm.UploadFile(meta.Path, data)
+	if err != nil {
+		return fmt.Errorf("failed to upload file: %w", err)
+	}
+	createdAt, _ := parseTimestamp(fileMeta.CreatedAt)
+	return stream.SendAndClose(&pb.UploadResponse{
+		Id:        fileMeta.ID,
+		Path:      fileMeta.Path,
+		Name:      fileMeta.Name,
+		Size:      fileMeta.Size,
+		Hash:      fileMeta.Hash,
 		CreatedAt: createdAt,
 	})
 }
