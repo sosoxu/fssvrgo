@@ -142,7 +142,6 @@ func (ms *MinIOStorage) WriteFromTempFile(objectKey string, tempFilePath string)
 
 	mu := ms.getLock(objectKey)
 	mu.Lock()
-	defer ms.pathLocks.Delete(objectKey)
 	defer mu.Unlock()
 
 	key := ms.normalizeKey(objectKey)
@@ -276,7 +275,7 @@ func (ms *MinIOStorage) Remove(objectKey string) error {
 	if err != nil {
 		return fmt.Errorf("failed to remove object: %w", err)
 	}
-	ms.pathLocks.Delete(objectKey)
+	// 不在此处删除 pathLocks 中的锁条目，避免锁逃逸（见 local.go Remove 注释）。
 	return nil
 }
 
@@ -424,7 +423,7 @@ func (ms *MinIOStorage) Rename(oldKey, newKey string) error {
 		return fmt.Errorf("failed to remove source object after rename: %w", err)
 	}
 
-	ms.pathLocks.Delete(oldKey)
+	// 不在此处删除 oldKey 的锁条目，避免锁逃逸（见 local.go Remove 注释）。
 	return nil
 }
 
@@ -475,13 +474,20 @@ func (ms *MinIOStorage) RemoveDirectory(prefix string) error {
 		}
 	}
 
-	ms.pathLocks.Delete(prefix)
+	// 不在此处删除 prefix 的锁条目，避免锁逃逸（见 local.go Remove 注释）。
 	return nil
 }
 
 func (ms *MinIOStorage) CleanPathLocks() {
-	ms.pathLocks.Range(func(key, _ interface{}) bool {
+	ms.pathLocks.Range(func(key, value interface{}) bool {
 		objectKey := key.(string)
+		mu := value.(*sync.Mutex)
+		// TryLock 成功说明当前无 goroutine 持有该锁，可安全删除；
+		// 失败则跳过，避免删除正在使用的锁条目导致锁逃逸。
+		if !mu.TryLock() {
+			return true
+		}
+		mu.Unlock()
 		if !ms.Exists(objectKey) {
 			ms.pathLocks.Delete(key)
 		}

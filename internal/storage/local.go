@@ -297,13 +297,22 @@ func (ls *LocalStorage) Remove(path string) error {
 	if err := os.Remove(fullPath); err != nil {
 		return fmt.Errorf("failed to remove file: %w", err)
 	}
-	ls.pathLocks.Delete(path)
+	// 不在此处删除 pathLocks 中的锁条目：若删除后另一个 goroutine 通过
+	// LoadOrStore 存入新 mutex，会导致两个 goroutine 持有不同 mutex 却操作
+	// 同一路径（锁逃逸）。锁条目由 CleanPathLocks 在确认无占用时回收。
 	return nil
 }
 
 func (ls *LocalStorage) CleanPathLocks() {
-	ls.pathLocks.Range(func(key, _ interface{}) bool {
+	ls.pathLocks.Range(func(key, value interface{}) bool {
 		path := key.(string)
+		mu := value.(*sync.Mutex)
+		// TryLock 成功说明当前无 goroutine 持有该锁，可安全删除；
+		// 失败则跳过，等下次清理。避免删除正在使用的锁条目导致锁逃逸。
+		if !mu.TryLock() {
+			return true
+		}
+		mu.Unlock()
 		fullPath := ls.getFullPath(path)
 		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 			ls.pathLocks.Delete(key)
@@ -386,7 +395,7 @@ func (ls *LocalStorage) Rename(oldPath, newPath string) error {
 		return fmt.Errorf("failed to rename: %w", err)
 	}
 
-	ls.pathLocks.Delete(oldPath)
+	// 不在此处删除 oldPath 的锁条目，避免锁逃逸（见 Remove 注释）。
 	return nil
 }
 
@@ -417,6 +426,6 @@ func (ls *LocalStorage) RemoveDirectory(path string) error {
 	if err := os.RemoveAll(fullPath); err != nil {
 		return fmt.Errorf("failed to remove directory: %w", err)
 	}
-	ls.pathLocks.Delete(path)
+	// 不在此处删除 pathLocks 中的锁条目，避免锁逃逸（见 Remove 注释）。
 	return nil
 }
