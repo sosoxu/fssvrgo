@@ -130,6 +130,24 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 		return nil
 	}
 
+	// 先尝试 JWT：若 apiKey 是有效的 access token，从 claims 构造 user。
+	// 这使得 gRPC/HTTP 调用方可以用同一个方法解析 API key 和 JWT 两种凭证，
+	// 避免 gRPC withUser 对 JWT token 必然返回 nil 导致授权失败。
+	as.mu.RLock()
+	jwtSvc := as.jwtService
+	as.mu.RUnlock()
+	if jwtSvc != nil {
+		if claims, err := jwtSvc.ValidateToken(apiKey); err == nil && claims != nil &&
+			(claims.TokenType == "" || claims.TokenType == "access") {
+			return &User{
+				ID:      claims.UserID,
+				Name:    claims.UserID,
+				Role:    claims.Role,
+				Enabled: true,
+			}
+		}
+	}
+
 	hashedKey := hashApiKey(apiKey)
 
 	as.mu.RLock()
@@ -159,8 +177,17 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 		defer cancel()
 		if key, err := lookupFn(ctx, hashedKey); err == nil && key != nil && key.IsActive {
 			role := "user"
-			if key.Permissions == "admin" || strings.Contains(key.Permissions, "admin") {
+			// 精确匹配 admin 角色，避免 strings.Contains 误判（如 "not-admin"、"xadminx" 被提权）。
+			// permissions 支持逗号分隔的多值格式（如 "user:read,admin"）。
+			if key.Permissions == "admin" {
 				role = "admin"
+			} else if key.Permissions != "" {
+				for _, p := range strings.Split(key.Permissions, ",") {
+					if strings.TrimSpace(p) == "admin" {
+						role = "admin"
+						break
+					}
+				}
 			}
 			return &User{
 				ID:      key.ID,

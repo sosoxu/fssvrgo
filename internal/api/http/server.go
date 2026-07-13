@@ -1100,6 +1100,13 @@ func (s *Server) handleCreateApiKey(c *gin.Context) {
 		return
 	}
 
+	// 校验 permissions 格式：只允许预定义值，避免含 "admin" 子串的非预期值
+	// 结合 auth.go 的精确匹配导致意外提权。允许空（默认 user 角色）。
+	if req.Permissions != "" && !isValidPermissions(req.Permissions) {
+		sendError(c, http.StatusBadRequest, "Invalid permissions: allowed values are 'admin', 'user', or comma-separated 'user:read,user:write'")
+		return
+	}
+
 	keySvc := database.NewApiKeyService(s.db)
 
 	id := utils.GenerateUUID()
@@ -1358,6 +1365,29 @@ func isValidFileName(name string) bool {
 
 func isValidFilePath(p string) bool {
 	return utils.IsValidFilePath(p)
+}
+
+// isValidPermissions 校验 API key 的 permissions 字段格式。允许的值：
+//   - "admin"：管理员角色
+//   - "user"：普通用户角色
+//   - 逗号分隔的 "user:read"、"user:write" 等细粒度权限
+//   - 空字符串（默认 user 角色）
+// 拒绝任何含 "admin" 子串的非预期值，避免与 auth.go 的 admin 判定产生歧义。
+func isValidPermissions(permissions string) bool {
+	if permissions == "" {
+		return true
+	}
+	allowedValues := map[string]bool{
+		"admin": true, "user": true,
+		"user:read": true, "user:write": true,
+	}
+	for _, p := range strings.Split(permissions, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" || !allowedValues[p] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, success bool, details string) {
