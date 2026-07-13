@@ -40,23 +40,41 @@ func NewDirectoryManagerWithDistLock(db *database.DB, store storage.StorageAdapt
 // It returns a release function that must be called (typically via defer) and
 // an error if the lock could not be acquired. When no distLock is configured
 // the release function is a no-op.
+//
+// The lock is acquired with renewal so that long-running directory operations
+// (e.g. recursive delete/rename of large directories) do not lose the lock
+// when the initial TTL expires. This matches the behavior of the upload
+// completion path (see transfer.FileTransferService.CompleteUpload).
 func (dm *DirectoryManager) lockDirectory(path string) (func(), error) {
 	if dm.distLock == nil {
 		return func() {}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	token, err := distributed.AcquireLock(ctx, dm.distLock, "dir:"+path, 30*time.Second, 30, 50*time.Millisecond)
+	token, cancelRenew, err := distributed.AcquireLockWithRenewal(ctx, dm.distLock, "dir:"+path, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire directory lock for %s: %w", path, err)
 	}
 	return func() {
+		cancelRenew()
 		unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer unlockCancel()
 		if err := dm.distLock.Unlock(unlockCtx, "dir:"+path, token); err != nil {
 			logger.Warn("failed to release directory lock for %s: %v", path, err)
 		}
 	}, nil
+}
+
+// supportsDirectoryStorageOps returns true only for backends where directory-
+// level storage operations (mkdir / rename dir / remove dir) are atomic and
+// cheap. Object storage (MinIO/S3) has no real directories — prefixes are
+// implicit, so creating a 0-byte marker is meaningless, renaming a directory
+// is an N-object copy+delete (non-atomic), and RemoveDirectory duplicates the
+// per-file removal already done by recursive delete. For object storage we
+// therefore keep the DB record as the single source of truth and only touch
+// storage at the per-file granularity.
+func (dm *DirectoryManager) supportsDirectoryStorageOps() bool {
+	return dm.store != nil && dm.store.StorageType() == "local"
 }
 
 func (dm *DirectoryManager) CreateDirectory(path string) error {
@@ -89,12 +107,12 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 	}
 
 	// Create the directory marker in the storage backend so that the directory
-	// is visible to store-level operations (Exists/List) on both backends.
-	// On MinIO this creates a 0-byte "<path>/" marker object; on LocalStorage
-	// this creates the physical directory. Failure is best-effort: the DB
-	// record is the source of truth and LocalStorage will also auto-create the
-	// directory on first file write, so we only warn.
-	if dm.store != nil {
+	// is visible to store-level operations (Exists/List) on the local backend.
+	// Object storage (MinIO/S3) has no real directories — prefixes are
+	// implicit, so a 0-byte marker object would be meaningless and is skipped.
+	// The DB record is the source of truth; LocalStorage will also auto-create
+	// the directory on first file write, so failure here is best-effort.
+	if dm.supportsDirectoryStorageOps() {
 		if err := dm.store.CreateDirectory(path); err != nil {
 			logger.Warn("failed to create directory marker in storage for %s: %v", path, err)
 		}
@@ -248,8 +266,13 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 			return fmt.Errorf("failed to commit directory deletion batch: %w", err)
 		}
 
+		// Storage directory-marker removal is only meaningful for the local
+		// backend (it removes a physical directory). For object storage there
+		// are no real directories — the per-file Remove above already deleted
+		// every real object, and RemoveDirectory would just re-list the same
+		// (now empty) prefix. Skip it.
 		for _, e := range entries {
-			if dm.store != nil {
+			if dm.supportsDirectoryStorageOps() {
 				if err := dm.store.RemoveDirectory(e.path); err != nil {
 					logger.Warn("failed to remove storage directory %s during delete: %v", e.path, err)
 				}
@@ -269,6 +292,20 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 
 func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	oldPath = utils.NormalizePath(oldPath)
+
+	// Object storage has no real directories. The file DB `Path` is used
+	// directly as the storage object key, so renaming a directory would
+	// require an N-object copy+delete (one RTT per child, non-atomic, and
+	// leaves dual copies on crash). Skipping the storage move would break
+	// downloads (DB points at new path, object still at old path). We
+	// therefore reject directory rename on object storage outright; callers
+	// should instead copy files to the new path and delete the originals.
+	//
+	// A nil store (DB-only deployments / tests) is allowed: there is no
+	// storage layer to keep in sync, so a DB-only path update is safe.
+	if dm.store != nil && !dm.supportsDirectoryStorageOps() {
+		return fmt.Errorf("directory rename is not supported for object storage: %s", oldPath)
+	}
 
 	release, err := dm.lockDirectory(oldPath)
 	if err != nil {
