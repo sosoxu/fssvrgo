@@ -28,6 +28,14 @@ type UploadPart struct {
 	Status       string
 }
 
+// byteRange represents a half-open interval [Start, End) of bytes that have
+// been written to the temp file. A sorted, non-overlapping slice of these is
+// maintained per session to verify full coverage at completion time.
+type byteRange struct {
+	Start int64
+	End   int64
+}
+
 type MultipartUploadSession struct {
 	SessionID string
 	FilePath  string
@@ -39,12 +47,67 @@ type MultipartUploadSession struct {
 	CreatedAt string
 	UpdatedAt string
 
-	tempFile     *os.File
-	parts        map[int]*UploadPart
-	partsMu      sync.RWMutex
-	uploadedSize int64
-	chunkCount   int64
-	closed       int32
+	tempFile      *os.File
+	parts         map[int]*UploadPart
+	partsMu       sync.RWMutex
+	uploadedSize  int64
+	chunkCount    int64
+	closed        int32
+	coveredRanges []byteRange // sorted, non-overlapping; guarded by partsMu
+}
+
+// addCoveredRange records that [start, end) has been written to the temp file
+// and merges it into the sorted, non-overlapping coveredRanges slice.
+// Caller must hold partsMu.
+func (session *MultipartUploadSession) addCoveredRange(start, end int64) {
+	if start >= end {
+		return
+	}
+	merged := []byteRange{}
+	inserted := false
+	for _, r := range session.coveredRanges {
+		if r.End < start {
+			merged = append(merged, r)
+		} else if r.Start > end {
+			if !inserted {
+				merged = append(merged, byteRange{Start: start, End: end})
+				inserted = true
+			}
+			merged = append(merged, r)
+		} else {
+			// Overlapping or adjacent — expand the range
+			if r.Start < start {
+				start = r.Start
+			}
+			if r.End > end {
+				end = r.End
+			}
+		}
+	}
+	if !inserted {
+		merged = append(merged, byteRange{Start: start, End: end})
+	}
+	session.coveredRanges = merged
+}
+
+// isFullyCovered returns true if the covered ranges completely cover
+// [0, TotalSize) with no gaps.
+func (session *MultipartUploadSession) isFullyCovered() bool {
+	if len(session.coveredRanges) == 0 {
+		return session.TotalSize == 0
+	}
+	if session.coveredRanges[0].Start != 0 {
+		return false
+	}
+	if session.coveredRanges[len(session.coveredRanges)-1].End != session.TotalSize {
+		return false
+	}
+	for i := 1; i < len(session.coveredRanges); i++ {
+		if session.coveredRanges[i].Start != session.coveredRanges[i-1].End {
+			return false
+		}
+	}
+	return true
 }
 
 type DownloadSegment struct {
@@ -73,6 +136,9 @@ func suggestedPartSize(totalSize int64) int64 {
 }
 
 func (s *FileTransferService) CreateMultipartUpload(filePath, fileName string, totalSize int64, clientID, hash string) (string, int64, error) {
+	if !s.acquireSessionSlot() {
+		return "", 0, fmt.Errorf("maximum number of concurrent upload sessions reached")
+	}
 	filePath = utils.NormalizePath(filePath)
 	sessionID := utils.GenerateUUID()
 	now := utils.GetCurrentTimestamp()
@@ -80,12 +146,14 @@ func (s *FileTransferService) CreateMultipartUpload(filePath, fileName string, t
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 	file, err := os.Create(tempPath)
 	if err != nil {
+		s.releaseSessionSlot()
 		return "", 0, fmt.Errorf("failed to create temp file: %w", err)
 	}
 
 	if err := file.Truncate(totalSize); err != nil {
 		file.Close()
 		os.Remove(tempPath)
+		s.releaseSessionSlot()
 		return "", 0, fmt.Errorf("failed to pre-allocate temp file: %w", err)
 	}
 
@@ -177,6 +245,7 @@ func (s *FileTransferService) UploadPartData(sessionID string, partNumber int, o
 			part.Status = "completed"
 		}
 	}
+	session.addCoveredRange(offset, offset+int64(len(data)))
 	session.partsMu.Unlock()
 
 	atomic.AddInt64(&session.uploadedSize, int64(len(data)))
@@ -201,6 +270,16 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	totalUploaded := atomic.LoadInt64(&session.uploadedSize)
 	if totalUploaded != session.TotalSize {
 		return fmt.Errorf("upload incomplete: expected %d bytes, got %d bytes", session.TotalSize, totalUploaded)
+	}
+
+	// Verify that every byte in [0, TotalSize) was actually written — the
+	// uploadedSize counter alone cannot detect duplicate or overlapping uploads
+	// that leave zero-filled gaps in the pre-allocated temp file.
+	session.partsMu.RLock()
+	fullyCovered := session.isFullyCovered()
+	session.partsMu.RUnlock()
+	if !fullyCovered {
+		return fmt.Errorf("upload incomplete: byte range coverage has gaps or overlaps (total size %d)", session.TotalSize)
 	}
 
 	session.partsMu.RLock()
@@ -233,6 +312,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		if computedHash != session.Hash {
 			os.Remove(tempPath)
 			s.multipartSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return fmt.Errorf("hash mismatch: expected %s, got %s", session.Hash, computedHash)
 		}
 	}
@@ -245,6 +325,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		if err := s.cryptoSvc.EncryptFile(tempPath, encTempPath); err != nil {
 			os.Remove(tempPath)
 			s.multipartSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return fmt.Errorf("failed to encrypt file: %w", err)
 		}
 		os.Remove(tempPath)
@@ -255,21 +336,24 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		if err != nil {
 			os.Remove(encTempPath)
 			s.multipartSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return fmt.Errorf("failed to compute encrypted hash: %w", err)
 		}
 		storageTempPath = encTempPath
 	}
 
-	token, err := distributed.AcquireLock(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
+	token, cancelRenew, err := distributed.AcquireLockWithRenewal(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
 		return fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
 	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
+	defer cancelRenew()
 
 	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
 		os.Remove(storageTempPath)
 		s.multipartSessions.Delete(sessionID)
+		s.releaseSessionSlot()
 		return fmt.Errorf("failed to write file from temp: %w", err)
 	}
 
@@ -312,6 +396,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	session.Status = "completed"
 	session.UpdatedAt = now
 	s.multipartSessions.Delete(sessionID)
+	s.releaseSessionSlot()
 
 	os.Remove(storageTempPath)
 
@@ -335,6 +420,7 @@ func (s *FileTransferService) AbortMultipartUpload(sessionID string) error {
 	session.Status = "aborted"
 	session.UpdatedAt = utils.GetCurrentTimestamp()
 	s.multipartSessions.Delete(sessionID)
+	s.releaseSessionSlot()
 
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 	os.Remove(tempPath)

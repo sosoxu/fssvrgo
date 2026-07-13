@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"golang.org/x/crypto/scrypt"
 )
 
 type CryptoService struct {
@@ -25,17 +27,20 @@ func (cs *CryptoService) Init(key string) error {
 		return fmt.Errorf("encryption key cannot be empty")
 	}
 
+	// If the key is a 32-byte hex string, use it directly (e.g. from key_file).
 	decoded, err := hex.DecodeString(key)
 	if err == nil && len(decoded) == 32 {
 		cs.key = decoded
 	} else {
-		if len(key) < 32 {
-			padded := make([]byte, 32)
-			copy(padded, []byte(key))
-			cs.key = padded
-		} else {
-			cs.key = []byte(key[:32])
+		// Treat input as a passphrase and derive a 32-byte key using scrypt.
+		// scrypt is memory-hard, making brute-force attacks on weak passphrases
+		// significantly more expensive than the previous zero-padding approach.
+		salt := []byte("fssvrgo-v1-aes256-gcm")
+		derived, err := scrypt.Key([]byte(key), salt, 32768, 8, 1, 32)
+		if err != nil {
+			return fmt.Errorf("failed to derive encryption key: %w", err)
 		}
+		cs.key = derived
 	}
 
 	cs.enabled = true

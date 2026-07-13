@@ -57,14 +57,49 @@ func (ls *LocalStorage) ValidatePath(path string) error {
 	if err != nil {
 		return fmt.Errorf("invalid root directory: %w", err)
 	}
+	// Resolve symlinks in root to prevent a symlinked root from bypassing checks.
+	if resolvedRoot, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = resolvedRoot
+	}
 	absFull, err := filepath.Abs(fullPath)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
+	// Resolve symlinks on the target path. If the target doesn't exist yet
+	// (e.g., a new file upload), resolve the deepest existing ancestor and
+	// re-append the remaining components to detect symlinks that escape root.
+	resolved, err := filepath.EvalSymlinks(absFull)
+	if err != nil {
+		resolved = resolveExistingAncestor(absFull)
+	}
+	absFull = filepath.Clean(resolved)
 	if !strings.HasPrefix(absFull, absRoot+string(filepath.Separator)) && absFull != absRoot {
 		return fmt.Errorf("path traversal detected: %s", path)
 	}
 	return nil
+}
+
+// resolveExistingAncestor walks up the path until it finds an existing
+// component, resolves its symlinks, and re-appends the non-existent tail.
+// This is used by ValidatePath to detect symlink-based traversal attacks on
+// paths that do not exist yet (e.g., new file uploads).
+func resolveExistingAncestor(path string) string {
+	dir := path
+	tail := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			if tail == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, tail)
+		}
+		tail = filepath.Join(filepath.Base(dir), tail)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return path // reached filesystem root without finding existing dir
+		}
+		dir = parent
+	}
 }
 
 func (ls *LocalStorage) validatePath(path string) error {

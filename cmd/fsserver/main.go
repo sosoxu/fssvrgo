@@ -361,6 +361,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Periodically clean up unused in-memory file locks to prevent unbounded
+	// growth of the fileLocks sync.Map in long-running processes.
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fm.CleanFileLocks()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	go func() {
 		if cfg.TLS.Enabled {
 			if err := httpServer.ListenAndServeTLS(); err != nil {

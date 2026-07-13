@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -65,25 +66,25 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 	}
 
 	s := &Server{
-		config:        cfg,
-		tlsCfg:        tlsCfg,
-		engine:        engine,
-		fm:            fm,
-		dirSvc:        dirSvc,
-		flSvc:         flSvc,
-		transferSvc:   transferSvc,
-		authSvc:       authSvc,
-		cryptoSvc:     cryptoSvc,
-		store:         store,
-		cacheSvc:      cacheSvc,
-		metricsSvc:    metricsSvc,
-		db:            db,
-		corsOrigins:   cfg.CORSAllowedOrigins,
-		maxUploadSize: int64(cfg.MaxUploadSizeMB) * 1024 * 1024,
-		maxChunkSize:  int64(cfg.MaxChunkSizeMB) * 1024 * 1024,
-		maxPageSize:     cfg.MaxPageSize,
-		startTime:       time.Now(),
-		concurrencySem:  make(chan struct{}, workers*4),
+		config:         cfg,
+		tlsCfg:         tlsCfg,
+		engine:         engine,
+		fm:             fm,
+		dirSvc:         dirSvc,
+		flSvc:          flSvc,
+		transferSvc:    transferSvc,
+		authSvc:        authSvc,
+		cryptoSvc:      cryptoSvc,
+		store:          store,
+		cacheSvc:       cacheSvc,
+		metricsSvc:     metricsSvc,
+		db:             db,
+		corsOrigins:    cfg.CORSAllowedOrigins,
+		maxUploadSize:  int64(cfg.MaxUploadSizeMB) * 1024 * 1024,
+		maxChunkSize:   int64(cfg.MaxChunkSizeMB) * 1024 * 1024,
+		maxPageSize:    cfg.MaxPageSize,
+		startTime:      time.Now(),
+		concurrencySem: make(chan struct{}, workers*4),
 	}
 
 	engine.MaxMultipartMemory = 32 << 20 // 32MB in-memory cache for multipart forms; excess spills to temp files
@@ -279,6 +280,23 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			}
 
 			if !s.authSvc.ValidateApiKey(apiKey) {
+				// API key validation failed — try JWT as a separate authentication path.
+				jwtSvc := s.authSvc.GetJWTService()
+				if jwtSvc != nil {
+					claims, err := jwtSvc.ValidateToken(apiKey)
+					if err == nil && claims != nil && (claims.TokenType == "" || claims.TokenType == "access") {
+						s.authSvc.ClearAuthFailure(clientIP)
+						c.Set("user", &auth.User{
+							ID:      claims.UserID,
+							Name:    claims.UserID,
+							Role:    claims.Role,
+							Enabled: true,
+						})
+						c.Set("api_key", apiKey)
+						c.Next()
+						return
+					}
+				}
 				s.authSvc.RecordAuthFailure(clientIP)
 				sendError(c, http.StatusUnauthorized, "Invalid API key")
 				c.Abort()
@@ -681,6 +699,7 @@ func (s *Server) handleList(c *gin.Context) {
 	pageSizeStr := c.DefaultQuery("page_size", "20")
 	sortBy := c.DefaultQuery("sort_by", "name")
 	sortOrder := c.DefaultQuery("sort_order", "asc")
+	recursive := c.Query("recursive") == "true"
 
 	if dirPath != "" && !isValidFilePath(dirPath) {
 		sendError(c, http.StatusBadRequest, "Invalid directory path")
@@ -700,7 +719,7 @@ func (s *Server) handleList(c *gin.Context) {
 		page = 1
 	}
 
-	result, err := s.flSvc.ListFiles(dirPath, false, page, pageSize, sortBy, sortOrder)
+	result, err := s.flSvc.ListFiles(dirPath, recursive, page, pageSize, sortBy, sortOrder)
 	if err != nil {
 		sendInternalError(c, err, "Internal server error")
 		return
@@ -1039,12 +1058,12 @@ func (s *Server) handleCompleteUpload(c *gin.Context) {
 	// the uploaded content was integrity-checked (#29: hash verification is
 	// optional but the outcome is now explicit in the response).
 	c.JSON(http.StatusOK, gin.H{
-		"message":         "Upload completed successfully",
-		"file_id":         result.FileID,
-		"hash_provided":   result.HashProvided,
-		"hash_verified":   result.HashVerified,
+		"message":        "Upload completed successfully",
+		"file_id":        result.FileID,
+		"hash_provided":  result.HashProvided,
+		"hash_verified":  result.HashVerified,
 		"uploaded_bytes": result.UploadedSize,
-		"storage_type":    result.StorageType,
+		"storage_type":   result.StorageType,
 	})
 }
 
@@ -1134,20 +1153,20 @@ func (s *Server) handleListApiKeys(c *gin.Context) {
 	result := make([]gin.H, 0, len(keys))
 	for _, k := range keys {
 		result = append(result, gin.H{
-			"id":          k.ID,
-			"name":        k.Name,
-			"description": k.Description,
-			"permissions": k.Permissions,
-			"created_at":  k.CreatedAt,
-			"expires_at":  k.ExpiresAt,
+			"id":           k.ID,
+			"name":         k.Name,
+			"description":  k.Description,
+			"permissions":  k.Permissions,
+			"created_at":   k.CreatedAt,
+			"expires_at":   k.ExpiresAt,
 			"last_used_at": k.LastUsedAt,
-			"is_active":   k.IsActive,
+			"is_active":    k.IsActive,
 		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"keys": result,
-		"page": page,
+		"keys":      result,
+		"page":      page,
 		"page_size": pageSize,
 	})
 }
@@ -1172,14 +1191,14 @@ func (s *Server) handleGetApiKey(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":          key.ID,
-		"name":        key.Name,
-		"description": key.Description,
-		"permissions": key.Permissions,
-		"created_at":  key.CreatedAt,
-		"expires_at":  key.ExpiresAt,
+		"id":           key.ID,
+		"name":         key.Name,
+		"description":  key.Description,
+		"permissions":  key.Permissions,
+		"created_at":   key.CreatedAt,
+		"expires_at":   key.ExpiresAt,
 		"last_used_at": key.LastUsedAt,
-		"is_active":   key.IsActive,
+		"is_active":    key.IsActive,
 	})
 }
 
@@ -1229,14 +1248,14 @@ func (s *Server) handleUpdateApiKey(c *gin.Context) {
 
 	s.auditLog("update_api_key", id, c, true, fmt.Sprintf("name=%s is_active=%v", key.Name, key.IsActive))
 	c.JSON(http.StatusOK, gin.H{
-		"id":          key.ID,
-		"name":        key.Name,
-		"description": key.Description,
-		"permissions": key.Permissions,
-		"created_at":  key.CreatedAt,
-		"expires_at":  key.ExpiresAt,
+		"id":           key.ID,
+		"name":         key.Name,
+		"description":  key.Description,
+		"permissions":  key.Permissions,
+		"created_at":   key.CreatedAt,
+		"expires_at":   key.ExpiresAt,
 		"last_used_at": key.LastUsedAt,
-		"is_active":   key.IsActive,
+		"is_active":    key.IsActive,
 	})
 }
 
@@ -1519,13 +1538,19 @@ func (s *Server) handleGenerateToken(c *gin.Context) {
 	}
 
 	// Resolve the caller's identity from the auth middleware. The caller cannot
-	// self-elevate: only an admin may issue admin tokens.
+	// self-elevate: only an admin may issue admin tokens or impersonate another user.
 	callerRole := "user"
 	callerID := req.UserID
 	if val, exists := c.Get("user"); exists {
 		if user, ok := val.(*auth.User); ok && user != nil {
 			callerRole = user.Role
-			if callerID == "" {
+			if callerRole == "admin" {
+				// Admins can specify a different user_id; default to their own.
+				if callerID == "" {
+					callerID = user.ID
+				}
+			} else {
+				// Non-admins must use their own authenticated identity.
 				callerID = user.ID
 			}
 		}

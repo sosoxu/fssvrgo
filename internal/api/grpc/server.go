@@ -27,6 +27,27 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// contextKey is an unexported type used to scope context values in this
+// package, avoiding collisions with keys defined by other packages.
+type contextKey string
+
+const userContextKey contextKey = "authUser"
+
+// methodPermissions maps gRPC full method names to the (resource, action)
+// pair required to invoke them. Methods absent from this map are allowed by
+// default to preserve backward compatibility.
+var methodPermissions = map[string]struct{ resource, action string }{
+	"/fsserver.FileService/UploadFile":      {"files", "write"},
+	"/fsserver.FileService/DownloadFile":    {"files", "read"},
+	"/fsserver.FileService/ListFiles":       {"files", "read"},
+	"/fsserver.FileService/DeleteFile":      {"files", "write"},
+	"/fsserver.FileService/RenameFile":      {"files", "write"},
+	"/fsserver.FileService/CreateDirectory": {"files", "write"},
+	"/fsserver.FileService/DeleteDirectory": {"files", "write"},
+	"/fsserver.FileService/RenameDirectory": {"files", "write"},
+	"/fsserver.FileService/GetMetadata":     {"files", "read"},
+}
+
 type Server struct {
 	pb.UnimplementedFileServiceServer
 	config      config.ServerConfig
@@ -61,14 +82,22 @@ func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *dir
 }
 
 func (s *Server) unaryAuthInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	if err := s.authenticate(ctx); err != nil {
+	ctx, err := s.authenticate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorize(ctx, info.FullMethod); err != nil {
 		return nil, err
 	}
 	return handler(ctx, req)
 }
 
 func (s *Server) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	if err := s.authenticate(ss.Context()); err != nil {
+	ctx, err := s.authenticate(ss.Context())
+	if err != nil {
+		return err
+	}
+	if err := s.authorize(ctx, info.FullMethod); err != nil {
 		return err
 	}
 	return handler(srv, ss)
@@ -101,25 +130,25 @@ func statusCodeFromErr(err error) int {
 	return 500
 }
 
-func (s *Server) authenticate(ctx context.Context) error {
+func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
 	if s.authSvc == nil {
-		return nil
+		return ctx, nil
 	}
 
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		if !s.authSvc.ValidateApiKey("") {
-			return status.Error(codes.Unauthenticated, "authentication required")
+			return ctx, status.Error(codes.Unauthenticated, "authentication required")
 		}
-		return nil
+		return ctx, nil
 	}
 
 	apiKeys := md.Get("x-api-key")
 	if len(apiKeys) > 0 && apiKeys[0] != "" {
 		if s.authSvc.ValidateApiKey(apiKeys[0]) {
-			return nil
+			return s.withUser(ctx, apiKeys[0]), nil
 		}
-		return status.Error(codes.Unauthenticated, "invalid API key")
+		return ctx, status.Error(codes.Unauthenticated, "invalid API key")
 	}
 
 	authHeaders := md.Get("authorization")
@@ -127,30 +156,80 @@ func (s *Server) authenticate(ctx context.Context) error {
 		if strings.HasPrefix(ah, "Bearer ") {
 			token := strings.TrimPrefix(ah, "Bearer ")
 			if s.authSvc.ValidateApiKey(token) {
-				return nil
+				return s.withUser(ctx, token), nil
 			}
 			// After Bearer token API key check fails, try JWT
 			if s.authSvc.GetJWTService() != nil {
 				claims, err := s.authSvc.GetJWTService().ValidateToken(token)
 				if err == nil && claims != nil {
-					return nil
+					return s.withUser(ctx, token), nil
 				}
 			}
-			return status.Error(codes.Unauthenticated, "invalid token")
+			return ctx, status.Error(codes.Unauthenticated, "invalid token")
 		}
 		if strings.HasPrefix(ah, "Api-Key ") {
 			key := strings.TrimPrefix(ah, "Api-Key ")
 			if s.authSvc.ValidateApiKey(key) {
-				return nil
+				return s.withUser(ctx, key), nil
 			}
-			return status.Error(codes.Unauthenticated, "invalid API key")
+			return ctx, status.Error(codes.Unauthenticated, "invalid API key")
 		}
 	}
 
 	if !s.authSvc.ValidateApiKey("") {
-		return status.Error(codes.Unauthenticated, "authentication required")
+		return ctx, status.Error(codes.Unauthenticated, "authentication required")
 	}
-	return nil
+	return ctx, nil
+}
+
+// withUser resolves the *auth.User for the given API key/token and stores it
+// in the context for downstream RBAC checks. If the user cannot be resolved
+// the original context is returned unchanged.
+func (s *Server) withUser(ctx context.Context, apiKey string) context.Context {
+	if s.authSvc == nil {
+		return ctx
+	}
+	if user := s.authSvc.GetUserByApiKey(apiKey); user != nil {
+		return context.WithValue(ctx, userContextKey, user)
+	}
+	return ctx
+}
+
+// authorize enforces method-level RBAC. It reads the *auth.User stored by
+// authenticate from the context and checks whether the user's role permits
+// the (resource, action) required by the given gRPC method. Methods absent
+// from methodPermissions are allowed by default. When auth is disabled or
+// authSvc is nil, all methods are allowed.
+func (s *Server) authorize(ctx context.Context, method string) error {
+	if s.authSvc == nil {
+		return nil
+	}
+	// Auth disabled: allow all.
+	if s.authSvc.ValidateApiKey("") {
+		return nil
+	}
+
+	perm, ok := methodPermissions[method]
+	if !ok {
+		// Methods not in the map are allowed by default (backward compat).
+		return nil
+	}
+
+	val := ctx.Value(userContextKey)
+	user, ok := val.(*auth.User)
+	if !ok || user == nil || !user.Enabled {
+		return status.Error(codes.PermissionDenied, "permission denied: no authenticated user")
+	}
+
+	// admin role can access all methods.
+	if user.Role == "admin" {
+		return nil
+	}
+	// user role can only access files read/write.
+	if user.Role == "user" && perm.resource == "files" && (perm.action == "read" || perm.action == "write") {
+		return nil
+	}
+	return status.Error(codes.PermissionDenied, "permission denied")
 }
 
 func (s *Server) Start() error {

@@ -86,10 +86,10 @@ func (l *RedisDistributedLock) Extend(ctx context.Context, key string, token str
 }
 
 type LockGuard struct {
-	lock   DistributedLock
-	key    string
-	token  string
-	ctx    context.Context
+	lock  DistributedLock
+	key   string
+	token string
+	ctx   context.Context
 }
 
 func (lg *LockGuard) Unlock() error {
@@ -186,7 +186,7 @@ func AcquireLock(ctx context.Context, dl DistributedLock, key string, ttl time.D
 
 		delay := baseDelay
 		if i > 0 {
-			backoff := time.Duration(1 << uint(i-1)) * baseDelay
+			backoff := time.Duration(1<<uint(i-1)) * baseDelay
 			if backoff > 2*time.Second {
 				backoff = 2 * time.Second
 			}
@@ -221,6 +221,42 @@ func generateToken() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// AcquireLockWithRenewal acquires a lock and starts a background goroutine that
+// periodically renews it until the returned cancel function is called. This is
+// essential for long-running operations (e.g. large file uploads) where the
+// lock TTL would otherwise expire before the operation completes.
+func AcquireLockWithRenewal(ctx context.Context, dl DistributedLock, key string, ttl time.Duration, retryCount int, retryDelay time.Duration) (string, context.CancelFunc, error) {
+	token, err := AcquireLock(ctx, dl, key, ttl, retryCount, retryDelay)
+	if err != nil {
+		return "", nil, err
+	}
+
+	renewCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		interval := ttl / 3
+		if interval < 2*time.Second {
+			interval = 2 * time.Second
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				renewCtx2, cancel2 := context.WithTimeout(renewCtx, 5*time.Second)
+				if err := dl.Extend(renewCtx2, key, token, ttl); err != nil {
+					cancel2()
+					return
+				}
+				cancel2()
+			case <-renewCtx.Done():
+				return
+			}
+		}
+	}()
+
+	return token, cancel, nil
 }
 
 var (

@@ -73,6 +73,8 @@ type FileTransferService struct {
 	sessionStore      distributed.SessionStore
 	distLock          distributed.DistributedLock
 	cryptoSvc         *crypto.CryptoService
+	maxSessions       int   // maximum concurrent upload sessions (DoS protection)
+	sessionCount      int64 // current number of active upload sessions (atomic)
 }
 
 func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.DB) *FileTransferService {
@@ -87,6 +89,7 @@ func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.
 		tempDir:      tempDir,
 		sessionStore: distributed.NewMemorySessionStore(),
 		distLock:     distributed.NewLocalDistributedLock(),
+		maxSessions:  1000,
 	}
 }
 
@@ -102,7 +105,24 @@ func NewFileTransferServiceWithRedis(storageAdapter storage.StorageAdapter, db *
 		tempDir:      tempDir,
 		sessionStore: sessionStore,
 		distLock:     distLock,
+		maxSessions:  1000,
 	}
+}
+
+// acquireSessionSlot atomically increments the session counter and returns
+// false if the maximum concurrent session limit has been reached.
+func (s *FileTransferService) acquireSessionSlot() bool {
+	count := atomic.AddInt64(&s.sessionCount, 1)
+	if count > int64(s.maxSessions) {
+		atomic.AddInt64(&s.sessionCount, -1)
+		return false
+	}
+	return true
+}
+
+// releaseSessionSlot decrements the session counter when a session ends.
+func (s *FileTransferService) releaseSessionSlot() {
+	atomic.AddInt64(&s.sessionCount, -1)
 }
 
 func (s *FileTransferService) SetCryptoService(cryptoSvc *crypto.CryptoService) {
@@ -110,6 +130,9 @@ func (s *FileTransferService) SetCryptoService(cryptoSvc *crypto.CryptoService) 
 }
 
 func (s *FileTransferService) CreateUploadSession(filePath, fileName string, totalSize int64, clientID, hash string) (string, error) {
+	if !s.acquireSessionSlot() {
+		return "", fmt.Errorf("maximum number of concurrent upload sessions reached")
+	}
 	filePath = utils.NormalizePath(filePath)
 	sessionID := utils.GenerateUUID()
 	now := utils.GetCurrentTimestamp()
@@ -129,6 +152,7 @@ func (s *FileTransferService) CreateUploadSession(filePath, fileName string, tot
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 	file, err := os.Create(tempPath)
 	if err != nil {
+		s.releaseSessionSlot()
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 
@@ -136,6 +160,7 @@ func (s *FileTransferService) CreateUploadSession(filePath, fileName string, tot
 		if err := file.Truncate(totalSize); err != nil {
 			file.Close()
 			os.Remove(tempPath)
+			s.releaseSessionSlot()
 			return "", fmt.Errorf("failed to pre-allocate temp file: %w", err)
 		}
 	}
@@ -273,11 +298,11 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 // hash gets HashProvided=true and HashVerified=true (or the call fails with
 // a hash mismatch error before returning).
 type CompleteUploadResult struct {
-	FileID        string
-	HashProvided  bool
-	HashVerified  bool
-	UploadedSize  int64
-	StorageType   string
+	FileID       string
+	HashProvided bool
+	HashVerified bool
+	UploadedSize int64
+	StorageType  string
 }
 
 func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadResult, error) {
@@ -319,11 +344,15 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 			session.tempFile = nil
 			session.tempFileMu.Unlock()
 			os.Remove(filepath.Join(s.tempDir, sessionID+".tmp"))
+			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to sync temp file: %w", err)
 		}
 		if err := session.tempFile.Close(); err != nil {
 			session.tempFile = nil
 			session.tempFileMu.Unlock()
+			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to close temp file: %w", err)
 		}
 		session.tempFile = nil
@@ -354,6 +383,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		if computedHash != session.Hash {
 			os.Remove(tempPath)
 			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return nil, fmt.Errorf("hash mismatch: expected %s, got %s", session.Hash, computedHash)
 		}
 		hashVerified = true
@@ -385,6 +415,8 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 	token, err := distributed.AcquireLock(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
+		s.uploadSessions.Delete(sessionID)
+		s.releaseSessionSlot()
 		return nil, fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
 	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
@@ -392,6 +424,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
+		s.releaseSessionSlot()
 		return nil, fmt.Errorf("failed to write file from temp: %w", err)
 	}
 
@@ -410,6 +443,8 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
 		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
+			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to update file metadata: %w", err)
 		}
 		meta = existingMeta
@@ -429,6 +464,8 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 
 		if err := database.NewFileMetadataService(s.db).Create(meta); err != nil {
 			s.storage.Remove(session.FilePath)
+			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to create file metadata: %w", err)
 		}
 	}
@@ -438,6 +475,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 	session.UpdatedAt = now
 
 	s.uploadSessions.Delete(sessionID)
+	s.releaseSessionSlot()
 
 	os.Remove(storageTempPath)
 
@@ -447,11 +485,11 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 	}
 
 	return &CompleteUploadResult{
-		FileID:        meta.ID,
-		HashProvided:  hashProvided,
-		HashVerified:  hashVerified,
-		UploadedSize:  session.TotalSize,
-		StorageType:   s.storage.StorageType(),
+		FileID:       meta.ID,
+		HashProvided: hashProvided,
+		HashVerified: hashVerified,
+		UploadedSize: session.TotalSize,
+		StorageType:  s.storage.StorageType(),
 	}, nil
 }
 
@@ -469,6 +507,7 @@ func (s *FileTransferService) AbortUpload(sessionID string) error {
 	session.Status = "aborted"
 	session.UpdatedAt = utils.GetCurrentTimestamp()
 	s.uploadSessions.Delete(sessionID)
+	s.releaseSessionSlot()
 
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 	os.Remove(tempPath)

@@ -70,6 +70,18 @@ func (fm *FileManager) distLockFile(path string) (string, error) {
 	return token, nil
 }
 
+// distLockFileWithRenewal acquires a distributed lock and starts a background
+// goroutine to periodically renew it. The returned cancel function must be
+// called (typically via defer) to stop renewal when the operation completes.
+// Use this for long-running operations like large file uploads.
+func (fm *FileManager) distLockFileWithRenewal(ctx context.Context, path string) (string, context.CancelFunc, error) {
+	token, cancel, err := distributed.AcquireLockWithRenewal(ctx, fm.distLock, "file:"+path, 10*time.Second, 30, 50*time.Millisecond)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to acquire distributed lock for %s: %w", path, err)
+	}
+	return token, cancel, nil
+}
+
 func (fm *FileManager) distUnlockFile(path string, token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -84,11 +96,12 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
-	token, err := fm.distLockFile(path)
+	token, cancelRenew, err := fm.distLockFileWithRenewal(context.Background(), path)
 	if err != nil {
 		return nil, err
 	}
 	defer fm.distUnlockFile(path, token)
+	defer cancelRenew()
 
 	if fm.Exists(path) {
 		existingMeta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
@@ -157,11 +170,12 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
-	token, err := fm.distLockFile(path)
+	token, cancelRenew, err := fm.distLockFileWithRenewal(context.Background(), path)
 	if err != nil {
 		return nil, err
 	}
 	defer fm.distUnlockFile(path, token)
+	defer cancelRenew()
 
 	// Tee the stream through a SHA-256 writer so we compute the hash as bytes
 	// flow into storage, without buffering the whole file in memory.

@@ -7,7 +7,7 @@ server:
   max_upload_size_mb: 1024
   max_chunk_size_mb: 64
   max_page_size: 1000
-  cors_allowed_origins: "*"
+  cors_allowed_origins: ""
   trusted_proxies: []
 
 tls:
@@ -70,8 +70,8 @@ discovery:
   interval: 30
 
 auth:
-  enabled: false
-  secret: ""
+  enabled: true
+  secret: ""  # REQUIRED when auth.enabled is true. Set a strong secret before starting.
   token_expiry: 3600
   refresh_expiry: 86400
 

@@ -31,15 +31,15 @@ type AuthFailureRecord struct {
 type apiKeyLookup func(ctx context.Context, keyHash string) (*database.ApiKey, error)
 
 type AuthService struct {
-	mu               sync.RWMutex
-	users            map[string]*User
-	authEnabled      bool
+	mu                sync.RWMutex
+	users             map[string]*User
+	authEnabled       bool
 	defaultApiKeyHash string
-	authFailures     map[string]*AuthFailureRecord
-	maxAuthFailures  int
-	rateLimitSeconds int
-	jwtService       *JWTService
-	apiKeyLookupFn   apiKeyLookup
+	authFailures      map[string]*AuthFailureRecord
+	maxAuthFailures   int
+	rateLimitSeconds  int
+	jwtService        *JWTService
+	apiKeyLookupFn    apiKeyLookup
 }
 
 func NewAuthService() *AuthService {
@@ -66,8 +66,10 @@ func (as *AuthService) Init(authEnabled bool, apiKey string) {
 	as.authEnabled = authEnabled
 	if authEnabled && apiKey != "" {
 		as.defaultApiKeyHash = hashApiKey(apiKey)
-		// JWT signing secret is derived independently from the admin API key value
-		// to avoid key reuse (defense in depth). We hash it to obtain a 32-byte key.
+		// JWT signing secret is derived from the admin API key value by hashing
+		// it to obtain a 32-byte key. NOTE: this produces the same value as
+		// defaultApiKeyHash above; consider using a domain-specific prefix
+		// (e.g. hashApiKey("jwt:"+apiKey)) for stronger key separation.
 		tokenExpiry := time.Duration(24) * time.Hour
 		refreshExpiry := time.Duration(168) * time.Hour
 		as.jwtService = NewJWTService(hashApiKey(apiKey), tokenExpiry, refreshExpiry)
@@ -94,7 +96,6 @@ func (as *AuthService) ValidateApiKey(apiKey string) bool {
 	as.mu.RLock()
 	defaultHash := as.defaultApiKeyHash
 	users := as.users
-	jwtSvc := as.jwtService
 	lookupFn := as.apiKeyLookupFn
 	as.mu.RUnlock()
 
@@ -117,17 +118,6 @@ func (as *AuthService) ValidateApiKey(apiKey string) bool {
 		}
 	}
 
-	// After API key validation fails, try JWT
-	if jwtSvc != nil {
-		claims, err := jwtSvc.ValidateToken(apiKey)
-		if err == nil && claims != nil {
-			// Only access tokens are accepted for API authentication.
-			if claims.TokenType == "" || claims.TokenType == "access" {
-				return true
-			}
-		}
-	}
-
 	return false
 }
 
@@ -145,7 +135,6 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 	as.mu.RLock()
 	defaultHash := as.defaultApiKeyHash
 	users := as.users
-	jwtSvc := as.jwtService
 	lookupFn := as.apiKeyLookupFn
 	as.mu.RUnlock()
 
@@ -178,21 +167,6 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 				Name:    key.Name,
 				Role:    role,
 				Enabled: true,
-			}
-		}
-	}
-
-	// Try JWT
-	if jwtSvc != nil {
-		claims, err := jwtSvc.ValidateToken(apiKey)
-		if err == nil && claims != nil {
-			if claims.TokenType == "" || claims.TokenType == "access" {
-				return &User{
-					ID:      claims.UserID,
-					Name:    claims.UserID,
-					Role:    claims.Role,
-					Enabled: true,
-				}
 			}
 		}
 	}
