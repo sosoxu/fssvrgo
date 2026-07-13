@@ -233,10 +233,10 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 			actual, loaded := s.uploadSessions.LoadOrStore(sessionID, restored)
 			val = actual
 			ok = true
-			if !loaded {
-				// We won the race; close the file handle we just opened if another
-				// goroutine's restored copy is already in use (shouldn't happen
-				// because LoadOrStore is atomic, but be safe).
+			if loaded && restored.tempFile != nil {
+				// 输掉了竞态：另一个 goroutine 的副本已在使用，关闭本副本
+				// 刚重新打开的 temp file 句柄，避免文件描述符泄漏。
+				restored.tempFile.Close()
 			}
 		}
 	}
@@ -347,9 +347,12 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 			}
 			atomic.StoreInt32(&restored.hashValid, 0)
 			restored.hashWriter = nil
-			actual, _ := s.uploadSessions.LoadOrStore(sessionID, restored)
+			actual, loaded := s.uploadSessions.LoadOrStore(sessionID, restored)
 			val = actual
 			ok = true
+			if loaded && restored.tempFile != nil {
+				restored.tempFile.Close()
+			}
 		}
 	}
 
@@ -405,6 +408,9 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 			var err error
 			computedHash, err = utils.SHA256File(tempPath)
 			if err != nil {
+				os.Remove(tempPath)
+				s.uploadSessions.Delete(sessionID)
+				s.releaseSessionSlot()
 				return nil, fmt.Errorf("failed to compute hash: %w", err)
 			}
 		}
@@ -425,6 +431,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		if err := s.cryptoSvc.EncryptFile(tempPath, encTempPath); err != nil {
 			os.Remove(tempPath)
 			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to encrypt file: %w", err)
 		}
 		os.Remove(tempPath)
@@ -435,6 +442,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		if err != nil {
 			os.Remove(encTempPath)
 			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to compute encrypted hash: %w", err)
 		}
 		storageTempPath = encTempPath
@@ -530,9 +538,12 @@ func (s *FileTransferService) AbortUpload(sessionID string) error {
 
 	session := val.(*UploadSession)
 	atomic.StoreInt32(&session.closed, 1)
+	session.tempFileMu.Lock()
 	if session.tempFile != nil {
 		session.tempFile.Close()
+		session.tempFile = nil
 	}
+	session.tempFileMu.Unlock()
 	session.Status = "aborted"
 	session.UpdatedAt = utils.GetCurrentTimestamp()
 	s.uploadSessions.Delete(sessionID)
@@ -781,12 +792,16 @@ func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 		if createdAt.Before(expiryTime) {
 			session.Status = "expired"
 			atomic.StoreInt32(&session.closed, 1)
+			session.tempFileMu.Lock()
 			if session.tempFile != nil {
 				session.tempFile.Close()
+				session.tempFile = nil
 			}
+			session.tempFileMu.Unlock()
 			tempPath := filepath.Join(s.tempDir, key.(string)+".tmp")
 			os.Remove(tempPath)
 			s.uploadSessions.Delete(key)
+			s.releaseSessionSlot()
 			s.sessionStore.Delete(ctx, "upload", key.(string))
 		}
 		return true
@@ -821,12 +836,16 @@ func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 		if createdAt.Before(expiryTime) {
 			session.Status = "expired"
 			atomic.StoreInt32(&session.closed, 1)
+			session.partsMu.Lock()
 			if session.tempFile != nil {
 				session.tempFile.Close()
+				session.tempFile = nil
 			}
+			session.partsMu.Unlock()
 			tempPath := filepath.Join(s.tempDir, key.(string)+".tmp")
 			os.Remove(tempPath)
 			s.multipartSessions.Delete(key)
+			s.releaseSessionSlot()
 			s.sessionStore.Delete(ctx, "multipart_upload", key.(string))
 		}
 		return true

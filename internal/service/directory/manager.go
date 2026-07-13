@@ -3,6 +3,7 @@ package directory
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/database"
@@ -11,6 +12,15 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
+
+// escapeLikePattern 转义 SQL LIKE 模式中的通配符（%、_、\），防止目录名含这些
+// 字符时导致跨目录误匹配。转义后的模式需配合 ESCAPE '\\' 子句使用。
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
+}
 
 type DirectoryManager struct {
 	db       *database.DB
@@ -135,9 +145,9 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	}
 
 	if !recursive {
-		prefix := path + "/%"
+		escapedPrefix := escapeLikePattern(path + "/")
 		var fileCount int
-		err := dm.db.QueryRow("SELECT COUNT(*) FROM files WHERE path LIKE ? AND is_deleted = FALSE", prefix).Scan(&fileCount)
+		err := dm.db.QueryRow("SELECT COUNT(*) FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapedPrefix+"%").Scan(&fileCount)
 		if err != nil {
 			return fmt.Errorf("failed to check directory contents: %w", err)
 		}
@@ -145,7 +155,7 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 			return fmt.Errorf("directory is not empty: %s", path)
 		}
 		var dirCount int
-		err = dm.db.QueryRow("SELECT COUNT(*) FROM directories WHERE path LIKE ? AND is_deleted = FALSE", prefix).Scan(&dirCount)
+		err = dm.db.QueryRow("SELECT COUNT(*) FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapedPrefix+"%").Scan(&dirCount)
 		if err != nil {
 			return fmt.Errorf("failed to check directory contents: %w", err)
 		}
@@ -171,13 +181,13 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	// transaction commits and is best-effort (a leaked object is recoverable via
 	// the periodic cleanup service; a missing DB record after commit is not).
 	const batchSize = 500
-	prefix := path + "/"
+	prefix := escapeLikePattern(path + "/")
 
 	for {
 		// Query the next batch outside the transaction — we only need the IDs
 		// to soft-delete, and holding a long read transaction for large dirs
 		// would hurt concurrency on SQLite.
-		rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
+		rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
 		if err != nil {
 			return fmt.Errorf("failed to query files: %w", err)
 		}
@@ -194,6 +204,10 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 				return fmt.Errorf("failed to scan file id: %w", err)
 			}
 			entries = append(entries, e)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to iterate file rows: %w", err)
 		}
 		rows.Close()
 
@@ -228,7 +242,7 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	}
 
 	for {
-		rows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
+		rows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
 		if err != nil {
 			return fmt.Errorf("failed to query directories: %w", err)
 		}
@@ -245,6 +259,10 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 				return fmt.Errorf("failed to scan directory id: %w", err)
 			}
 			entries = append(entries, e)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to iterate directory rows: %w", err)
 		}
 		rows.Close()
 
@@ -327,7 +345,7 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	// Snapshot the children to rename. The distributed lock serializes this
 	// against concurrent rename/delete on the same directory, so the snapshot
 	// is stable for the duration of the operation.
-	rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? AND is_deleted = FALSE", oldPath+"/%")
+	rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
 	if err != nil {
 		return fmt.Errorf("failed to query child files: %w", err)
 	}
@@ -345,9 +363,13 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 		}
 		fileEntries = append(fileEntries, e)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("failed to iterate file rows: %w", err)
+	}
 	rows.Close()
 
-	dirRows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? AND is_deleted = FALSE", oldPath+"/%")
+	dirRows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
 	if err != nil {
 		return fmt.Errorf("failed to query child directories: %w", err)
 	}
@@ -360,6 +382,10 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 			return fmt.Errorf("failed to scan directory path: %w", err)
 		}
 		dirEntries = append(dirEntries, e)
+	}
+	if err := dirRows.Err(); err != nil {
+		dirRows.Close()
+		return fmt.Errorf("failed to iterate directory rows: %w", err)
 	}
 	dirRows.Close()
 

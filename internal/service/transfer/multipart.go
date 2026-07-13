@@ -296,9 +296,14 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	if err := session.tempFile.Sync(); err != nil {
 		session.tempFile.Close()
 		os.Remove(filepath.Join(s.tempDir, sessionID+".tmp"))
+		s.multipartSessions.Delete(sessionID)
+		s.releaseSessionSlot()
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 	if err := session.tempFile.Close(); err != nil {
+		os.Remove(filepath.Join(s.tempDir, sessionID+".tmp"))
+		s.multipartSessions.Delete(sessionID)
+		s.releaseSessionSlot()
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
@@ -307,6 +312,9 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	if session.Hash != "" {
 		computedHash, err := utils.SHA256File(tempPath)
 		if err != nil {
+			os.Remove(tempPath)
+			s.multipartSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return fmt.Errorf("failed to compute hash: %w", err)
 		}
 		if computedHash != session.Hash {
@@ -345,6 +353,8 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	token, cancelRenew, err := distributed.AcquireLockWithRenewal(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
+		s.multipartSessions.Delete(sessionID)
+		s.releaseSessionSlot()
 		return fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
 	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
@@ -371,6 +381,9 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
 		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
+			os.Remove(storageTempPath)
+			s.multipartSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return fmt.Errorf("failed to update file metadata: %w", err)
 		}
 	} else {
@@ -389,6 +402,9 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 
 		if err := database.NewFileMetadataService(s.db).Create(meta); err != nil {
 			s.storage.Remove(session.FilePath)
+			os.Remove(storageTempPath)
+			s.multipartSessions.Delete(sessionID)
+			s.releaseSessionSlot()
 			return fmt.Errorf("failed to create file metadata: %w", err)
 		}
 	}

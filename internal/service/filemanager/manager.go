@@ -356,7 +356,10 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	meta.UpdatedAt = utils.GetCurrentTimestamp()
 
 	if err := database.NewFileMetadataService(fm.db).Update(meta); err != nil {
-		fm.storage.Rename(newPath, oldPath)
+		// 回滚存储层重命名：若回滚也失败则记录日志，避免静默丢失文件。
+		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+			logger.Error("failed to rollback storage rename %s -> %s: %v", newPath, oldPath, rbErr)
+		}
 		return fmt.Errorf("failed to update file metadata: %w", err)
 	}
 
@@ -394,8 +397,15 @@ func (fm *FileManager) GetFileSize(path string) int64 {
 }
 
 func (fm *FileManager) CleanFileLocks() {
-	fm.fileLocks.Range(func(key, _ interface{}) bool {
+	fm.fileLocks.Range(func(key, value interface{}) bool {
 		path := key.(string)
+		mu := value.(*sync.Mutex)
+		// TryLock 成功说明当前无 goroutine 持有该锁，可安全删除；
+		// 失败则跳过，避免删除正在使用的锁条目导致锁逃逸。
+		if !mu.TryLock() {
+			return true
+		}
+		mu.Unlock()
 		if !fm.Exists(path) {
 			fm.fileLocks.Delete(key)
 		}

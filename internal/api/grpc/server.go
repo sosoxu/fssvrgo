@@ -161,7 +161,9 @@ func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
 			// After Bearer token API key check fails, try JWT
 			if s.authSvc.GetJWTService() != nil {
 				claims, err := s.authSvc.GetJWTService().ValidateToken(token)
-				if err == nil && claims != nil {
+				// 只接受 access token（或无类型标记的兼容旧 token），拒绝 refresh token
+				// 被当作 access token 使用，与 HTTP 处理器行为一致。
+				if err == nil && claims != nil && (claims.TokenType == "" || claims.TokenType == "access") {
 					return s.withUser(ctx, token), nil
 				}
 			}
@@ -283,6 +285,14 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 	}
 	if !utils.IsValidFileName(meta.Name) {
 		return status.Error(codes.InvalidArgument, "invalid file name")
+	}
+	// 校验 TotalSize：防止超大文件预分配耗尽磁盘，与 HTTP handleUpload 一致。
+	maxUploadSize := int64(s.config.MaxUploadSizeMB) * 1024 * 1024
+	if meta.TotalSize <= 0 {
+		return status.Error(codes.InvalidArgument, "total_size must be positive")
+	}
+	if maxUploadSize > 0 && meta.TotalSize > maxUploadSize {
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("total_size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
 	}
 
 	// 读取第一个分块
@@ -430,6 +440,12 @@ func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreami
 	if chunkSize <= 0 {
 		chunkSize = 1024 * 1024 // 1MB default
 	}
+	// 上限保护：防止客户端传超大 chunkSize 触发 make([]byte, size) 的 2GB 内存分配
+	// 导致 OOM，与 HTTP handleRangeDownload 的 32MB 上限一致。
+	const maxDownloadChunkSize = 32 * 1024 * 1024
+	if chunkSize > maxDownloadChunkSize {
+		chunkSize = maxDownloadChunkSize
+	}
 
 	var offset int64
 	if req.Offset > 0 {
@@ -464,7 +480,14 @@ func (s *Server) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (*pb.L
 	// has no include_total/has_more toggle), so we always compute the exact
 	// total here to preserve backward compatibility. HTTP clients that only
 	// need pagination can use the ListFiles path via the REST API instead.
-	result, err := s.flSvc.ListFilesWithTotal(req.Path, req.Recursive, int(req.Page), int(req.PageSize), req.SortBy, req.SortOrder)
+	page := int(req.Page)
+	pageSize := int(req.PageSize)
+	// 上限保护：防止客户端传超大 pageSize 触发海量行返回导致 OOM，
+	// 与 HTTP handleList 的 maxPageSize 上限一致。
+	if maxPageSize := s.config.MaxPageSize; maxPageSize > 0 && pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+	result, err := s.flSvc.ListFilesWithTotal(req.Path, req.Recursive, page, pageSize, req.SortBy, req.SortOrder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
@@ -490,6 +513,13 @@ func (s *Server) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (*pb.L
 	}, nil
 }
 
+// internalError 记录详细错误到日志，返回通用消息给客户端，避免泄漏 SQL 错误、
+// 文件路径、堆栈线索等内部信息。op 用于日志标识操作类型。
+func internalError(op string, err error) error {
+	logger.Error("gRPC %s failed: %v", op, err)
+	return status.Error(codes.Internal, "internal server error")
+}
+
 func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb.DeleteFileResponse, error) {
 	if req.Path == "" {
 		return nil, status.Error(codes.InvalidArgument, "path is required")
@@ -498,7 +528,7 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 		return nil, status.Error(codes.InvalidArgument, "invalid file path")
 	}
 	if err := s.fm.DeleteFile(req.Path); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, internalError("DeleteFile", err)
 	}
 	return &pb.DeleteFileResponse{Success: true, Message: "File deleted successfully"}, nil
 }
@@ -517,7 +547,7 @@ func (s *Server) RenameFile(ctx context.Context, req *pb.RenameFileRequest) (*pb
 		return nil, status.Error(codes.InvalidArgument, "invalid new name")
 	}
 	if err := s.fm.RenameFile(req.Path, req.NewName); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, internalError("RenameFile", err)
 	}
 	return &pb.RenameFileResponse{Success: true, Message: "File renamed successfully"}, nil
 }
@@ -530,7 +560,7 @@ func (s *Server) CreateDirectory(ctx context.Context, req *pb.CreateDirectoryReq
 		return nil, status.Error(codes.InvalidArgument, "invalid directory path")
 	}
 	if err := s.dirSvc.CreateDirectory(req.Path); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, internalError("CreateDirectory", err)
 	}
 	return &pb.CreateDirectoryResponse{Success: true, Message: "Directory created successfully"}, nil
 }
@@ -586,7 +616,7 @@ func (s *Server) DeleteDirectory(ctx context.Context, req *pb.DeleteDirectoryReq
 		return nil, status.Error(codes.InvalidArgument, "invalid directory path")
 	}
 	if err := s.dirSvc.DeleteDirectory(req.Path, req.Recursive); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, internalError("DeleteDirectory", err)
 	}
 	return &pb.DeleteDirectoryResponse{Success: true, Message: "Directory deleted successfully"}, nil
 }
@@ -605,7 +635,7 @@ func (s *Server) RenameDirectory(ctx context.Context, req *pb.RenameDirectoryReq
 		return nil, status.Error(codes.InvalidArgument, "invalid new name")
 	}
 	if err := s.dirSvc.RenameDirectory(req.Path, req.NewName); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, internalError("RenameDirectory", err)
 	}
 	return &pb.RenameDirectoryResponse{Success: true, Message: "Directory renamed successfully"}, nil
 }
