@@ -701,6 +701,10 @@ func (s *Server) handleList(c *gin.Context) {
 	sortBy := c.DefaultQuery("sort_by", "name")
 	sortOrder := c.DefaultQuery("sort_order", "asc")
 	recursive := c.Query("recursive") == "true"
+	// include_total defaults to false: the COUNT is O(N) on large directories,
+	// and most clients only need HasMore for pagination. Pass ?include_total=true
+	// when the exact total is required (e.g. a UI showing "N items").
+	includeTotal := c.Query("include_total") == "true"
 
 	if dirPath != "" && !isValidFilePath(dirPath) {
 		sendError(c, http.StatusBadRequest, "Invalid directory path")
@@ -720,7 +724,13 @@ func (s *Server) handleList(c *gin.Context) {
 		page = 1
 	}
 
-	result, err := s.flSvc.ListFiles(dirPath, recursive, page, pageSize, sortBy, sortOrder)
+	var result *filelist.FileListResult
+	var err error
+	if includeTotal {
+		result, err = s.flSvc.ListFilesWithTotal(dirPath, recursive, page, pageSize, sortBy, sortOrder)
+	} else {
+		result, err = s.flSvc.ListFiles(dirPath, recursive, page, pageSize, sortBy, sortOrder)
+	}
 	if err != nil {
 		sendInternalError(c, err, "Internal server error")
 		return

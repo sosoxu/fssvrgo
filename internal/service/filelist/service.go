@@ -17,10 +17,17 @@ type FileListItem struct {
 	CreatedAt string
 }
 
+// FileListResult holds a page of list results.
+//
+// Total semantics: when includeTotal is false (the default), Total is -1 to
+// signal "not computed" — clients that only need pagination should use HasMore
+// instead of Total. When includeTotal is true, Total is the exact count of all
+// items matching the filter (computed via a separate COUNT query).
 type FileListResult struct {
-	Total    int
+	Total    int  // -1 when not computed (includeTotal=false); exact count otherwise
 	Page     int
 	PageSize int
+	HasMore  bool // true if there are more items beyond this page
 	Items    []FileListItem
 }
 
@@ -39,7 +46,21 @@ func escapeLikePattern(s string) string {
 	return s
 }
 
+// ListFiles lists files and directories under path with pagination. It does NOT
+// compute Total (Total=-1); use ListFilesWithTotal if you need the exact count.
+// HasMore is set so callers can paginate without Total.
 func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize int, sortBy, sortOrder string) (*FileListResult, error) {
+	return s.listFiles(path, recursive, page, pageSize, sortBy, sortOrder, false)
+}
+
+// ListFilesWithTotal is like ListFiles but also computes the exact Total via a
+// COUNT query. Use this only when the caller genuinely needs the total (e.g. a
+// UI showing "N items"); it costs an extra full-scan COUNT on large directories.
+func (s *FileListService) ListFilesWithTotal(path string, recursive bool, page, pageSize int, sortBy, sortOrder string) (*FileListResult, error) {
+	return s.listFiles(path, recursive, page, pageSize, sortBy, sortOrder, true)
+}
+
+func (s *FileListService) listFiles(path string, recursive bool, page, pageSize int, sortBy, sortOrder string, includeTotal bool) (*FileListResult, error) {
 	path = utils.NormalizePath(path)
 	if path == "." {
 		path = ""
@@ -83,20 +104,10 @@ func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize 
 		}
 	}
 
-	countQuery := fmt.Sprintf(
-		`SELECT COUNT(*) FROM (SELECT id FROM files WHERE %s UNION ALL SELECT id FROM directories WHERE %s)`,
-		whereClause, whereClause,
-	)
-
-	countArgs := make([]interface{}, 0, len(args)*2)
-	countArgs = append(countArgs, args...)
-	countArgs = append(countArgs, args...)
-
-	var total int
-	if err := s.db.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("failed to count items: %w", err)
-	}
-
+	// Fetch one extra row (pageSize+1) to determine HasMore without a COUNT.
+	// This is O(pageSize) rather than O(N) for the common case where the caller
+	// does not need an exact total.
+	fetchLimit := pageSize + 1
 	offset := (page - 1) * pageSize
 
 	itemsQuery := fmt.Sprintf(
@@ -110,7 +121,7 @@ func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize 
 	itemsArgs := make([]interface{}, 0, len(args)*2+2)
 	itemsArgs = append(itemsArgs, args...)
 	itemsArgs = append(itemsArgs, args...)
-	itemsArgs = append(itemsArgs, pageSize, offset)
+	itemsArgs = append(itemsArgs, fetchLimit, offset)
 
 	rows, err := s.db.Query(itemsQuery, itemsArgs...)
 	if err != nil {
@@ -127,6 +138,26 @@ func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize 
 		items = append(items, item)
 	}
 
+	hasMore := len(items) > pageSize
+	if hasMore {
+		// Trim the extra row we fetched only to detect HasMore.
+		items = items[:pageSize]
+	}
+
+	total := -1 // -1 signals "not computed"
+	if includeTotal {
+		countQuery := fmt.Sprintf(
+			`SELECT COUNT(*) FROM (SELECT id FROM files WHERE %s UNION ALL SELECT id FROM directories WHERE %s)`,
+			whereClause, whereClause,
+		)
+		countArgs := make([]interface{}, 0, len(args)*2)
+		countArgs = append(countArgs, args...)
+		countArgs = append(countArgs, args...)
+		if err := s.db.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
+			return nil, fmt.Errorf("failed to count items: %w", err)
+		}
+	}
+
 	if items == nil {
 		items = []FileListItem{}
 	}
@@ -135,6 +166,7 @@ func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize 
 		Total:    total,
 		Page:     page,
 		PageSize: pageSize,
+		HasMore:  hasMore,
 		Items:    items,
 	}, nil
 }
