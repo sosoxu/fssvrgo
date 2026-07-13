@@ -324,10 +324,24 @@ func main() {
 
 	// Services
 	fm := filemanager.NewFileManagerWithDistLock(store, queryDB, distLock)
-	dirSvc := directory.NewDirectoryManagerWithStore(queryDB, store)
+	dirSvc := directory.NewDirectoryManagerWithDistLock(queryDB, store, distLock)
 	flSvc := filelist.NewFileListService(queryDB)
 	transferSvc := transfer.NewFileTransferServiceWithRedis(store, queryDB, sessionStore, distLock)
 	transferSvc.SetCryptoService(cryptoSvc)
+
+	// Override the upload temp directory when configured. When set to a shared
+	// volume (e.g. NFS) mounted at the same path on every instance, upload
+	// sessions become resumable across instances — the temp file written by the
+	// instance that started the session can be opened by the instance that
+	// completes it. When left empty, each instance keeps a private temp dir and
+	// cross-instance resume falls back to metadata-only (bytes are lost).
+	if cfg.Storage.TempDir != "" {
+		if err := transferSvc.SetTempDir(cfg.Storage.TempDir); err != nil {
+			logger.Error("Failed to set upload temp directory: %v", err)
+			os.Exit(1)
+		}
+		logger.Info("Upload temp dir: %s (shared-volume resume enabled)", cfg.Storage.TempDir)
+	}
 
 	// Start session cleanup
 	transferSvc.StartCleanupThread(60, 7200)
