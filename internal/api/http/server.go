@@ -616,7 +616,7 @@ func (s *Server) handleDownload(c *gin.Context) {
 		return
 	}
 
-	data, err := s.fm.DownloadFile(filePath)
+	data, err := s.fm.DownloadFileData(meta)
 	if err != nil {
 		sendError(c, http.StatusInternalServerError, "Failed to read file")
 		return
@@ -681,7 +681,7 @@ func (s *Server) handleRangeDownload(c *gin.Context, meta *database.FileMetadata
 		return
 	}
 
-	data, err := s.fm.DownloadFileAt(filePath, chunkSize, start)
+	data, err := s.fm.DownloadFileDataAt(meta, chunkSize, start)
 	if err != nil {
 		sendError(c, http.StatusInternalServerError, "Failed to read file range")
 		return

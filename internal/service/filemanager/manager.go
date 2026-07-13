@@ -268,6 +268,36 @@ func (fm *FileManager) DownloadFileAt(path string, size int, offset int64) ([]by
 	return data, nil
 }
 
+// DownloadFileData 读取文件内容，复用调用方已查询的 meta，避免 DownloadFile 内部
+// 重复执行 GetFileMetadata 的 DB 查询。meta 必须是 GetFileMetadata 的返回值（或
+// 等价的有效元数据）。
+func (fm *FileManager) DownloadFileData(meta *database.FileMetadata) ([]byte, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("metadata is required")
+	}
+	path := utils.NormalizePath(meta.Path)
+	data, err := fm.storage.Read(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	return data, nil
+}
+
+// DownloadFileDataAt 读取文件指定 offset 起的 size 字节，复用调用方已查询的
+// meta。gRPC/HTTP 下载路径在循环或分块读取时调用本方法，可消除每个 chunk 的
+// 冗余 GetFileMetadata 查询。
+func (fm *FileManager) DownloadFileDataAt(meta *database.FileMetadata, size int, offset int64) ([]byte, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("metadata is required")
+	}
+	path := utils.NormalizePath(meta.Path)
+	data, err := fm.storage.ReadAt(path, size, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file at offset: %w", err)
+	}
+	return data, nil
+}
+
 func (fm *FileManager) DeleteFile(path string) error {
 	path = utils.NormalizePath(path)
 	fm.lockFile(path)

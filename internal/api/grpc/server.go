@@ -437,7 +437,7 @@ func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreami
 	}
 
 	for offset < meta.Size {
-		data, err := s.fm.DownloadFileAt(req.Path, chunkSize, offset)
+		data, err := s.fm.DownloadFileDataAt(meta, chunkSize, offset)
 		if err != nil {
 			return fmt.Errorf("failed to read file chunk: %w", err)
 		}
