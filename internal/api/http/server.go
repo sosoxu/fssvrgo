@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -589,6 +591,15 @@ func (s *Server) handleDownload(c *gin.Context) {
 		return
 	}
 
+	// 加密文件统一走解密临时文件路径：http.ServeContent 会基于明文临时文件
+	// 正确处理 Content-Length（明文大小）和 Range 请求（基于明文偏移），
+	// 修复原先大文件流式下载返回密文、Range 请求返回密文片段、
+	// Content-Length 与实际返回内容大小不匹配三个问题。
+	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
+		s.handleEncryptedDownload(c, meta, filePath)
+		return
+	}
+
 	rangeHeader := c.GetHeader("Range")
 	if rangeHeader != "" {
 		s.handleRangeDownload(c, meta, filePath, rangeHeader)
@@ -622,16 +633,69 @@ func (s *Server) handleDownload(c *gin.Context) {
 		return
 	}
 
-	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
-		decrypted, err := s.cryptoSvc.Decrypt(string(data))
-		if err != nil {
-			sendError(c, http.StatusInternalServerError, "Failed to decrypt file")
-			return
-		}
-		data = []byte(decrypted)
+	c.Data(http.StatusOK, "application/octet-stream", data)
+}
+
+// handleEncryptedDownload 将加密文件解密到临时文件后通过 http.ServeContent 响应，
+// 正确处理 Content-Length（明文大小）和 Range 请求（基于明文偏移）。
+// 临时文件在响应结束后清理。
+func (s *Server) handleEncryptedDownload(c *gin.Context, meta *database.FileMetadata, filePath string) {
+	tempDir := s.transferSvc.TempDir()
+	sessionID := utils.GenerateUUID()
+	encTempPath := filepath.Join(tempDir, sessionID+".enc")
+	decTempPath := filepath.Join(tempDir, sessionID+".dec")
+
+	// 清理临时文件的辅助函数
+	cleanup := func() {
+		os.Remove(encTempPath)
+		os.Remove(decTempPath)
 	}
 
-	c.Data(http.StatusOK, "application/octet-stream", data)
+	// 1. 将加密文件从存储流式写入临时文件
+	encFile, err := os.Create(encTempPath)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to create temp file")
+		return
+	}
+
+	reader, err := s.store.OpenReader(filePath)
+	if err != nil {
+		encFile.Close()
+		os.Remove(encTempPath)
+		sendError(c, http.StatusInternalServerError, "Failed to open encrypted file")
+		return
+	}
+
+	if _, err := io.Copy(encFile, reader); err != nil {
+		reader.Close()
+		encFile.Close()
+		cleanup()
+		sendError(c, http.StatusInternalServerError, "Failed to stream encrypted file")
+		return
+	}
+	reader.Close()
+	encFile.Close()
+
+	// 2. 解密到明文临时文件
+	if err := s.cryptoSvc.DecryptFileStreaming(encTempPath, decTempPath); err != nil {
+		cleanup()
+		sendError(c, http.StatusInternalServerError, "Failed to decrypt file")
+		return
+	}
+
+	// 3. 打开明文临时文件，用 http.ServeContent 响应（自动处理 Range 和 Content-Length）
+	decFile, err := os.Open(decTempPath)
+	if err != nil {
+		cleanup()
+		sendError(c, http.StatusInternalServerError, "Failed to open decrypted file")
+		return
+	}
+	defer decFile.Close()
+	defer cleanup()
+
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", meta.Name))
+	http.ServeContent(c.Writer, c.Request, meta.Name, time.Time{}, decFile)
 }
 
 func (s *Server) handleRangeDownload(c *gin.Context, meta *database.FileMetadata, filePath, rangeHeader string) {
