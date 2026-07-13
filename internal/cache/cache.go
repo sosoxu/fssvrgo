@@ -36,6 +36,7 @@ type Cache struct {
 	ttl     int64
 	maxSize int
 	stopCh  chan struct{}
+	stopOnce sync.Once
 }
 
 func NewCache(ttl int64, maxSize int) *Cache {
@@ -64,7 +65,9 @@ func (c *Cache) cleanupLoop() {
 }
 
 func (c *Cache) Stop() {
-	close(c.stopCh)
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 }
 
 // Get returns the cached value for key, or (nil, false) if absent or expired.

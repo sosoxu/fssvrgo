@@ -356,7 +356,10 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	meta.UpdatedAt = utils.GetCurrentTimestamp()
 
 	if err := database.NewFileMetadataService(fm.db).Update(meta); err != nil {
-		fm.storage.Rename(newPath, oldPath)
+		// 回滚存储层重命名：若回滚也失败则记录日志，避免静默丢失文件。
+		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+			logger.Error("failed to rollback storage rename %s -> %s: %v", newPath, oldPath, rbErr)
+		}
 		return fmt.Errorf("failed to update file metadata: %w", err)
 	}
 

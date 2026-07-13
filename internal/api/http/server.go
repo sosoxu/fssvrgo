@@ -622,7 +622,9 @@ func (s *Server) handleDownload(c *gin.Context) {
 		if seekReader, ok := reader.(io.ReadSeeker); ok {
 			http.ServeContent(c.Writer, c.Request, meta.Name, time.Time{}, seekReader)
 		} else {
-			io.Copy(c.Writer, reader)
+			if _, err := io.Copy(c.Writer, reader); err != nil {
+				logger.Warn("failed to stream file %s: %v", filePath, err)
+			}
 		}
 		return
 	}
