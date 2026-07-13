@@ -19,6 +19,14 @@ storage:
   type: local
   local:
     root_dir: /data/fsserver
+  # Directory used to store upload temp files (<temp_dir>/<session_id>.tmp).
+  # When left empty, each instance uses a private os.TempDir()/fsserver-uploads-*
+  # directory and upload sessions are bound to the instance that created them.
+  # For multi-instance deployments that need cross-instance upload resume, set
+  # this to a shared volume (e.g. an NFS mount) mounted at the same path on
+  # every instance. WARNING: do not point this at the same directory as
+  # storage.local.root_dir or storage writes may collide with temp files.
+  temp_dir: ""
 
 database:
   type: sqlite

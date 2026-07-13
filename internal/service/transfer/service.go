@@ -129,6 +129,34 @@ func (s *FileTransferService) SetCryptoService(cryptoSvc *crypto.CryptoService) 
 	s.cryptoSvc = cryptoSvc
 }
 
+// SetTempDir overrides the directory used to store upload temp files
+// (<tempDir>/<sessionID>.tmp). By default each instance uses a private
+// os.TempDir()/fsserver-uploads-<nanos> directory, which means upload bytes
+// are bound to the instance that created the session and cannot be resumed on
+// another instance.
+//
+// For multi-instance deployments that need cross-instance upload resume, set
+// this to a shared volume (e.g. an NFS mount) mounted at the same path on
+// every instance. Every instance must use the same path so that a session
+// created on one instance can find its temp file on another. This must be
+// called before any upload sessions are created (i.e. at startup).
+func (s *FileTransferService) SetTempDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create configured temp directory %s: %w", dir, err)
+	}
+	s.tempDir = dir
+	return nil
+}
+
+// TempDir returns the directory currently used for upload temp files. Exposed
+// for diagnostics and tests.
+func (s *FileTransferService) TempDir() string {
+	return s.tempDir
+}
+
 func (s *FileTransferService) CreateUploadSession(filePath, fileName string, totalSize int64, clientID, hash string) (string, error) {
 	if !s.acquireSessionSlot() {
 		return "", fmt.Errorf("maximum number of concurrent upload sessions reached")
@@ -412,7 +440,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		storageTempPath = encTempPath
 	}
 
-	token, err := distributed.AcquireLock(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
+	token, cancelRenew, err := distributed.AcquireLockWithRenewal(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
@@ -420,6 +448,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		return nil, fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
 	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
+	defer cancelRenew()
 
 	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
 		os.Remove(storageTempPath)

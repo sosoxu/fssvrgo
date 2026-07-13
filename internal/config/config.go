@@ -39,9 +39,10 @@ type MinIOStorageConfig struct {
 }
 
 type StorageConfig struct {
-	Type  string             `yaml:"type"`
-	Local LocalStorageConfig `yaml:"local"`
-	MinIO MinIOStorageConfig `yaml:"minio"`
+	Type    string             `yaml:"type"`
+	Local   LocalStorageConfig `yaml:"local"`
+	MinIO   MinIOStorageConfig `yaml:"minio"`
+	TempDir string             `yaml:"temp_dir"`
 }
 
 type DatabaseConfig struct {

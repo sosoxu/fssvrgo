@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"sync"
 )
@@ -10,6 +11,42 @@ type DB struct {
 	dialect Dialect
 	stmts   sync.Map
 }
+
+// Tx wraps a *sql.Tx with the same dialect translation as DB so that callers
+// can run multi-statement updates atomically without re-implementing placeholder
+// translation. Statements run on Tx bypass the prepared-statement cache (they
+// are bound to the transaction), which is acceptable for low-frequency
+// administrative operations like directory rename/delete.
+type Tx struct {
+	tx      *sql.Tx
+	dialect Dialect
+}
+
+// BeginTx starts a new transaction. The returned Tx provides Exec/Query/QueryRow
+// with dialect translation matching DB.
+func (d *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
+	tx, err := d.db.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Tx{tx: tx, dialect: d.dialect}, nil
+}
+
+func (t *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
+	return t.tx.Exec(t.dialect.Translate(query), args...)
+}
+
+func (t *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	return t.tx.Query(t.dialect.Translate(query), args...)
+}
+
+func (t *Tx) QueryRow(query string, args ...interface{}) *sql.Row {
+	return t.tx.QueryRow(t.dialect.Translate(query), args...)
+}
+
+func (t *Tx) Commit() error { return t.tx.Commit() }
+
+func (t *Tx) Rollback() error { return t.tx.Rollback() }
 
 func NewDB(db *sql.DB, dialect Dialect) *DB {
 	return &DB{db: db, dialect: dialect}
