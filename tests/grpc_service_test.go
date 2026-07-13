@@ -140,7 +140,7 @@ func TestGRPCListFiles(t *testing.T) {
 	ts.FM.UploadFile("file3.txt", []byte("c"))
 	ts.DirSvc.CreateDirectory("subdir")
 
-	result, err := ts.FlSvc.ListFiles("", false, 1, 2, "name", "asc")
+	result, err := ts.FlSvc.ListFilesWithTotal("", false, 1, 2, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles failed: %v", err)
 	}

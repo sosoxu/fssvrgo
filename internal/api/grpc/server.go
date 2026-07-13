@@ -437,7 +437,7 @@ func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreami
 	}
 
 	for offset < meta.Size {
-		data, err := s.fm.DownloadFileAt(req.Path, chunkSize, offset)
+		data, err := s.fm.DownloadFileDataAt(meta, chunkSize, offset)
 		if err != nil {
 			return fmt.Errorf("failed to read file chunk: %w", err)
 		}
@@ -460,7 +460,11 @@ func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreami
 }
 
 func (s *Server) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (*pb.ListFilesResponse, error) {
-	result, err := s.flSvc.ListFiles(req.Path, req.Recursive, int(req.Page), int(req.PageSize), req.SortBy, req.SortOrder)
+	// gRPC clients depend on the Total field in ListFilesResponse (the proto
+	// has no include_total/has_more toggle), so we always compute the exact
+	// total here to preserve backward compatibility. HTTP clients that only
+	// need pagination can use the ListFiles path via the REST API instead.
+	result, err := s.flSvc.ListFilesWithTotal(req.Path, req.Recursive, int(req.Page), int(req.PageSize), req.SortBy, req.SortOrder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}

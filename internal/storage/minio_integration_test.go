@@ -5,6 +5,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -125,18 +126,19 @@ func TestRealMinIOWriteAt(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
+	// 对象存储不支持原地随机写，WriteAt 必须返回 ErrWriteAtUnsupported。
 	patch := []byte("XXXX")
-	if err := store.WriteAt(key, patch, 4); err != nil {
-		t.Fatalf("WriteAt failed: %v", err)
+	if err := store.WriteAt(key, patch, 4); !errors.Is(err, ErrWriteAtUnsupported) {
+		t.Fatalf("expected ErrWriteAtUnsupported, got %v", err)
 	}
 
+	// 原对象内容不应被修改。
 	result, err := store.Read(key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
-
-	if string(result) != "0123XXXX89abcdef" {
-		t.Errorf("expected '0123XXXX89abcdef', got %q", string(result))
+	if string(result) != string(data) {
+		t.Errorf("object should be unchanged after rejected WriteAt; expected %q, got %q", string(data), string(result))
 	}
 }
 
@@ -144,25 +146,24 @@ func TestRealMinIOWriteAtExtend(t *testing.T) {
 	store := newRealMinIOStorage(t)
 
 	key := "test/writeat-extend.bin"
-	if err := store.Write(key, []byte("short")); err != nil {
+	data := []byte("short")
+	if err := store.Write(key, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
+	// 对象存储不支持原地随机写（含扩展），WriteAt 必须返回 ErrWriteAtUnsupported。
 	patch := []byte("extended!")
-	if err := store.WriteAt(key, patch, 10); err != nil {
-		t.Fatalf("WriteAt extend failed: %v", err)
+	if err := store.WriteAt(key, patch, 10); !errors.Is(err, ErrWriteAtUnsupported) {
+		t.Fatalf("expected ErrWriteAtUnsupported, got %v", err)
 	}
 
+	// 原对象内容与长度不应改变。
 	result, err := store.Read(key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
-
-	if len(result) != 19 {
-		t.Errorf("expected length 19, got %d", len(result))
-	}
-	if string(result[10:]) != "extended!" {
-		t.Errorf("expected 'extended!' at offset 10, got %q", string(result[10:]))
+	if string(result) != string(data) {
+		t.Errorf("object should be unchanged after rejected WriteAt; expected %q, got %q", string(data), string(result))
 	}
 }
 

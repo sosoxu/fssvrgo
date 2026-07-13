@@ -285,7 +285,7 @@ func TestPostgreSQL_ListFiles(t *testing.T) {
 		}
 	}
 
-	result, err := flSvc.ListFiles("/", false, 1, 100, "name", "asc")
+	result, err := flSvc.ListFilesWithTotal("/", false, 1, 100, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles failed: %v", err)
 	}

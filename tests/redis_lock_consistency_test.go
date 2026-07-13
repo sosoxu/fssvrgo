@@ -1069,7 +1069,7 @@ func TestRedisLock_GRPCListFilesConsistency(t *testing.T) {
 	}
 
 	for i, inst := range cluster.Instances {
-		result, err := inst.FlSvc.ListFiles("/", false, 1, 100, "name", "asc")
+		result, err := inst.FlSvc.ListFilesWithTotal("/", false, 1, 100, "name", "asc")
 		if err != nil {
 			t.Errorf("List files from instance %d failed: %v", i, err)
 			continue

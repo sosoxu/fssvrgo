@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -142,19 +143,19 @@ func TestMinIOWriteAt(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
+	// 对象存储不支持原地随机写，WriteAt 必须返回 ErrWriteAtUnsupported。
 	patch := []byte("XXXX")
-	if err := store.WriteAt(key, patch, 4); err != nil {
-		t.Fatalf("WriteAt failed: %v", err)
+	if err := store.WriteAt(key, patch, 4); !errors.Is(err, ErrWriteAtUnsupported) {
+		t.Fatalf("expected ErrWriteAtUnsupported, got %v", err)
 	}
 
+	// 原对象内容不应被修改（WriteAt 是 no-op）。
 	result, err := store.Read(key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
-
-	expected := "0123XXXX89abcdef"
-	if string(result) != expected {
-		t.Errorf("expected %q, got %q", expected, string(result))
+	if string(result) != string(data) {
+		t.Errorf("object should be unchanged after rejected WriteAt; expected %q, got %q", string(data), string(result))
 	}
 }
 
@@ -168,21 +169,19 @@ func TestMinIOWriteAtExtend(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
+	// 对象存储不支持原地随机写（含扩展），WriteAt 必须返回 ErrWriteAtUnsupported。
 	patch := []byte("extended!")
-	if err := store.WriteAt(key, patch, 10); err != nil {
-		t.Fatalf("WriteAt extend failed: %v", err)
+	if err := store.WriteAt(key, patch, 10); !errors.Is(err, ErrWriteAtUnsupported) {
+		t.Fatalf("expected ErrWriteAtUnsupported, got %v", err)
 	}
 
+	// 原对象内容与长度不应改变。
 	result, err := store.Read(key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
-
-	if len(result) != 19 {
-		t.Errorf("expected length 19, got %d", len(result))
-	}
-	if string(result[10:]) != "extended!" {
-		t.Errorf("expected 'extended!' at offset 10, got %q", string(result[10:]))
+	if string(result) != string(data) {
+		t.Errorf("object should be unchanged after rejected WriteAt; expected %q, got %q", string(data), string(result))
 	}
 }
 

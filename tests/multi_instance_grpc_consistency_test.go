@@ -586,7 +586,7 @@ func TestMultiInstance_GRPCListFilesConsistency(t *testing.T) {
 	}
 
 	for i, inst := range cluster.Instances {
-		result, err := inst.FlSvc.ListFiles("/", false, 1, 100, "name", "asc")
+		result, err := inst.FlSvc.ListFilesWithTotal("/", false, 1, 100, "name", "asc")
 		if err != nil {
 			t.Errorf("List files from instance %d failed: %v", i, err)
 			continue
@@ -616,7 +616,7 @@ func TestMultiInstance_GRPCDeleteThenVerifyConsistency(t *testing.T) {
 	inst2.FM.DeleteFile("/grpc_del_4.dat")
 
 	for i, inst := range cluster.Instances {
-		result, err := inst.FlSvc.ListFiles("/", false, 1, 100, "name", "asc")
+		result, err := inst.FlSvc.ListFilesWithTotal("/", false, 1, 100, "name", "asc")
 		if err != nil {
 			t.Errorf("Instance %d: list files failed: %v", i, err)
 			continue

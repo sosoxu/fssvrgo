@@ -149,6 +149,74 @@ func TestDownloadFileAt(t *testing.T) {
 	}
 }
 
+func TestDownloadFileData(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	path := "download-data.txt"
+	data := []byte("download me please")
+	if _, err := fm.UploadFile(path, data); err != nil {
+		t.Fatalf("UploadFile failed: %v", err)
+	}
+
+	meta, err := fm.GetFileMetadata(path)
+	if err != nil {
+		t.Fatalf("GetFileMetadata failed: %v", err)
+	}
+
+	got, err := fm.DownloadFileData(meta)
+	if err != nil {
+		t.Fatalf("DownloadFileData failed: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("DownloadFileData content = %q, want %q", string(got), string(data))
+	}
+}
+
+func TestDownloadFileDataAt(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	path := "range-data.txt"
+	data := []byte("Hello, World!")
+	if _, err := fm.UploadFile(path, data); err != nil {
+		t.Fatalf("UploadFile failed: %v", err)
+	}
+
+	meta, err := fm.GetFileMetadata(path)
+	if err != nil {
+		t.Fatalf("GetFileMetadata failed: %v", err)
+	}
+
+	got, err := fm.DownloadFileDataAt(meta, 5, 7)
+	if err != nil {
+		t.Fatalf("DownloadFileDataAt failed: %v", err)
+	}
+	if string(got) != "World" {
+		t.Errorf("DownloadFileDataAt(5,7) = %q, want %q", string(got), "World")
+	}
+
+	gotStart, err := fm.DownloadFileDataAt(meta, 5, 0)
+	if err != nil {
+		t.Fatalf("DownloadFileDataAt start failed: %v", err)
+	}
+	if string(gotStart) != "Hello" {
+		t.Errorf("DownloadFileDataAt(5,0) = %q, want %q", string(gotStart), "Hello")
+	}
+}
+
+func TestDownloadFileData_NilMeta(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	if _, err := fm.DownloadFileData(nil); err == nil {
+		t.Fatal("DownloadFileData(nil) expected error, got nil")
+	}
+	if _, err := fm.DownloadFileDataAt(nil, 5, 0); err == nil {
+		t.Fatal("DownloadFileDataAt(nil,...) expected error, got nil")
+	}
+}
+
 func TestDownloadFile_NotFound(t *testing.T) {
 	fm, cleanup := setupFileManager(t)
 	defer cleanup()

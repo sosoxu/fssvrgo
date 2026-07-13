@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -111,6 +112,11 @@ func (ms *MinIOStorage) Write(objectKey string, data []byte) error {
 	return nil
 }
 
+// ErrWriteAtUnsupported 表示对象存储不支持原地随机写。对象存储没有字节级
+// 随机写语义，read-modify-write 会把整个对象读入内存（OOM 风险）且非原子；
+// 调用方应使用 multipart upload 或整体 Write 覆盖。
+var ErrWriteAtUnsupported = errors.New("storage: WriteAt is not supported on object storage; use multipart upload or Write instead")
+
 func (ms *MinIOStorage) WriteAt(objectKey string, data []byte, offset int64) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
@@ -118,48 +124,9 @@ func (ms *MinIOStorage) WriteAt(objectKey string, data []byte, offset int64) err
 	if offset < 0 {
 		return fmt.Errorf("invalid offset: %d", offset)
 	}
-
-	// Check existing object size to prevent OOM on large files
-	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
-	info, err := ms.client.StatObject(ctx, ms.bucket, key, minio.StatObjectOptions{})
-	if err == nil && info.Size > 512*1024*1024 { // 512MB limit for WriteAt
-		return fmt.Errorf("WriteAt not supported for large objects (size: %d bytes), use WriteFromReader instead", info.Size)
-	}
-
-	mu := ms.getLock(objectKey)
-	mu.Lock()
-	defer mu.Unlock()
-
-	obj, err := ms.client.GetObject(ctx, ms.bucket, key, minio.GetObjectOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get object for WriteAt: %w", err)
-	}
-	defer obj.Close()
-
-	existing, err := io.ReadAll(obj)
-	if err != nil {
-		return fmt.Errorf("failed to read existing object: %w", err)
-	}
-
-	endOffset := offset + int64(len(data))
-	if endOffset > int64(len(existing)) {
-		extended := make([]byte, endOffset)
-		copy(extended, existing)
-		copy(extended[offset:], data)
-		existing = extended
-	} else {
-		copy(existing[offset:], data)
-	}
-
-	reader := bytes.NewReader(existing)
-	_, err = ms.client.PutObject(ctx, ms.bucket, key, reader, int64(len(existing)), minio.PutObjectOptions{
-		ContentType: "application/octet-stream",
-	})
-	if err != nil {
-		return fmt.Errorf("failed to write object at offset: %w", err)
-	}
-	return nil
+	// 对象存储不支持原地随机写：read-modify-write 会把整个对象读入内存
+	// （OOM 风险）且读-改-写非原子。调用方应使用 multipart upload 或整体 Write 覆盖。
+	return ErrWriteAtUnsupported
 }
 
 func (ms *MinIOStorage) WriteFromTempFile(objectKey string, tempFilePath string) error {

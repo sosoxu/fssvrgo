@@ -80,7 +80,7 @@ func TestListFiles_Empty(t *testing.T) {
 	db := setupTestDB(t)
 	svc := NewFileListService(db)
 
-	result, err := svc.ListFiles("", false, 1, 10, "name", "asc")
+	result, err := svc.ListFilesWithTotal("", false, 1, 10, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles failed on empty database: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestListFiles_WithFiles(t *testing.T) {
 	insertFile(t, db, "beta.txt", "beta.txt", 200, ts)
 	insertDir(t, db, "subdir", "subdir", ts)
 
-	result, err := svc.ListFiles("", false, 1, 50, "name", "asc")
+	result, err := svc.ListFilesWithTotal("", false, 1, 50, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles failed: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 
 	// Page 1 with pageSize=3 → 3 items, total 10.
-	page1, err := svc.ListFiles("", false, 1, 3, "name", "asc")
+	page1, err := svc.ListFilesWithTotal("", false, 1, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 1 failed: %v", err)
 	}
@@ -185,9 +185,12 @@ func TestListFiles_Pagination(t *testing.T) {
 	if len(page1.Items) != 3 {
 		t.Errorf("expected 3 items on page 1, got %d", len(page1.Items))
 	}
+	if !page1.HasMore {
+		t.Error("page 1 should have HasMore=true (10 items, only 3 returned)")
+	}
 
 	// Page 4 with pageSize=3 → only 1 item (10 - 3*3 = 1).
-	page4, err := svc.ListFiles("", false, 4, 3, "name", "asc")
+	page4, err := svc.ListFilesWithTotal("", false, 4, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 4 failed: %v", err)
 	}
@@ -196,6 +199,9 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 	if len(page4.Items) != 1 {
 		t.Errorf("expected 1 item on page 4, got %d: %v", len(page4.Items), page4.Items)
+	}
+	if page4.HasMore {
+		t.Error("page 4 should have HasMore=false (last page)")
 	}
 
 	// Page 5 with pageSize=3 → 0 items (already returned all 10).
@@ -268,7 +274,7 @@ func TestListFiles_SortBy(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := svc.ListFiles("", false, 1, 10, tc.sortBy, tc.sortOrder)
+			result, err := svc.ListFilesWithTotal("", false, 1, 10, tc.sortBy, tc.sortOrder)
 			if err != nil {
 				t.Fatalf("ListFiles sortBy=%s order=%s failed: %v", tc.sortBy, tc.sortOrder, err)
 			}
@@ -308,7 +314,7 @@ func TestListFiles_Recursive(t *testing.T) {
 	insertFile(t, db, "a/sub/nested/file3.txt", "file3.txt", 30, ts)
 
 	// Non-recursive listing of "a": only direct children of "a".
-	nonRec, err := svc.ListFiles("a", false, 1, 50, "name", "asc")
+	nonRec, err := svc.ListFilesWithTotal("a", false, 1, 50, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles non-recursive failed: %v", err)
 	}
@@ -333,7 +339,7 @@ func TestListFiles_Recursive(t *testing.T) {
 	}
 
 	// Recursive listing of "a": all descendants under "a/".
-	rec, err := svc.ListFiles("a", true, 1, 50, "name", "asc")
+	rec, err := svc.ListFilesWithTotal("a", true, 1, 50, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles recursive failed: %v", err)
 	}
@@ -356,5 +362,129 @@ func TestListFiles_Recursive(t *testing.T) {
 		if !recPaths[p] {
 			t.Errorf("recursive result missing %q; got %v", p, recPaths)
 		}
+	}
+}
+
+// TestListFiles_DefaultDoesNotComputeTotal verifies that the default ListFiles
+// call skips the COUNT query and returns Total=-1, while HasMore is still
+// correct so callers can paginate without an exact total.
+func TestListFiles_DefaultDoesNotComputeTotal(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewFileListService(db)
+
+	// Insert 5 entries so HasMore is exercisable with pageSize=3.
+	ts := utils.GetCurrentTimestamp()
+	for i := 0; i < 5; i++ {
+		name := "file" + string(rune('a'+i)) + ".txt"
+		insertFile(t, db, name, name, int64(i), ts)
+	}
+
+	// Page 1, pageSize=3 → 3 items, HasMore=true (5 total, only 3 returned).
+	page1, err := svc.ListFiles("", false, 1, 3, "name", "asc")
+	if err != nil {
+		t.Fatalf("ListFiles page 1 failed: %v", err)
+	}
+	if page1.Total != -1 {
+		t.Errorf("default ListFiles should skip COUNT (Total=-1), got Total=%d", page1.Total)
+	}
+	if len(page1.Items) != 3 {
+		t.Errorf("expected 3 items on page 1, got %d", len(page1.Items))
+	}
+	if !page1.HasMore {
+		t.Error("page 1 should have HasMore=true (5 items, only 3 returned)")
+	}
+
+	// Page 2, pageSize=3 → 2 items, HasMore=false (last page).
+	page2, err := svc.ListFiles("", false, 2, 3, "name", "asc")
+	if err != nil {
+		t.Fatalf("ListFiles page 2 failed: %v", err)
+	}
+	if page2.Total != -1 {
+		t.Errorf("default ListFiles should skip COUNT (Total=-1), got Total=%d", page2.Total)
+	}
+	if len(page2.Items) != 2 {
+		t.Errorf("expected 2 items on page 2, got %d", len(page2.Items))
+	}
+	if page2.HasMore {
+		t.Error("page 2 should have HasMore=false (last page, 2 items)")
+	}
+
+	// Page 3, pageSize=3 → 0 items, HasMore=false (beyond end).
+	page3, err := svc.ListFiles("", false, 3, 3, "name", "asc")
+	if err != nil {
+		t.Fatalf("ListFiles page 3 failed: %v", err)
+	}
+	if page3.Total != -1 {
+		t.Errorf("default ListFiles should skip COUNT (Total=-1), got Total=%d", page3.Total)
+	}
+	if len(page3.Items) != 0 {
+		t.Errorf("expected 0 items on page 3, got %d", len(page3.Items))
+	}
+	if page3.HasMore {
+		t.Error("page 3 should have HasMore=false (beyond end)")
+	}
+}
+
+// TestListFilesWithTotal_ComputesExactCount verifies that ListFilesWithTotal
+// runs the COUNT query and returns the exact total alongside HasMore.
+func TestListFilesWithTotal_ComputesExactCount(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewFileListService(db)
+
+	ts := utils.GetCurrentTimestamp()
+	for i := 0; i < 4; i++ {
+		name := "file" + string(rune('a'+i)) + ".txt"
+		insertFile(t, db, name, name, int64(i), ts)
+	}
+
+	// Page 1, pageSize=2 → 2 items, Total=4, HasMore=true.
+	page1, err := svc.ListFilesWithTotal("", false, 1, 2, "name", "asc")
+	if err != nil {
+		t.Fatalf("ListFilesWithTotal page 1 failed: %v", err)
+	}
+	if page1.Total != 4 {
+		t.Errorf("ListFilesWithTotal should compute exact Total=4, got %d", page1.Total)
+	}
+	if len(page1.Items) != 2 {
+		t.Errorf("expected 2 items on page 1, got %d", len(page1.Items))
+	}
+	if !page1.HasMore {
+		t.Error("page 1 should have HasMore=true (4 items, only 2 returned)")
+	}
+
+	// Page 2, pageSize=2 → 2 items, Total=4, HasMore=false (last page).
+	page2, err := svc.ListFilesWithTotal("", false, 2, 2, "name", "asc")
+	if err != nil {
+		t.Fatalf("ListFilesWithTotal page 2 failed: %v", err)
+	}
+	if page2.Total != 4 {
+		t.Errorf("ListFilesWithTotal should compute exact Total=4, got %d", page2.Total)
+	}
+	if len(page2.Items) != 2 {
+		t.Errorf("expected 2 items on page 2, got %d", len(page2.Items))
+	}
+	if page2.HasMore {
+		t.Error("page 2 should have HasMore=false (last page)")
+	}
+}
+
+// TestListFiles_EmptyHasMoreFalse verifies that an empty result has
+// HasMore=false and Total=-1 under the default ListFiles path.
+func TestListFiles_EmptyHasMoreFalse(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewFileListService(db)
+
+	result, err := svc.ListFiles("", false, 1, 10, "name", "asc")
+	if err != nil {
+		t.Fatalf("ListFiles on empty database failed: %v", err)
+	}
+	if result.Total != -1 {
+		t.Errorf("default ListFiles should skip COUNT (Total=-1), got Total=%d", result.Total)
+	}
+	if result.HasMore {
+		t.Error("empty result should have HasMore=false")
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("expected 0 items, got %d", len(result.Items))
 	}
 }
