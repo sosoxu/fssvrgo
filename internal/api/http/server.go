@@ -42,6 +42,7 @@ type Server struct {
 	cacheSvc       cache.CacheAdapter
 	metricsSvc     *metrics.Metrics
 	db             *database.DB
+	auditWriter    *database.AuditWriter
 	corsOrigins    string
 	maxUploadSize  int64
 	maxChunkSize   int64
@@ -78,6 +79,7 @@ func NewServer(cfg config.ServerConfig, tlsCfg config.TLSConfig, fm *filemanager
 		cacheSvc:       cacheSvc,
 		metricsSvc:     metricsSvc,
 		db:             db,
+		auditWriter:    database.NewAuditWriter(db, 100, time.Second),
 		corsOrigins:    cfg.CORSAllowedOrigins,
 		maxUploadSize:  int64(cfg.MaxUploadSizeMB) * 1024 * 1024,
 		maxChunkSize:   int64(cfg.MaxChunkSizeMB) * 1024 * 1024,
@@ -1329,6 +1331,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 	err = s.httpServer.Shutdown(ctx)
+	// Flush the audit writer so pending audit entries are persisted before the
+	// process exits. Use the same shutdown deadline; if the DB is slow the
+	// caller's ctx expires and remaining entries are logged-and-dropped.
+	if s.auditWriter != nil {
+		if e := s.auditWriter.Close(ctx); e != nil {
+			logger.Error("Audit writer shutdown error: %v", e)
+		}
+	}
 	return err
 }
 
@@ -1357,9 +1367,13 @@ func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, succes
 	logger.Info("AUDIT: req_id=%s operation=%s resource=%s user=%s ip=%s ua=%s success=%v details=%s",
 		reqID, operation, resourcePath, userIdentifier, clientIP, userAgent, success, details)
 
-	if s.db != nil {
-		auditLogSvc := database.NewAuditLogService(s.db)
-		entry := &database.AuditLog{
+	// Persist asynchronously via the AuditWriter. The request path must never
+	// block on a DB write for audit logging; the logger.Info call above is the
+	// immediate durable record, and the DB row is the queryable best-effort
+	// copy. Submit drops the entry (with a warning) if the buffer is full
+	// rather than stalling the request.
+	if s.auditWriter != nil {
+		s.auditWriter.Submit(&database.AuditLog{
 			ID:             utils.GenerateUUID(),
 			Timestamp:      utils.GetCurrentTimestamp(),
 			Operation:      operation,
@@ -1367,12 +1381,9 @@ func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, succes
 			UserIdentifier: userIdentifier,
 			ClientIP:       clientIP,
 			UserAgent:      userAgent,
-			Success:        success,
+			Success:         success,
 			Details:        details,
-		}
-		if err := auditLogSvc.Create(entry); err != nil {
-			logger.Error("Failed to persist audit log: %v", err)
-		}
+		})
 	}
 }
 
