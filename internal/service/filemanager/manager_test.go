@@ -102,6 +102,100 @@ func TestUploadFile_Overwrite(t *testing.T) {
 	}
 }
 
+func TestUploadFileFromReader_StagesAndCommits(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	path := "streamed/upload.bin"
+	data := strings.Repeat("streamed-data-", 4096)
+	meta, err := fm.UploadFileFromReader(path, strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("UploadFileFromReader failed: %v", err)
+	}
+	if meta.Size != int64(len(data)) || meta.Hash != expectedHash([]byte(data)) {
+		t.Fatalf("streamed metadata size/hash mismatch: size=%d hash=%s", meta.Size, meta.Hash)
+	}
+	stored, err := fm.storage.Read(path)
+	if err != nil {
+		t.Fatalf("read streamed file: %v", err)
+	}
+	if string(stored) != data {
+		t.Fatal("streamed file content mismatch")
+	}
+}
+
+func TestUploadFileFromReader_OverwriteRollsBackWhenMetadataUpdateFails(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	path := "streamed-rollback.bin"
+	original := []byte("original streamed content")
+	if _, err := fm.UploadFile(path, original); err != nil {
+		t.Fatalf("initial UploadFile failed: %v", err)
+	}
+	if _, err := fm.db.Exec(`CREATE TRIGGER fail_streamed_update BEFORE UPDATE ON files BEGIN SELECT RAISE(FAIL, 'forced streamed update failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	if _, err := fm.UploadFileFromReader(path, strings.NewReader("replacement streamed content")); err == nil {
+		t.Fatal("expected streamed metadata failure")
+	}
+	stored, err := fm.storage.Read(path)
+	if err != nil {
+		t.Fatalf("read restored streamed file: %v", err)
+	}
+	if string(stored) != string(original) {
+		t.Fatalf("streamed rollback content = %q, want %q", stored, original)
+	}
+}
+
+func TestUploadFile_OverwriteRollsBackWhenMetadataUpdateFails(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	path := "rollback-overwrite.txt"
+	original := []byte("original content")
+	if _, err := fm.UploadFile(path, original); err != nil {
+		t.Fatalf("initial UploadFile failed: %v", err)
+	}
+	if _, err := fm.db.Exec(`CREATE TRIGGER fail_file_update BEFORE UPDATE ON files BEGIN SELECT RAISE(FAIL, 'forced update failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	if _, err := fm.UploadFile(path, []byte("replacement content")); err == nil {
+		t.Fatal("expected overwrite metadata failure")
+	}
+	data, err := fm.storage.Read(path)
+	if err != nil {
+		t.Fatalf("read rolled-back file: %v", err)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("content after rollback = %q, want %q", data, original)
+	}
+}
+
+func TestDeleteFile_RollsBackWhenMetadataUpdateFails(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	path := "rollback-delete.txt"
+	original := []byte("keep me")
+	if _, err := fm.UploadFile(path, original); err != nil {
+		t.Fatalf("initial UploadFile failed: %v", err)
+	}
+	if _, err := fm.db.Exec(`CREATE TRIGGER fail_file_delete BEFORE UPDATE ON files BEGIN SELECT RAISE(FAIL, 'forced delete failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	if err := fm.DeleteFile(path); err == nil {
+		t.Fatal("expected delete metadata failure")
+	}
+	data, err := fm.storage.Read(path)
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("content after delete rollback = %q, want %q", data, original)
+	}
+}
+
 func TestDownloadFile(t *testing.T) {
 	fm, cleanup := setupFileManager(t)
 	defer cleanup()
@@ -292,6 +386,48 @@ func TestRenameFile(t *testing.T) {
 	}
 	if meta.Name != "renamed.txt" {
 		t.Errorf("meta.Name = %q, want %q", meta.Name, "renamed.txt")
+	}
+}
+
+func TestRenameFileConcurrentSameTarget(t *testing.T) {
+	fm, cleanup := setupFileManager(t)
+	defer cleanup()
+
+	if _, err := fm.UploadFile("a.txt", []byte("a")); err != nil {
+		t.Fatalf("UploadFile a.txt: %v", err)
+	}
+	if _, err := fm.UploadFile("b.txt", []byte("b")); err != nil {
+		t.Fatalf("UploadFile b.txt: %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, source := range []string{"a.txt", "b.txt"} {
+		go func(path string) {
+			<-start
+			errs <- fm.RenameFile(path, "target.txt")
+		}(source)
+	}
+	close(start)
+	err1, err2 := <-errs, <-errs
+	if (err1 == nil) == (err2 == nil) {
+		t.Fatalf("exactly one rename must succeed, got errors %v and %v", err1, err2)
+	}
+	data, err := fm.DownloadFile("target.txt")
+	if err != nil {
+		t.Fatalf("DownloadFile target.txt: %v", err)
+	}
+	if string(data) != "a" && string(data) != "b" {
+		t.Fatalf("unexpected target content %q", data)
+	}
+	remaining := 0
+	for _, source := range []string{"a.txt", "b.txt"} {
+		if _, err := fm.GetFileMetadata(source); err == nil {
+			remaining++
+		}
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining source count = %d, want 1", remaining)
 	}
 }
 

@@ -1,10 +1,45 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
+
+	"github.com/sosoxu/fssvrgo/internal/config"
 )
+
+func TestSQLitePragmasApplyToEveryPooledConnection(t *testing.T) {
+	dbObj := NewDatabase()
+	if err := dbObj.Connect(config.DatabaseConfig{Type: "sqlite", Path: filepath.Join(t.TempDir(), "pool.db"), PoolSize: 2}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer dbObj.Close()
+
+	raw := dbObj.GetDB()
+	ctx := context.Background()
+	conn1, err := raw.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn 1: %v", err)
+	}
+	defer conn1.Close()
+	conn2, err := raw.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn 2: %v", err)
+	}
+	defer conn2.Close()
+
+	for i, conn := range []*sql.Conn{conn1, conn2} {
+		var timeout int
+		if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&timeout); err != nil {
+			t.Fatalf("connection %d busy_timeout: %v", i+1, err)
+		}
+		if timeout != 5000 {
+			t.Fatalf("connection %d busy_timeout = %d, want 5000", i+1, timeout)
+		}
+	}
+}
 
 func newTestDB(t *testing.T) *DB {
 	t.Helper()

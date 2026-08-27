@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,6 +26,30 @@ type FileManager struct {
 	initialized bool
 	fileLocks   sync.Map
 	distLock    distributed.DistributedLock
+}
+
+func commitReplaceBackup(backup storage.ReplaceBackup, path string) {
+	if backup != nil {
+		if err := backup.Commit(); err != nil {
+			logger.Warn("failed to remove replacement backup for %s: %v", path, err)
+		}
+	}
+}
+
+func rollbackReplaceBackup(backup storage.ReplaceBackup, path string) {
+	if backup != nil {
+		if err := backup.Rollback(); err != nil {
+			logger.Error("failed to restore replacement backup for %s: %v", path, err)
+		}
+	}
+}
+
+func rollbackFileWrite(adapter storage.StorageAdapter, backup storage.ReplaceBackup, path string) {
+	if backup != nil {
+		rollbackReplaceBackup(backup, path)
+	} else if err := adapter.Remove(path); err != nil {
+		logger.Error("failed to remove uncommitted file %s: %v", path, err)
+	}
 }
 
 func NewFileManager(storage storage.StorageAdapter, db *database.DB) *FileManager {
@@ -74,12 +100,12 @@ func (fm *FileManager) distLockFile(path string) (string, error) {
 // goroutine to periodically renew it. The returned cancel function must be
 // called (typically via defer) to stop renewal when the operation completes.
 // Use this for long-running operations like large file uploads.
-func (fm *FileManager) distLockFileWithRenewal(ctx context.Context, path string) (string, context.CancelFunc, error) {
-	token, cancel, err := distributed.AcquireLockWithRenewal(ctx, fm.distLock, "file:"+path, 10*time.Second, 30, 50*time.Millisecond)
+func (fm *FileManager) distLockFileWithRenewal(ctx context.Context, path string) (*distributed.LockLease, error) {
+	lease, err := distributed.AcquireLockLease(ctx, fm.distLock, "file:"+path, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to acquire distributed lock for %s: %w", path, err)
+		return nil, fmt.Errorf("failed to acquire distributed lock for %s: %w", path, err)
 	}
-	return token, cancel, nil
+	return lease, nil
 }
 
 func (fm *FileManager) distUnlockFile(path string, token string) {
@@ -91,120 +117,197 @@ func (fm *FileManager) distUnlockFile(path string, token string) {
 	}
 }
 
+func (fm *FileManager) acquireFileNamespace(paths ...string) (*database.NamespaceLease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lease, err := fm.db.AcquireNamespaceLease(ctx, database.FileNamespaceRequests(paths...), 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire file namespace lease: %w", err)
+	}
+	return lease, nil
+}
+
+func releaseNamespaceLease(lease *database.NamespaceLease) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := lease.Release(ctx); err != nil {
+		logger.Warn("failed to release namespace lease: %v", err)
+	}
+}
+
 func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
-	fm.lockFile(path)
-	defer fm.unlockFile(path)
-
-	token, cancelRenew, err := fm.distLockFileWithRenewal(context.Background(), path)
+	namespaceLease, err := fm.acquireFileNamespace(path)
 	if err != nil {
 		return nil, err
 	}
-	defer fm.distUnlockFile(path, token)
-	defer cancelRenew()
+	defer releaseNamespaceLease(namespaceLease)
+	fm.lockFile(path)
+	defer fm.unlockFile(path)
 
-	if fm.Exists(path) {
-		existingMeta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			// Log the error but continue - treat as new file
-			logger.Error("Failed to query existing metadata: %v", err)
+	lease, err := fm.distLockFileWithRenewal(context.Background(), path)
+	if err != nil {
+		return nil, err
+	}
+	defer fm.distUnlockFile(path, lease.Token)
+	defer lease.Stop()
+
+	fileMetadataSvc := database.NewFileMetadataService(fm.db)
+	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin fenced upload transaction: %w", err)
+	}
+	rollbackTx := true
+	defer func() {
+		if rollbackTx {
+			_ = tx.Rollback()
 		}
-		if existingMeta != nil {
-			if err := fm.storage.Write(path, data); err != nil {
-				return nil, fmt.Errorf("failed to overwrite file: %w", err)
-			}
-			hash := fmt.Sprintf("%x", sha256.Sum256(data))
-			now := utils.GetCurrentTimestamp()
-			existingMeta.Size = int64(len(data))
-			existingMeta.Hash = hash
-			existingMeta.UpdatedAt = now
-			existingMeta.IsDeleted = false
-			if err := database.NewFileMetadataService(fm.db).Update(existingMeta); err != nil {
-				return nil, fmt.Errorf("failed to update file metadata: %w", err)
-			}
-			return existingMeta, nil
+	}()
+	existingMeta, err := fileMetadataSvc.GetByPathTx(tx, path)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("failed to query existing metadata: %w", err)
+	}
+	var backup storage.ReplaceBackup
+	if existingMeta != nil {
+		backup, err = storage.BeginReplace(fm.storage, path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare overwrite: %w", err)
 		}
 	}
-
 	if err := fm.storage.Write(path, data); err != nil {
+		rollbackReplaceBackup(backup, path)
 		return nil, fmt.Errorf("failed to write file: %w", err)
+	}
+	if err := lease.Err(); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, err
+	}
+	if err := namespaceLease.Err(); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, err
 	}
 
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
 	now := utils.GetCurrentTimestamp()
 	name := utils.GetFileName(path)
 
-	meta := &database.FileMetadata{
-		ID:              utils.GenerateUUID(),
-		Path:            path,
-		Name:            name,
-		Size:            int64(len(data)),
-		Hash:            hash,
-		StorageType:     fm.storage.StorageType(),
-		StorageLocation: "",
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		IsDeleted:       false,
+	var meta *database.FileMetadata
+	if existingMeta != nil {
+		existingMeta.Size = int64(len(data))
+		existingMeta.Hash = hash
+		existingMeta.UpdatedAt = now
+		existingMeta.IsDeleted = false
+		meta = existingMeta
+		if err := fileMetadataSvc.UpdateTx(tx, meta); err != nil {
+			rollbackFileWrite(fm.storage, backup, path)
+			return nil, fmt.Errorf("failed to update file metadata: %w", err)
+		}
+	} else {
+		meta = &database.FileMetadata{
+			ID: utils.GenerateUUID(), Path: path, Name: name, Size: int64(len(data)), Hash: hash,
+			StorageType: fm.storage.StorageType(), StorageLocation: "", CreatedAt: now, UpdatedAt: now,
+		}
+		if err := fileMetadataSvc.CreateTx(tx, meta); err != nil {
+			rollbackFileWrite(fm.storage, backup, path)
+			return nil, fmt.Errorf("failed to create file metadata: %w", err)
+		}
 	}
-
-	if err := database.NewFileMetadataService(fm.db).Create(meta); err != nil {
-		fm.storage.Remove(path)
-		return nil, fmt.Errorf("failed to create file metadata: %w", err)
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, fmt.Errorf("failed to commit file metadata: %w", err)
+	}
+	rollbackTx = false
+	commitReplaceBackup(backup, path)
 
 	return meta, nil
 }
 
-// UploadFileFromReader streams the upload into storage without holding the full
-// file content in memory. It uses store.WriteFromReader and a streaming SHA-256
-// (io.TeeReader) so peak memory is bounded by the copy buffer rather than the
-// file size. Use this for large uploads instead of UploadFile.
-//
-// If the storage backend does not support streaming (WriteFromReader returns
-// ErrStreamingUnsupported), the caller should fall back to UploadFile.
-//
-// Unlike UploadFile, this path does NOT re-hash the existing file on overwrite;
-// the hash is computed once from the incoming stream.
+// UploadFileFromReader stages the stream and hash before acquiring the final
+// write fence. The PostgreSQL transaction therefore covers only the atomic
+// storage replacement and metadata commit, not a slow client connection.
 func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
-	fm.lockFile(path)
-	defer fm.unlockFile(path)
+	hashWriter := sha256.New()
+	tempPath, size, err := storage.StageReader(fm.storage, path, io.TeeReader(reader, hashWriter))
+	if err != nil {
+		return nil, fmt.Errorf("failed to stage upload stream: %w", err)
+	}
+	defer os.Remove(tempPath)
+	hash := hex.EncodeToString(hashWriter.Sum(nil))
 
-	token, cancelRenew, err := fm.distLockFileWithRenewal(context.Background(), path)
+	namespaceLease, err := fm.acquireFileNamespace(path)
 	if err != nil {
 		return nil, err
 	}
-	defer fm.distUnlockFile(path, token)
-	defer cancelRenew()
+	defer releaseNamespaceLease(namespaceLease)
+	fm.lockFile(path)
+	defer fm.unlockFile(path)
 
-	// Tee the stream through a SHA-256 writer so we compute the hash as bytes
-	// flow into storage, without buffering the whole file in memory.
-	hashWriter := sha256.New()
-	teeReader := io.TeeReader(reader, hashWriter)
-
-	if err := fm.storage.WriteFromReader(path, teeReader); err != nil {
-		return nil, fmt.Errorf("failed to write file from reader: %w", err)
-	}
-
-	// storage.WriteFromReader does not report bytes written, so re-stat the
-	// object to get its size rather than trusting the caller's size hint.
-	size, err := fm.storage.GetSize(path)
+	lease, err := fm.distLockFileWithRenewal(context.Background(), path)
 	if err != nil {
-		// Fall back to a best-effort unknown size rather than failing the
-		// already-completed upload.
-		size = 0
+		return nil, err
+	}
+	defer fm.distUnlockFile(path, lease.Token)
+	defer lease.Stop()
+
+	fileMetadataSvc := database.NewFileMetadataService(fm.db)
+	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin fenced streaming upload transaction: %w", err)
+	}
+	rollbackTx := true
+	defer func() {
+		if rollbackTx {
+			_ = tx.Rollback()
+		}
+	}()
+	existingMeta, err := fileMetadataSvc.GetByPathTx(tx, path)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("failed to query existing metadata: %w", err)
+	}
+	var backup storage.ReplaceBackup
+	if existingMeta != nil {
+		backup, err = storage.BeginReplace(fm.storage, path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare overwrite: %w", err)
+		}
 	}
 
-	hash := hex.EncodeToString(hashWriter.Sum(nil))
+	if err := storage.CommitStagedFile(fm.storage, path, tempPath); err != nil {
+		rollbackReplaceBackup(backup, path)
+		return nil, fmt.Errorf("failed to commit staged upload: %w", err)
+	}
+	if err := lease.Err(); err != nil {
+		if backup != nil {
+			rollbackReplaceBackup(backup, path)
+		} else {
+			_ = fm.storage.Remove(path)
+		}
+		return nil, err
+	}
+	if err := namespaceLease.Err(); err != nil {
+		if backup != nil {
+			rollbackReplaceBackup(backup, path)
+		} else {
+			_ = fm.storage.Remove(path)
+		}
+		return nil, err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, err
+	}
+
 	now := utils.GetCurrentTimestamp()
 	name := utils.GetFileName(path)
-
-	// Overwrite existing metadata if present (same overwrite semantics as
-	// UploadFile), otherwise create a new record.
-	existingMeta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		logger.Error("Failed to query existing metadata: %v", err)
-	}
 
 	var meta *database.FileMetadata
 	if existingMeta != nil {
@@ -212,7 +315,8 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 		existingMeta.Hash = hash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := database.NewFileMetadataService(fm.db).Update(existingMeta); err != nil {
+		if err := fileMetadataSvc.UpdateTx(tx, existingMeta); err != nil {
+			rollbackReplaceBackup(backup, path)
 			return nil, fmt.Errorf("failed to update file metadata: %w", err)
 		}
 		meta = existingMeta
@@ -229,23 +333,33 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 			UpdatedAt:       now,
 			IsDeleted:       false,
 		}
-		if err := database.NewFileMetadataService(fm.db).Create(meta); err != nil {
-			fm.storage.Remove(path)
+		if err := fileMetadataSvc.CreateTx(tx, meta); err != nil {
+			rollbackFileWrite(fm.storage, backup, path)
 			return nil, fmt.Errorf("failed to create file metadata: %w", err)
 		}
 	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, fmt.Errorf("failed to commit file metadata: %w", err)
+	}
+	rollbackTx = false
+	commitReplaceBackup(backup, path)
 
 	return meta, nil
 }
 
 func (fm *FileManager) DownloadFile(path string) ([]byte, error) {
-	path = utils.NormalizePath(path)
-	_, err := fm.GetFileMetadata(path)
+	meta, release, err := fm.BeginRead(path)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 
-	data, err := fm.storage.Read(path)
+	data, err := fm.storage.Read(meta.Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -254,18 +368,36 @@ func (fm *FileManager) DownloadFile(path string) ([]byte, error) {
 }
 
 func (fm *FileManager) DownloadFileAt(path string, size int, offset int64) ([]byte, error) {
-	path = utils.NormalizePath(path)
-	_, err := fm.GetFileMetadata(path)
+	meta, release, err := fm.BeginRead(path)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 
-	data, err := fm.storage.ReadAt(path, size, offset)
+	data, err := fm.storage.ReadAt(meta.Path, size, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file at offset: %w", err)
 	}
 
 	return data, nil
+}
+
+// BeginRead holds shared leases on the file's ancestor directories while the
+// caller reads metadata and storage. This prevents a directory rename/delete
+// from moving the object between the metadata lookup and the final read.
+func (fm *FileManager) BeginRead(path string) (*database.FileMetadata, func(), error) {
+	path = utils.NormalizePath(path)
+	lease, err := fm.acquireFileNamespace(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	release := func() { releaseNamespaceLease(lease) }
+	meta, err := fm.GetFileMetadata(path)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return meta, release, nil
 }
 
 // DownloadFileData 读取文件内容，复用调用方已查询的 meta，避免 DownloadFile 内部
@@ -300,68 +432,189 @@ func (fm *FileManager) DownloadFileDataAt(meta *database.FileMetadata, size int,
 
 func (fm *FileManager) DeleteFile(path string) error {
 	path = utils.NormalizePath(path)
+	namespaceLease, err := fm.acquireFileNamespace(path)
+	if err != nil {
+		return err
+	}
+	defer releaseNamespaceLease(namespaceLease)
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
-	token, err := fm.distLockFile(path)
+	lease, err := fm.distLockFileWithRenewal(context.Background(), path)
 	if err != nil {
 		return err
 	}
-	defer fm.distUnlockFile(path, token)
+	defer fm.distUnlockFile(path, lease.Token)
+	defer lease.Stop()
 
-	meta, err := fm.GetFileMetadata(path)
+	fileMetadataSvc := database.NewFileMetadataService(fm.db)
+	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
+	if err != nil {
+		return fmt.Errorf("failed to begin fenced delete transaction: %w", err)
+	}
+	rollbackTx := true
+	defer func() {
+		if rollbackTx {
+			_ = tx.Rollback()
+		}
+	}()
+	meta, err := fileMetadataSvc.GetByPathTx(tx, path)
 	if err != nil {
 		return err
 	}
 
+	backup, err := storage.BeginReplace(fm.storage, path)
+	if err != nil {
+		return fmt.Errorf("failed to prepare delete: %w", err)
+	}
 	if err := fm.storage.Remove(path); err != nil {
+		commitReplaceBackup(backup, path)
 		return fmt.Errorf("failed to delete file from storage: %w", err)
 	}
-
-	if err := database.NewFileMetadataService(fm.db).Remove(meta.ID); err != nil {
+	if err := lease.Err(); err != nil {
+		rollbackReplaceBackup(backup, path)
+		return err
+	}
+	if err := namespaceLease.Err(); err != nil {
+		rollbackReplaceBackup(backup, path)
+		return err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackReplaceBackup(backup, path)
+		return err
+	}
+	if err := fileMetadataSvc.RemoveTx(tx, meta.ID); err != nil {
+		rollbackReplaceBackup(backup, path)
 		return fmt.Errorf("failed to delete file metadata: %w", err)
 	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackReplaceBackup(backup, path)
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		rollbackReplaceBackup(backup, path)
+		return fmt.Errorf("failed to commit file delete: %w", err)
+	}
+	rollbackTx = false
+	commitReplaceBackup(backup, path)
 
 	return nil
 }
 
 func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	oldPath = utils.NormalizePath(oldPath)
-	fm.lockFile(oldPath)
-	defer fm.unlockFile(oldPath)
-
-	token, err := fm.distLockFile(oldPath)
-	if err != nil {
-		return err
-	}
-	defer fm.distUnlockFile(oldPath, token)
-
-	meta, err := fm.GetFileMetadata(oldPath)
-	if err != nil {
-		return err
-	}
-
 	newPath := utils.NormalizePath(utils.GetDirectory(oldPath) + "/" + newName)
+	if newPath == oldPath {
+		return nil
+	}
+	namespaceLease, err := fm.acquireFileNamespace(oldPath, newPath)
+	if err != nil {
+		return err
+	}
+	defer releaseNamespaceLease(namespaceLease)
 
-	if fm.Exists(newPath) {
+	paths := []string{oldPath, newPath}
+	sort.Strings(paths)
+	for _, path := range paths {
+		fm.lockFile(path)
+	}
+	defer func() {
+		for i := len(paths) - 1; i >= 0; i-- {
+			fm.unlockFile(paths[i])
+		}
+	}()
+
+	leases := make([]*distributed.LockLease, 0, len(paths))
+	for _, path := range paths {
+		lease, err := fm.distLockFileWithRenewal(context.Background(), path)
+		if err != nil {
+			for i := len(leases) - 1; i >= 0; i-- {
+				leases[i].Stop()
+				fm.distUnlockFile(paths[i], leases[i].Token)
+			}
+			return err
+		}
+		leases = append(leases, lease)
+	}
+	defer func() {
+		for i := len(leases) - 1; i >= 0; i-- {
+			leases[i].Stop()
+			fm.distUnlockFile(paths[i], leases[i].Token)
+		}
+	}()
+
+	fileMetadataSvc := database.NewFileMetadataService(fm.db)
+	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, oldPath, newPath)
+	if err != nil {
+		return fmt.Errorf("failed to begin fenced rename transaction: %w", err)
+	}
+	rollbackTx := true
+	defer func() {
+		if rollbackTx {
+			_ = tx.Rollback()
+		}
+	}()
+	meta, err := fileMetadataSvc.GetByPathTx(tx, oldPath)
+	if err != nil {
+		return err
+	}
+
+	targetMeta, err := fileMetadataSvc.GetByPathTx(tx, newPath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("failed to query target metadata: %w", err)
+	}
+	if targetMeta != nil || fm.storage.Exists(newPath) {
 		return fmt.Errorf("target path already exists: %s", newPath)
 	}
 
 	if err := fm.storage.Rename(oldPath, newPath); err != nil {
 		return fmt.Errorf("failed to rename file in storage: %w", err)
 	}
+	for _, lease := range leases {
+		if err := lease.Err(); err != nil {
+			if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+				logger.Error("failed to rollback storage rename after lease loss %s -> %s: %v", newPath, oldPath, rbErr)
+			}
+			return err
+		}
+	}
+	if err := namespaceLease.Err(); err != nil {
+		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+			logger.Error("failed to rollback storage rename after namespace lease loss %s -> %s: %v", newPath, oldPath, rbErr)
+		}
+		return err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+			logger.Error("failed to rollback storage rename after fencing rejection %s -> %s: %v", newPath, oldPath, rbErr)
+		}
+		return err
+	}
 
 	meta.Path = newPath
 	meta.Name = newName
 	meta.UpdatedAt = utils.GetCurrentTimestamp()
 
-	if err := database.NewFileMetadataService(fm.db).Update(meta); err != nil {
+	if err := fileMetadataSvc.UpdateTx(tx, meta); err != nil {
 		// 回滚存储层重命名：若回滚也失败则记录日志，避免静默丢失文件。
 		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
 			logger.Error("failed to rollback storage rename %s -> %s: %v", newPath, oldPath, rbErr)
 		}
 		return fmt.Errorf("failed to update file metadata: %w", err)
 	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+			logger.Error("failed to rollback storage rename after fencing rejection %s -> %s: %v", newPath, oldPath, rbErr)
+		}
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+			logger.Error("failed to rollback storage rename after commit failure %s -> %s: %v", newPath, oldPath, rbErr)
+		}
+		return fmt.Errorf("failed to commit file rename: %w", err)
+	}
+	rollbackTx = false
 
 	return nil
 }

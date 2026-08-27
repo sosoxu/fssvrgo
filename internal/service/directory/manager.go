@@ -3,6 +3,7 @@ package directory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,24 +56,79 @@ func NewDirectoryManagerWithDistLock(db *database.DB, store storage.StorageAdapt
 // (e.g. recursive delete/rename of large directories) do not lose the lock
 // when the initial TTL expires. This matches the behavior of the upload
 // completion path (see transfer.FileTransferService.CompleteUpload).
-func (dm *DirectoryManager) lockDirectory(path string) (func(), error) {
+func (dm *DirectoryManager) lockDirectory(path string) (*distributed.LockLease, func(), error) {
 	if dm.distLock == nil {
-		return func() {}, nil
+		return nil, func() {}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	token, cancelRenew, err := distributed.AcquireLockWithRenewal(ctx, dm.distLock, "dir:"+path, 10*time.Second, 30, 50*time.Millisecond)
+	lease, err := distributed.AcquireLockLease(context.Background(), dm.distLock, "dir:"+path, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
-		return nil, fmt.Errorf("failed to acquire directory lock for %s: %w", path, err)
+		return nil, nil, fmt.Errorf("failed to acquire directory lock for %s: %w", path, err)
 	}
-	return func() {
-		cancelRenew()
+	return lease, func() {
+		lease.Stop()
 		unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer unlockCancel()
-		if err := dm.distLock.Unlock(unlockCtx, "dir:"+path, token); err != nil {
+		if err := dm.distLock.Unlock(unlockCtx, "dir:"+path, lease.Token); err != nil {
 			logger.Warn("failed to release directory lock for %s: %v", path, err)
 		}
 	}, nil
+}
+
+func checkDirectoryLease(lease *distributed.LockLease) error {
+	if lease == nil {
+		return nil
+	}
+	return lease.Err()
+}
+
+func (dm *DirectoryManager) lockDirectories(paths ...string) ([]*distributed.LockLease, func(), error) {
+	ordered := append([]string(nil), paths...)
+	sort.Strings(ordered)
+	leases := make([]*distributed.LockLease, 0, len(ordered))
+	releases := make([]func(), 0, len(ordered))
+	for _, path := range ordered {
+		lease, release, err := dm.lockDirectory(path)
+		if err != nil {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+			return nil, nil, err
+		}
+		leases = append(leases, lease)
+		releases = append(releases, release)
+	}
+	return leases, func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}, nil
+}
+
+func checkDirectoryLeases(leases []*distributed.LockLease) error {
+	for _, lease := range leases {
+		if err := checkDirectoryLease(lease); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (dm *DirectoryManager) acquireDirectoryNamespace(paths ...string) (*database.NamespaceLease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lease, err := dm.db.AcquireNamespaceLease(ctx, database.DirectoryNamespaceRequests(paths...), 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire directory namespace lease: %w", err)
+	}
+	return lease, nil
+}
+
+func releaseNamespaceLease(lease *database.NamespaceLease) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := lease.Release(ctx); err != nil {
+		logger.Warn("failed to release directory namespace lease: %v", err)
+	}
 }
 
 // supportsDirectoryStorageOps returns true only for backends where directory-
@@ -89,14 +145,34 @@ func (dm *DirectoryManager) supportsDirectoryStorageOps() bool {
 
 func (dm *DirectoryManager) CreateDirectory(path string) error {
 	path = utils.NormalizePath(path)
+	namespaceLease, err := dm.acquireDirectoryNamespace(path)
+	if err != nil {
+		return err
+	}
+	defer releaseNamespaceLease(namespaceLease)
 
-	release, err := dm.lockDirectory(path)
+	lease, release, err := dm.lockDirectory(path)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	if dm.Exists(path) {
+	metadataSvc := database.NewDirectoryMetadataService(dm.db)
+	tx, err := dm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
+	if err != nil {
+		return fmt.Errorf("failed to begin fenced directory create: %w", err)
+	}
+	rollbackTx := true
+	defer func() {
+		if rollbackTx {
+			_ = tx.Rollback()
+		}
+	}()
+	existing, err := metadataSvc.GetByPathTx(tx, path)
+	if err != nil {
+		return fmt.Errorf("failed to check directory metadata: %w", err)
+	}
+	if existing != nil {
 		return fmt.Errorf("directory already exists: %s", path)
 	}
 
@@ -112,9 +188,25 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 		IsDeleted: false,
 	}
 
-	if err := database.NewDirectoryMetadataService(dm.db).Create(meta); err != nil {
+	if err := checkDirectoryLease(lease); err != nil {
 		return err
 	}
+	if err := namespaceLease.Err(); err != nil {
+		return err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		return err
+	}
+	if err := metadataSvc.CreateTx(tx, meta); err != nil {
+		return err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit directory create: %w", err)
+	}
+	rollbackTx = false
 
 	// Create the directory marker in the storage backend so that the directory
 	// is visible to store-level operations (Exists/List) on the local backend.
@@ -133,14 +225,24 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 
 func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	path = utils.NormalizePath(path)
+	namespaceLease, err := dm.acquireDirectoryNamespace(path)
+	if err != nil {
+		return err
+	}
+	defer releaseNamespaceLease(namespaceLease)
 
-	release, err := dm.lockDirectory(path)
+	lease, release, err := dm.lockDirectory(path)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	if !dm.Exists(path) {
+	metadataSvc := database.NewDirectoryMetadataService(dm.db)
+	meta, err := metadataSvc.GetByPath(path)
+	if err != nil {
+		return fmt.Errorf("failed to get directory metadata: %w", err)
+	}
+	if meta == nil {
 		return fmt.Errorf("directory not found: %s", path)
 	}
 
@@ -163,153 +265,162 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 			return fmt.Errorf("directory is not empty: %s", path)
 		}
 
-		meta, err := database.NewDirectoryMetadataService(dm.db).GetByPath(path)
+		if err := checkDirectoryLease(lease); err != nil {
+			return err
+		}
+		if err := namespaceLease.Err(); err != nil {
+			return err
+		}
+		tx, err := dm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
 		if err != nil {
-			return fmt.Errorf("failed to get directory metadata: %w", err)
+			return fmt.Errorf("failed to begin fenced directory delete: %w", err)
 		}
-		if meta == nil {
-			return fmt.Errorf("directory not found: %s", path)
+		rollbackTx := true
+		defer func() {
+			if rollbackTx {
+				_ = tx.Rollback()
+			}
+		}()
+		var storageBackup storage.DirectoryRemoveBackup
+		if dm.supportsDirectoryStorageOps() {
+			storageBackup, err = storage.BeginRemoveDirectory(dm.store, path)
+			if err != nil {
+				return fmt.Errorf("failed to prepare empty directory delete: %w", err)
+			}
 		}
-		return database.NewDirectoryMetadataService(dm.db).Remove(meta.ID)
+		if err := metadataSvc.RemoveTx(tx, meta.ID); err != nil {
+			if storageBackup != nil {
+				_ = storageBackup.Rollback()
+			}
+			return err
+		}
+		if err := namespaceLease.ValidateTx(tx); err != nil {
+			if storageBackup != nil {
+				_ = storageBackup.Rollback()
+			}
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			if storageBackup != nil {
+				_ = storageBackup.Rollback()
+			}
+			return fmt.Errorf("failed to commit directory delete: %w", err)
+		}
+		rollbackTx = false
+		if storageBackup != nil {
+			if err := storageBackup.Commit(); err != nil {
+				logger.Warn("failed to clean empty directory backup %s: %v", path, err)
+			}
+		}
+		return nil
 	}
 
-	// Recursive deletion. The distributed lock held above serializes concurrent
-	// delete/rename operations on this directory across instances. Within this
-	// operation we delete in batches to bound memory, and wrap each batch's
-	// metadata soft-deletes in a transaction so a batch cannot leave the DB in
-	// a half-deleted state. Storage object removal happens after the batch's
-	// transaction commits and is best-effort (a leaked object is recoverable via
-	// the periodic cleanup service; a missing DB record after commit is not).
-	const batchSize = 500
+	// Object storage has no atomic directory removal, so remember its live file
+	// keys before the metadata transaction and remove them only after commit.
+	// Local storage is removed as one tree and does not need an in-memory list.
 	prefix := escapeLikePattern(path + "/")
-
-	for {
-		// Query the next batch outside the transaction — we only need the IDs
-		// to soft-delete, and holding a long read transaction for large dirs
-		// would hurt concurrency on SQLite.
-		rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
+	var objectPaths []string
+	if dm.store != nil && !dm.supportsDirectoryStorageOps() {
+		rows, err := dm.db.Query("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", prefix+"%")
 		if err != nil {
-			return fmt.Errorf("failed to query files: %w", err)
+			return fmt.Errorf("failed to query object paths: %w", err)
 		}
-
-		type fileEntry struct {
-			id   string
-			path string
-		}
-		var entries []fileEntry
 		for rows.Next() {
-			var e fileEntry
-			if err := rows.Scan(&e.id, &e.path); err != nil {
+			var objectPath string
+			if err := rows.Scan(&objectPath); err != nil {
 				rows.Close()
-				return fmt.Errorf("failed to scan file id: %w", err)
+				return fmt.Errorf("failed to scan object path: %w", err)
 			}
-			entries = append(entries, e)
+			objectPaths = append(objectPaths, objectPath)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return fmt.Errorf("failed to iterate file rows: %w", err)
+			return fmt.Errorf("failed to iterate object paths: %w", err)
 		}
 		rows.Close()
-
-		if len(entries) == 0 {
-			break
-		}
-
-		// Soft-delete the whole batch atomically.
-		tx, txErr := dm.db.BeginTx(context.Background(), nil)
-		if txErr != nil {
-			return fmt.Errorf("failed to begin delete transaction: %w", txErr)
-		}
-		for _, e := range entries {
-			if _, err := tx.Exec("UPDATE files SET is_deleted = TRUE, updated_at = ? WHERE id = ?", utils.GetCurrentTimestamp(), e.id); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("failed to delete file metadata: %w", err)
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit file deletion batch: %w", err)
-		}
-
-		// Storage cleanup after the DB commit. Best-effort: a failure leaves an
-		// orphan object that the cleanup service can reap later.
-		for _, e := range entries {
-			if dm.store != nil {
-				if err := dm.store.Remove(e.path); err != nil {
-					logger.Warn("failed to remove storage object %s during directory delete: %v", e.path, err)
-				}
-			}
-		}
 	}
 
-	for {
-		rows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
-		if err != nil {
-			return fmt.Errorf("failed to query directories: %w", err)
-		}
-
-		type dirEntry struct {
-			id   string
-			path string
-		}
-		var entries []dirEntry
-		for rows.Next() {
-			var e dirEntry
-			if err := rows.Scan(&e.id, &e.path); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan directory id: %w", err)
-			}
-			entries = append(entries, e)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate directory rows: %w", err)
-		}
-		rows.Close()
-
-		if len(entries) == 0 {
-			break
-		}
-
-		tx, txErr := dm.db.BeginTx(context.Background(), nil)
-		if txErr != nil {
-			return fmt.Errorf("failed to begin delete directory transaction: %w", txErr)
-		}
-		for _, e := range entries {
-			if _, err := tx.Exec("UPDATE directories SET is_deleted = TRUE, updated_at = ? WHERE id = ?", utils.GetCurrentTimestamp(), e.id); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("failed to delete directory metadata: %w", err)
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit directory deletion batch: %w", err)
-		}
-
-		// Storage directory-marker removal is only meaningful for the local
-		// backend (it removes a physical directory). For object storage there
-		// are no real directories — the per-file Remove above already deleted
-		// every real object, and RemoveDirectory would just re-list the same
-		// (now empty) prefix. Skip it.
-		for _, e := range entries {
-			if dm.supportsDirectoryStorageOps() {
-				if err := dm.store.RemoveDirectory(e.path); err != nil {
-					logger.Warn("failed to remove storage directory %s during delete: %v", e.path, err)
-				}
-			}
-		}
+	if err := checkDirectoryLease(lease); err != nil {
+		return err
 	}
-
-	meta, err := database.NewDirectoryMetadataService(dm.db).GetByPath(path)
+	if err := namespaceLease.Err(); err != nil {
+		return err
+	}
+	// All metadata rows transition together. A failure in any statement rolls
+	// the complete tree back, so callers never observe a successful prefix and
+	// a still-live suffix from an earlier batch.
+	tx, err := dm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
 	if err != nil {
-		return fmt.Errorf("failed to get directory metadata: %w", err)
+		return fmt.Errorf("failed to begin recursive delete transaction: %w", err)
 	}
-	if meta == nil {
-		return fmt.Errorf("directory not found: %s", path)
+	rollback := true
+	defer func() {
+		if rollback {
+			_ = tx.Rollback()
+		}
+	}()
+	var storageBackup storage.DirectoryRemoveBackup
+	if dm.supportsDirectoryStorageOps() {
+		storageBackup, err = storage.BeginRemoveDirectory(dm.store, path)
+		if err != nil {
+			return fmt.Errorf("failed to prepare recursive directory delete: %w", err)
+		}
 	}
-	return database.NewDirectoryMetadataService(dm.db).Remove(meta.ID)
+	rollbackStorage := func() {
+		if storageBackup != nil {
+			if rbErr := storageBackup.Rollback(); rbErr != nil {
+				logger.Error("failed to restore directory %s after metadata failure: %v", path, rbErr)
+			}
+		}
+	}
+
+	now := utils.GetCurrentTimestamp()
+	if _, err := tx.Exec("UPDATE files SET is_deleted = TRUE, updated_at = ? WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", now, prefix+"%"); err != nil {
+		rollbackStorage()
+		return fmt.Errorf("failed to delete file metadata: %w", err)
+	}
+	if _, err := tx.Exec("UPDATE directories SET is_deleted = TRUE, updated_at = ? WHERE (id = ? OR path LIKE ? ESCAPE '\\') AND is_deleted = FALSE", now, meta.ID, prefix+"%"); err != nil {
+		rollbackStorage()
+		return fmt.Errorf("failed to delete directory metadata: %w", err)
+	}
+	if err := checkDirectoryLease(lease); err != nil {
+		rollbackStorage()
+		return err
+	}
+	if err := namespaceLease.Err(); err != nil {
+		rollbackStorage()
+		return err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackStorage()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		rollbackStorage()
+		return fmt.Errorf("failed to commit recursive delete: %w", err)
+	}
+	rollback = false
+
+	if storageBackup != nil {
+		if err := storageBackup.Commit(); err != nil {
+			logger.Warn("failed to clean recursive directory backup %s: %v", path, err)
+		}
+	} else if dm.store != nil {
+		for _, objectPath := range objectPaths {
+			if err := dm.store.Remove(objectPath); err != nil {
+				logger.Warn("failed to remove storage object %s during directory delete: %v", objectPath, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	oldPath = utils.NormalizePath(oldPath)
+	newPath := utils.NormalizePath(utils.GetDirectory(oldPath) + "/" + newName)
+	if newPath == oldPath {
+		return nil
+	}
 
 	// Object storage has no real directories. The file DB `Path` is used
 	// directly as the storage object key, so renaming a directory would
@@ -324,28 +435,52 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	if dm.store != nil && !dm.supportsDirectoryStorageOps() {
 		return fmt.Errorf("directory rename is not supported for object storage: %s", oldPath)
 	}
+	namespaceLease, err := dm.acquireDirectoryNamespace(oldPath, newPath)
+	if err != nil {
+		return err
+	}
+	defer releaseNamespaceLease(namespaceLease)
 
-	release, err := dm.lockDirectory(oldPath)
+	leases, release, err := dm.lockDirectories(oldPath, newPath)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	meta, err := dm.GetDirectoryMetadata(oldPath)
+	tx, err := dm.db.BeginNamespaceWrite(context.Background(), namespaceLease, oldPath, newPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to begin fenced directory rename: %w", err)
+	}
+	rollbackTx := true
+	defer func() {
+		if rollbackTx {
+			_ = tx.Rollback()
+		}
+	}()
+	metadataSvc := database.NewDirectoryMetadataService(dm.db)
+	meta, err := metadataSvc.GetByPathTx(tx, oldPath)
+	if err != nil {
+		return fmt.Errorf("failed to get source directory metadata: %w", err)
+	}
+	if meta == nil {
+		return fmt.Errorf("directory not found: %s", oldPath)
 	}
 
-	newPath := utils.NormalizePath(utils.GetDirectory(oldPath) + "/" + newName)
-
-	if dm.Exists(newPath) {
+	targetMeta, err := metadataSvc.GetByPathTx(tx, newPath)
+	if err != nil {
+		return fmt.Errorf("failed to check target directory metadata: %w", err)
+	}
+	if targetMeta != nil {
 		return fmt.Errorf("target path already exists: %s", newPath)
+	}
+	if dm.store != nil && dm.store.Exists(newPath) {
+		return fmt.Errorf("target storage path already exists: %s", newPath)
 	}
 
 	// Snapshot the children to rename. The distributed lock serializes this
 	// against concurrent rename/delete on the same directory, so the snapshot
 	// is stable for the duration of the operation.
-	rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
+	rows, err := tx.Query("SELECT id, path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
 	if err != nil {
 		return fmt.Errorf("failed to query child files: %w", err)
 	}
@@ -369,7 +504,7 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	}
 	rows.Close()
 
-	dirRows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
+	dirRows, err := tx.Query("SELECT id, path FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
 	if err != nil {
 		return fmt.Errorf("failed to query child directories: %w", err)
 	}
@@ -391,22 +526,36 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 
 	now := utils.GetCurrentTimestamp()
 
-	// Apply all metadata path updates atomically. If the commit fails the DB
-	// remains at the old paths and no storage objects have been moved yet, so
-	// the system stays consistent. Storage renames happen after commit and are
-	// best-effort; a failed storage rename leaves the DB pointing at the new
-	// path while the object lingers at the old path — a recoverable mismatch
-	// that the cleanup service can reconcile.
-	tx, err := dm.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin rename transaction: %w", err)
+	if err := checkDirectoryLeases(leases); err != nil {
+		return err
+	}
+	if err := namespaceLease.Err(); err != nil {
+		return err
+	}
+
+	// Local directory rename is one filesystem operation, so move the complete
+	// tree before changing metadata. If the DB transaction or lease check fails,
+	// move it back and keep the old metadata paths authoritative.
+	storageMoved := false
+	if dm.store != nil {
+		if err := dm.store.Rename(oldPath, newPath); err != nil {
+			return fmt.Errorf("failed to rename storage directory %s -> %s: %w", oldPath, newPath, err)
+		}
+		storageMoved = true
+	}
+	rollbackStorage := func() {
+		if storageMoved {
+			if rbErr := dm.store.Rename(newPath, oldPath); rbErr != nil {
+				logger.Error("failed to rollback storage directory rename %s -> %s: %v", newPath, oldPath, rbErr)
+			}
+		}
 	}
 
 	for _, e := range fileEntries {
 		newItemPath := newPath + e.path[len(oldPath):]
 		newItemName := utils.GetFileName(newItemPath)
 		if _, err := tx.Exec("UPDATE files SET path = ?, name = ?, updated_at = ? WHERE id = ?", newItemPath, newItemName, now, e.id); err != nil {
-			tx.Rollback()
+			rollbackStorage()
 			return fmt.Errorf("failed to update file path: %w", err)
 		}
 	}
@@ -415,36 +564,33 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 		newItemPath := newPath + e.path[len(oldPath):]
 		newItemName := utils.GetFileName(newItemPath)
 		if _, err := tx.Exec("UPDATE directories SET path = ?, name = ?, updated_at = ? WHERE id = ?", newItemPath, newItemName, now, e.id); err != nil {
-			tx.Rollback()
+			rollbackStorage()
 			return fmt.Errorf("failed to update directory path: %w", err)
 		}
 	}
 
 	if _, err := tx.Exec("UPDATE directories SET path = ?, name = ?, updated_at = ? WHERE id = ?", newPath, newName, now, meta.ID); err != nil {
-		tx.Rollback()
+		rollbackStorage()
 		return fmt.Errorf("failed to update directory metadata: %w", err)
 	}
 
+	if err := checkDirectoryLeases(leases); err != nil {
+		rollbackStorage()
+		return err
+	}
+	if err := namespaceLease.Err(); err != nil {
+		rollbackStorage()
+		return err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackStorage()
+		return err
+	}
 	if err := tx.Commit(); err != nil {
+		rollbackStorage()
 		return fmt.Errorf("failed to commit rename: %w", err)
 	}
-
-	// DB is now durably at the new paths. Move storage objects to match.
-	for _, e := range fileEntries {
-		newItemPath := newPath + e.path[len(oldPath):]
-		if dm.store != nil {
-			if err := dm.store.Rename(e.path, newItemPath); err != nil {
-				logger.Warn("failed to rename storage object %s -> %s: %v", e.path, newItemPath, err)
-			}
-		}
-	}
-
-	// Move the target directory's own storage object (if it has one).
-	if dm.store != nil {
-		if err := dm.store.Rename(oldPath, newPath); err != nil {
-			logger.Warn("failed to rename storage directory %s -> %s: %v", oldPath, newPath, err)
-		}
-	}
+	rollbackTx = false
 
 	meta.Path = newPath
 	meta.Name = newName

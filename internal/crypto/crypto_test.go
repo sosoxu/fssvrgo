@@ -297,6 +297,41 @@ func TestDecryptFileStreaming(t *testing.T) {
 	}
 }
 
+func TestChunkedEncryptionCrossesChunkBoundary(t *testing.T) {
+	cs := NewCryptoService()
+	if err := cs.Init(validHexKey(t)); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "large-input.bin")
+	encPath := filepath.Join(dir, "large-encrypted.bin")
+	decPath := filepath.Join(dir, "large-decrypted.bin")
+	plaintext := []byte(strings.Repeat("chunk-boundary-data", chunkedChunkSize/19+1000))
+	if err := os.WriteFile(inputPath, plaintext, 0600); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	if err := cs.EncryptFile(inputPath, encPath); err != nil {
+		t.Fatalf("EncryptFile: %v", err)
+	}
+	encData, err := os.ReadFile(encPath)
+	if err != nil {
+		t.Fatalf("read encrypted file: %v", err)
+	}
+	if len(encData) < chunkedHeaderSize || string(encData[:8]) != chunkedMagic {
+		t.Fatal("encrypted file does not use the chunked format")
+	}
+	if err := cs.DecryptFileStreaming(encPath, decPath); err != nil {
+		t.Fatalf("DecryptFileStreaming: %v", err)
+	}
+	decrypted, err := os.ReadFile(decPath)
+	if err != nil {
+		t.Fatalf("read decrypted file: %v", err)
+	}
+	if string(decrypted) != string(plaintext) {
+		t.Fatal("chunked encryption round trip mismatch")
+	}
+}
+
 func TestGenerateKey(t *testing.T) {
 	cs := NewCryptoService()
 	k := cs.GenerateKey()

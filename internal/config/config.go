@@ -46,16 +46,16 @@ type StorageConfig struct {
 }
 
 type DatabaseConfig struct {
-	Type               string `yaml:"type"`
-	Path               string `yaml:"path"`
-	Host               string `yaml:"host"`
-	Port               int    `yaml:"port"`
-	Name               string `yaml:"name"`
-	User               string `yaml:"user"`
-	Password           string `yaml:"password"`
-	SSLMode            string `yaml:"sslmode"`
-	PoolSize           int    `yaml:"pool_size"`
-	ConnectionTimeoutMs int   `yaml:"connection_timeout_ms"`
+	Type                string `yaml:"type"`
+	Path                string `yaml:"path"`
+	Host                string `yaml:"host"`
+	Port                int    `yaml:"port"`
+	Name                string `yaml:"name"`
+	User                string `yaml:"user"`
+	Password            string `yaml:"password"`
+	SSLMode             string `yaml:"sslmode"`
+	PoolSize            int    `yaml:"pool_size"`
+	ConnectionTimeoutMs int    `yaml:"connection_timeout_ms"`
 }
 
 type LoggingConfig struct {
@@ -182,7 +182,7 @@ func (c *Config) applyDefaults() {
 		c.Storage.Local.RootDir = "/data/fsserver"
 	}
 	if c.Database.Type == "" {
-		c.Database.Type = "sqlite"
+		c.Database.Type = "postgresql"
 	}
 	if c.Database.PoolSize == 0 {
 		c.Database.PoolSize = 10
@@ -198,6 +198,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Redis.Enabled && c.Redis.PoolSize == 0 {
 		c.Redis.PoolSize = 10
+	}
+	if c.Auth.TokenExpiry == 0 {
+		c.Auth.TokenExpiry = 3600
+	}
+	if c.Auth.RefreshExpiry == 0 {
+		c.Auth.RefreshExpiry = 86400
 	}
 }
 
@@ -309,25 +315,20 @@ func (c *Config) validateStorage() error {
 }
 
 func (c *Config) validateDatabase() error {
-	if c.Database.Type != "sqlite" && c.Database.Type != "postgresql" {
-		return fmt.Errorf("database.type must be \"sqlite\" or \"postgresql\", got %q", c.Database.Type)
+	if c.Database.Type != "postgresql" {
+		return fmt.Errorf("database.type must be \"postgresql\" for server deployments, got %q", c.Database.Type)
 	}
-	if c.Database.Type == "sqlite" && c.Database.Path == "" {
-		return fmt.Errorf("database.path is required when database.type is \"sqlite\"")
+	if c.Database.Host == "" {
+		return fmt.Errorf("database.host is required when database.type is \"postgresql\"")
 	}
-	if c.Database.Type == "postgresql" {
-		if c.Database.Host == "" {
-			return fmt.Errorf("database.host is required when database.type is \"postgresql\"")
-		}
-		if c.Database.Port < 1 || c.Database.Port > 65535 {
-			return fmt.Errorf("database.port must be between 1 and 65535, got %d", c.Database.Port)
-		}
-		if c.Database.Name == "" {
-			return fmt.Errorf("database.name is required when database.type is \"postgresql\"")
-		}
-		if c.Database.User == "" {
-			return fmt.Errorf("database.user is required when database.type is \"postgresql\"")
-		}
+	if c.Database.Port < 1 || c.Database.Port > 65535 {
+		return fmt.Errorf("database.port must be between 1 and 65535, got %d", c.Database.Port)
+	}
+	if c.Database.Name == "" {
+		return fmt.Errorf("database.name is required when database.type is \"postgresql\"")
+	}
+	if c.Database.User == "" {
+		return fmt.Errorf("database.user is required when database.type is \"postgresql\"")
 	}
 	if c.Database.PoolSize < 1 {
 		return fmt.Errorf("database.pool_size must be at least 1, got %d", c.Database.PoolSize)
@@ -379,9 +380,7 @@ func (c *Config) validateConsistency() error {
 		}
 	}
 	if c.Consistency.Level != "none" && c.Consistency.Level != "" {
-		if c.Consistency.SyncIntervalMs < 1 {
-			c.Consistency.SyncIntervalMs = 5000 // default 5 seconds
-		}
+		return fmt.Errorf("consistency.level %q is not implemented; use \"none\" with PostgreSQL, Redis locking, and shared storage", c.Consistency.Level)
 	}
 	return nil
 }

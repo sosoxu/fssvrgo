@@ -44,15 +44,15 @@ type CompareTestEnv struct {
 }
 
 type CompareResult struct {
-	Mode       string
-	Protocol   string
-	Operation  string
-	FileSize   string
-	FileSizeB  int64
+	Mode        string
+	Protocol    string
+	Operation   string
+	FileSize    string
+	FileSizeB   int64
 	Concurrency int
-	Duration   time.Duration
-	Throughput float64
-	Error      string
+	Duration    time.Duration
+	Throughput  float64
+	Error       string
 }
 
 func setupCompareEnv(t *testing.T) *CompareTestEnv {
@@ -69,15 +69,7 @@ func setupCompareEnv(t *testing.T) *CompareTestEnv {
 		t.Fatalf("failed to create storage dir: %v", err)
 	}
 
-	dbPath := filepath.Join(tempDir, "test.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		os.RemoveAll(tempDir)
-		t.Fatalf("failed to connect database: %v", err)
-	}
-
-	qdb := dbObj.GetQueryDB()
+	dbObj, qdb := connectPostgreSQLTestDB(t, 25)
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1,
@@ -619,7 +611,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
-						Mode: "Sequential", Protocol: "gRPC", Operation: "Upload",
+						Mode: "Sequential", Protocol: "Service", Operation: "Upload",
 						FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: 1, Error: err.Error(),
 					})
 					continue
@@ -630,11 +622,11 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				avgDur := avgDuration(durations)
 				tp := float64(fileSize) / avgDur.Seconds() / (1024 * 1024)
 				results = append(results, CompareResult{
-					Mode: "Sequential", Protocol: "gRPC", Operation: "Upload",
+					Mode: "Sequential", Protocol: "Service", Operation: "Upload",
 					FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: 1,
 					Duration: avgDur, Throughput: tp,
 				})
-				t.Logf("  gRPC Sequential Upload:     %v (%.2f MB/s)", avgDur, tp)
+				t.Logf("  Service Sequential Upload:  %v (%.2f MB/s)", avgDur, tp)
 			}
 			durations = nil
 			cleanCompareFiles(env.DB)
@@ -646,7 +638,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
-						Mode: "Segmented", Protocol: "gRPC", Operation: "Upload",
+						Mode: "Segmented", Protocol: "Service", Operation: "Upload",
 						FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: concurrency, Error: err.Error(),
 					})
 					continue
@@ -657,11 +649,11 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				avgDur := avgDuration(durations)
 				tp := float64(fileSize) / avgDur.Seconds() / (1024 * 1024)
 				results = append(results, CompareResult{
-					Mode: "Segmented", Protocol: "gRPC", Operation: "Upload",
+					Mode: "Segmented", Protocol: "Service", Operation: "Upload",
 					FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: concurrency,
 					Duration: avgDur, Throughput: tp,
 				})
-				t.Logf("  gRPC Segmented Upload (c=%d): %v (%.2f MB/s)", concurrency, avgDur, tp)
+				t.Logf("  Service Segmented Upload (c=%d): %v (%.2f MB/s)", concurrency, avgDur, tp)
 			}
 			durations = nil
 			cleanCompareFiles(env.DB)
@@ -753,14 +745,14 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
-						Mode: "Sequential", Protocol: "gRPC", Operation: "Download",
+						Mode: "Sequential", Protocol: "Service", Operation: "Download",
 						FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: 1, Error: err.Error(),
 					})
 					continue
 				}
 				if len(downloaded) != int(fileSize) {
 					results = append(results, CompareResult{
-						Mode: "Sequential", Protocol: "gRPC", Operation: "Download",
+						Mode: "Sequential", Protocol: "Service", Operation: "Download",
 						FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: 1,
 						Error: fmt.Sprintf("size mismatch: got %d", len(downloaded)),
 					})
@@ -772,11 +764,11 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				avgDur := avgDuration(durations)
 				tp := float64(fileSize) / avgDur.Seconds() / (1024 * 1024)
 				results = append(results, CompareResult{
-					Mode: "Sequential", Protocol: "gRPC", Operation: "Download",
+					Mode: "Sequential", Protocol: "Service", Operation: "Download",
 					FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: 1,
 					Duration: avgDur, Throughput: tp,
 				})
-				t.Logf("  gRPC Sequential Download:     %v (%.2f MB/s)", avgDur, tp)
+				t.Logf("  Service Sequential Download:  %v (%.2f MB/s)", avgDur, tp)
 			}
 			durations = nil
 
@@ -786,14 +778,14 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
-						Mode: "Segmented", Protocol: "gRPC", Operation: "Download",
+						Mode: "Segmented", Protocol: "Service", Operation: "Download",
 						FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: concurrency, Error: err.Error(),
 					})
 					continue
 				}
 				if len(downloaded) != int(fileSize) {
 					results = append(results, CompareResult{
-						Mode: "Segmented", Protocol: "gRPC", Operation: "Download",
+						Mode: "Segmented", Protocol: "Service", Operation: "Download",
 						FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: concurrency,
 						Error: fmt.Sprintf("size mismatch: got %d", len(downloaded)),
 					})
@@ -805,11 +797,11 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 				avgDur := avgDuration(durations)
 				tp := float64(fileSize) / avgDur.Seconds() / (1024 * 1024)
 				results = append(results, CompareResult{
-					Mode: "Segmented", Protocol: "gRPC", Operation: "Download",
+					Mode: "Segmented", Protocol: "Service", Operation: "Download",
 					FileSize: sizeLabel, FileSizeB: fileSize, Concurrency: concurrency,
 					Duration: avgDur, Throughput: tp,
 				})
-				t.Logf("  gRPC Segmented Download (c=%d): %v (%.2f MB/s)", concurrency, avgDur, tp)
+				t.Logf("  Service Segmented Download (c=%d): %v (%.2f MB/s)", concurrency, avgDur, tp)
 			}
 			durations = nil
 		}
@@ -818,7 +810,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 	}
 
 	t.Log("\n\n" + strings.Repeat("=", 120))
-	t.Log("  SEGMENTED vs NON-SEGMENTED TRANSFER COMPARISON (HTTP & gRPC)")
+	t.Log("  SEGMENTED vs NON-SEGMENTED TRANSFER COMPARISON (HTTP & Service)")
 	t.Log(strings.Repeat("=", 120))
 
 	sort.Slice(results, func(i, j int) bool {
@@ -857,7 +849,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 		sizeLabel := formatSize(fileSize)
 		t.Logf("\n--- %s ---", sizeLabel)
 
-		for _, protocol := range []string{"HTTP", "gRPC"} {
+		for _, protocol := range []string{"HTTP", "Service"} {
 			for _, operation := range []string{"Upload", "Download"} {
 				for _, concurrency := range concurrencyLevels {
 					var seqResult, segResult *CompareResult
@@ -889,7 +881,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 		}
 	}
 
-	t.Log("\n\n  HTTP vs gRPC COMPARISON (by mode)")
+	t.Log("\n\n  HTTP vs direct service-layer COMPARISON (by mode)")
 	t.Log(strings.Repeat("=", 100))
 
 	for _, fileSize := range fileSizes {
@@ -899,29 +891,29 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 		for _, operation := range []string{"Upload", "Download"} {
 			for _, mode := range []string{"Sequential", "Segmented"} {
 				for _, concurrency := range concurrencyLevels {
-					var httpResult, grpcResult *CompareResult
+					var httpResult, serviceResult *CompareResult
 					for _, r := range results {
 						if r.FileSizeB == fileSize && r.Operation == operation &&
 							r.Mode == mode && r.Concurrency == concurrency && r.Error == "" {
 							if r.Protocol == "HTTP" && httpResult == nil {
 								httpResult = &r
 							}
-							if r.Protocol == "gRPC" && grpcResult == nil {
-								grpcResult = &r
+							if r.Protocol == "Service" && serviceResult == nil {
+								serviceResult = &r
 							}
 						}
 					}
 
-					if httpResult != nil && grpcResult != nil {
-						ratio := grpcResult.Throughput / httpResult.Throughput
-						faster := "gRPC"
-						if httpResult.Throughput > grpcResult.Throughput {
-							ratio = httpResult.Throughput / grpcResult.Throughput
+					if httpResult != nil && serviceResult != nil {
+						ratio := serviceResult.Throughput / httpResult.Throughput
+						faster := "Service"
+						if httpResult.Throughput > serviceResult.Throughput {
+							ratio = httpResult.Throughput / serviceResult.Throughput
 							faster = "HTTP"
 						}
-						t.Logf("  %s %s (c=%d): HTTP=%.2f MB/s, gRPC=%.2f MB/s, %s %.2fx faster",
+						t.Logf("  %s %s (c=%d): HTTP=%.2f MB/s, Service=%.2f MB/s, %s %.2fx faster",
 							mode, operation, concurrency,
-							httpResult.Throughput, grpcResult.Throughput,
+							httpResult.Throughput, serviceResult.Throughput,
 							faster, ratio)
 					}
 				}
@@ -954,27 +946,27 @@ func BenchmarkHTTP_SegmentedDownload_100MB_Conc8(b *testing.B) {
 	benchmarkCompareHTTPDownload(b, 100*1024*1024, true, 8)
 }
 
-func BenchmarkGRPC_SequentialUpload_100MB(b *testing.B) {
+func BenchmarkService_SequentialUpload_100MB(b *testing.B) {
 	benchmarkCompareGRPCUpload(b, 100*1024*1024, false, 1)
 }
 
-func BenchmarkGRPC_SegmentedUpload_100MB_Conc4(b *testing.B) {
+func BenchmarkService_SegmentedUpload_100MB_Conc4(b *testing.B) {
 	benchmarkCompareGRPCUpload(b, 100*1024*1024, true, 4)
 }
 
-func BenchmarkGRPC_SegmentedUpload_100MB_Conc8(b *testing.B) {
+func BenchmarkService_SegmentedUpload_100MB_Conc8(b *testing.B) {
 	benchmarkCompareGRPCUpload(b, 100*1024*1024, true, 8)
 }
 
-func BenchmarkGRPC_SequentialDownload_100MB(b *testing.B) {
+func BenchmarkService_SequentialDownload_100MB(b *testing.B) {
 	benchmarkCompareGRPCDownload(b, 100*1024*1024, false, 1)
 }
 
-func BenchmarkGRPC_SegmentedDownload_100MB_Conc4(b *testing.B) {
+func BenchmarkService_SegmentedDownload_100MB_Conc4(b *testing.B) {
 	benchmarkCompareGRPCDownload(b, 100*1024*1024, true, 4)
 }
 
-func BenchmarkGRPC_SegmentedDownload_100MB_Conc8(b *testing.B) {
+func BenchmarkService_SegmentedDownload_100MB_Conc8(b *testing.B) {
 	benchmarkCompareGRPCDownload(b, 100*1024*1024, true, 8)
 }
 
@@ -1002,27 +994,27 @@ func BenchmarkHTTP_SegmentedDownload_256MB_Conc8(b *testing.B) {
 	benchmarkCompareHTTPDownload(b, 256*1024*1024, true, 8)
 }
 
-func BenchmarkGRPC_SequentialUpload_256MB(b *testing.B) {
+func BenchmarkService_SequentialUpload_256MB(b *testing.B) {
 	benchmarkCompareGRPCUpload(b, 256*1024*1024, false, 1)
 }
 
-func BenchmarkGRPC_SegmentedUpload_256MB_Conc4(b *testing.B) {
+func BenchmarkService_SegmentedUpload_256MB_Conc4(b *testing.B) {
 	benchmarkCompareGRPCUpload(b, 256*1024*1024, true, 4)
 }
 
-func BenchmarkGRPC_SegmentedUpload_256MB_Conc8(b *testing.B) {
+func BenchmarkService_SegmentedUpload_256MB_Conc8(b *testing.B) {
 	benchmarkCompareGRPCUpload(b, 256*1024*1024, true, 8)
 }
 
-func BenchmarkGRPC_SequentialDownload_256MB(b *testing.B) {
+func BenchmarkService_SequentialDownload_256MB(b *testing.B) {
 	benchmarkCompareGRPCDownload(b, 256*1024*1024, false, 1)
 }
 
-func BenchmarkGRPC_SegmentedDownload_256MB_Conc4(b *testing.B) {
+func BenchmarkService_SegmentedDownload_256MB_Conc4(b *testing.B) {
 	benchmarkCompareGRPCDownload(b, 256*1024*1024, true, 4)
 }
 
-func BenchmarkGRPC_SegmentedDownload_256MB_Conc8(b *testing.B) {
+func BenchmarkService_SegmentedDownload_256MB_Conc8(b *testing.B) {
 	benchmarkCompareGRPCDownload(b, 256*1024*1024, true, 8)
 }
 
@@ -1031,11 +1023,7 @@ func createCompareBenchEnv(b *testing.B) *CompareTestEnv {
 	storageDir := filepath.Join(tempDir, "storage")
 	os.MkdirAll(storageDir, 0755)
 
-	dbPath := filepath.Join(tempDir, "bench.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
-	dbObj := database.NewDatabase()
-	dbObj.Connect(dbCfg)
-	qdb := dbObj.GetQueryDB()
+	dbObj, qdb := connectPostgreSQLTestDB(b, 25)
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1, Name: "initial_schema",

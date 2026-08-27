@@ -36,12 +36,20 @@ func (t *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
 	return t.tx.Exec(t.dialect.Translate(query), args...)
 }
 
+func (t *Tx) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return t.tx.ExecContext(ctx, t.dialect.Translate(query), args...)
+}
+
 func (t *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	return t.tx.Query(t.dialect.Translate(query), args...)
 }
 
 func (t *Tx) QueryRow(query string, args ...interface{}) *sql.Row {
 	return t.tx.QueryRow(t.dialect.Translate(query), args...)
+}
+
+func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return t.tx.QueryRowContext(ctx, t.dialect.Translate(query), args...)
 }
 
 func (t *Tx) Commit() error { return t.tx.Commit() }
@@ -58,6 +66,10 @@ func (d *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
 		return d.db.Exec(d.dialect.Translate(query), args...)
 	}
 	return stmt.Exec(args...)
+}
+
+func (d *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return d.db.ExecContext(ctx, d.dialect.Translate(query), args...)
 }
 
 func (d *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {

@@ -15,7 +15,6 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/auth"
 	"github.com/sosoxu/fssvrgo/internal/cache"
 	"github.com/sosoxu/fssvrgo/internal/config"
-	"github.com/sosoxu/fssvrgo/internal/consistency"
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/discovery"
@@ -147,6 +146,34 @@ func main() {
 			return nil
 		},
 	})
+	migrationMgr.Register(database.Migration{
+		Version: 2,
+		Name:    "namespace_locks",
+		Up: func() error {
+			return database.InitNamespaceLockTable(queryDB)
+		},
+	})
+	migrationMgr.Register(database.Migration{
+		Version: 3,
+		Name:    "transfer_session_results",
+		Up: func() error {
+			return database.InitTransferSessionResultTable(queryDB)
+		},
+	})
+	migrationMgr.Register(database.Migration{
+		Version: 4,
+		Name:    "namespace_fencing_tokens",
+		Up: func() error {
+			return database.InitNamespaceLockTable(queryDB)
+		},
+	})
+	migrationMgr.Register(database.Migration{
+		Version: 5,
+		Name:    "namespace_fencing_heads",
+		Up: func() error {
+			return database.InitNamespaceLockTable(queryDB)
+		},
+	})
 	if err := migrationMgr.RunMigrations(); err != nil {
 		logger.Error("Failed to run database migrations: %v", err)
 		os.Exit(1)
@@ -261,26 +288,17 @@ func main() {
 		logger.Info("Service discovery enabled (type=%s)", cfg.Discovery.Type)
 	}
 
-	// AuthConsistency
-	var consistencyMgr *consistency.ConsistencyManager
-	if cfg.Consistency.Level != "none" && cfg.Consistency.Level != "" {
-		if err := consistency.ValidateQuorum(cfg.Consistency.ReplicaCount, cfg.Consistency.ReadQuorum, cfg.Consistency.WriteQuorum); err != nil {
-			logger.Error("Invalid consistency configuration: %v", err)
-			os.Exit(1)
-		}
-		consistencyMgr = consistency.NewConsistencyManager(
-			cfg.Consistency.Level,
-			cfg.Consistency.ReplicaCount,
-			cfg.Consistency.ReadQuorum,
-			cfg.Consistency.WriteQuorum,
-			cfg.Consistency.SyncIntervalMs,
-		)
-		defer consistencyMgr.Stop()
-	}
-
 	// Auth
 	authSvc := auth.NewAuthService()
-	authSvc.Init(cfg.Auth.Enabled, cfg.Auth.Secret)
+	if redisManager != nil {
+		authSvc.SetSecurityStateStore(auth.NewRedisSecurityStateStore(redisManager.GetClient()))
+	}
+	authSvc.InitWithExpiry(
+		cfg.Auth.Enabled,
+		cfg.Auth.Secret,
+		time.Duration(cfg.Auth.TokenExpiry)*time.Second,
+		time.Duration(cfg.Auth.RefreshExpiry)*time.Second,
+	)
 	// Wire API key lookup so keys created via the management API are validated against the database.
 	authSvc.SetApiKeyLookup(func(ctx context.Context, keyHash string) (*database.ApiKey, error) {
 		return database.NewApiKeyService(queryDB).GetByKeyHash(keyHash)
@@ -334,7 +352,7 @@ func main() {
 	// sessions become resumable across instances — the temp file written by the
 	// instance that started the session can be opened by the instance that
 	// completes it. When left empty, each instance keeps a private temp dir and
-	// cross-instance resume falls back to metadata-only (bytes are lost).
+	// cross-instance resume cannot access the temporary bytes and fails.
 	if cfg.Storage.TempDir != "" {
 		if err := transferSvc.SetTempDir(cfg.Storage.TempDir); err != nil {
 			logger.Error("Failed to set upload temp directory: %v", err)
@@ -368,6 +386,7 @@ func main() {
 			fm, dirSvc, flSvc, transferSvc,
 			authSvc, cryptoSvc,
 			metricsSvc,
+			queryDB,
 		)
 	}
 

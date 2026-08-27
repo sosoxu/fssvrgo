@@ -33,6 +33,8 @@ type LocalStorage struct {
 	pathLocks sync.Map
 }
 
+const localStagingDirectory = ".fssvr-staging"
+
 func NewLocalStorage(rootDir string) *LocalStorage {
 	return &LocalStorage{
 		rootDir: rootDir,
@@ -52,6 +54,10 @@ func (ls *LocalStorage) getFullPath(path string) string {
 }
 
 func (ls *LocalStorage) ValidatePath(path string) error {
+	cleaned := strings.TrimPrefix(filepath.Clean(path), string(filepath.Separator))
+	if cleaned == localStagingDirectory || strings.HasPrefix(cleaned, localStagingDirectory+string(filepath.Separator)) {
+		return fmt.Errorf("path is reserved for internal staging: %s", path)
+	}
 	fullPath := ls.getFullPath(path)
 	absRoot, err := filepath.Abs(ls.rootDir)
 	if err != nil {
@@ -60,6 +66,11 @@ func (ls *LocalStorage) ValidatePath(path string) error {
 	// Resolve symlinks in root to prevent a symlinked root from bypassing checks.
 	if resolvedRoot, err := filepath.EvalSymlinks(absRoot); err == nil {
 		absRoot = resolvedRoot
+	} else {
+		// A configured root commonly does not exist before the first write.
+		// Resolve its deepest existing ancestor too, so root and target use the
+		// same canonical parent on platforms where /var, /tmp, etc. are symlinks.
+		absRoot = resolveExistingAncestor(absRoot)
 	}
 	absFull, err := filepath.Abs(fullPath)
 	if err != nil {
@@ -118,6 +129,40 @@ func (ls *LocalStorage) ensureDirectoryExists(dirPath string) error {
 	return nil
 }
 
+func writeAtomicFile(fullPath string, perm os.FileMode, write func(io.Writer) error) error {
+	dir := filepath.Dir(fullPath)
+	temp, err := os.CreateTemp(dir, ".fssvr-write-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	cleanup := func() {
+		temp.Close()
+		os.Remove(tempPath)
+	}
+	if err := temp.Chmod(perm); err != nil {
+		cleanup()
+		return err
+	}
+	if err := write(temp); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		os.Remove(tempPath)
+		return err
+	}
+	if err := os.Rename(tempPath, fullPath); err != nil {
+		os.Remove(tempPath)
+		return err
+	}
+	return nil
+}
+
 func (ls *LocalStorage) Write(path string, data []byte) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
@@ -132,7 +177,10 @@ func (ls *LocalStorage) Write(path string, data []byte) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	if err := os.WriteFile(fullPath, data, 0644); err != nil {
+	if err := writeAtomicFile(fullPath, 0644, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	}); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	return nil
@@ -192,19 +240,57 @@ func (ls *LocalStorage) WriteFromTempFile(path string, tempFilePath string) erro
 	}
 	defer src.Close()
 
-	dst, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer dst.Close()
-
-	buf := make([]byte, 256*1024)
-	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
+	if err := writeAtomicFile(fullPath, 0644, func(w io.Writer) error {
+		buf := make([]byte, 256*1024)
+		_, err := io.CopyBuffer(w, src, buf)
+		return err
+	}); err != nil {
 		return fmt.Errorf("failed to copy file: %w", err)
 	}
 
 	if err := os.Remove(tempFilePath); err != nil {
 		return fmt.Errorf("failed to remove temp file: %w", err)
+	}
+	return nil
+}
+
+func (ls *LocalStorage) CreateStagingFile(path string) (*os.File, error) {
+	if err := ls.validatePath(path); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(ls.rootDir, localStagingDirectory)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create staging directory: %w", err)
+	}
+	return os.CreateTemp(dir, ".fssvr-stage-*")
+}
+
+func (ls *LocalStorage) CommitStagingFile(path, tempPath string) error {
+	if err := ls.validatePath(path); err != nil {
+		return err
+	}
+	target := ls.getFullPath(path)
+	targetDir := filepath.Dir(target)
+	stagingDir := filepath.Join(ls.rootDir, localStagingDirectory)
+	absTemp, err := filepath.Abs(tempPath)
+	if err != nil {
+		return fmt.Errorf("invalid staging path: %w", err)
+	}
+	absDir, err := filepath.Abs(stagingDir)
+	if err != nil {
+		return fmt.Errorf("invalid staging directory: %w", err)
+	}
+	if filepath.Dir(absTemp) != absDir || !strings.HasPrefix(filepath.Base(absTemp), ".fssvr-stage-") {
+		return fmt.Errorf("staging file is not owned by local storage: %s", tempPath)
+	}
+	if err := ls.ensureDirectoryExists(targetDir); err != nil {
+		return fmt.Errorf("failed to create target directory: %w", err)
+	}
+	mu := ls.getLock(path)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := os.Rename(absTemp, target); err != nil {
+		return fmt.Errorf("failed to commit staging file: %w", err)
 	}
 	return nil
 }
@@ -247,14 +333,11 @@ func (ls *LocalStorage) WriteFromReader(path string, reader io.Reader) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer f.Close()
-
-	buf := make([]byte, 256*1024)
-	if _, err := io.CopyBuffer(f, reader, buf); err != nil {
+	if err := writeAtomicFile(fullPath, 0644, func(w io.Writer) error {
+		buf := make([]byte, 256*1024)
+		_, err := io.CopyBuffer(w, reader, buf)
+		return err
+	}); err != nil {
 		return fmt.Errorf("failed to write from reader: %w", err)
 	}
 	return nil
@@ -342,6 +425,9 @@ func (ls *LocalStorage) List(directory string) ([]string, error) {
 
 	var names []string
 	for _, entry := range entries {
+		if (directory == "" || directory == "." || directory == "/") && entry.Name() == localStagingDirectory {
+			continue
+		}
 		names = append(names, entry.Name())
 	}
 	return names, nil

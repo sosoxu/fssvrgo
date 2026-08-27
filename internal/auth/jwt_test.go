@@ -76,6 +76,24 @@ func TestJWTService_RefreshToken(t *testing.T) {
 	}
 }
 
+func TestJWTRefreshReplayBlockedAcrossInstances(t *testing.T) {
+	shared := NewMemorySecurityStateStore()
+	svc1 := NewJWTService("shared-secret", time.Hour, 24*time.Hour)
+	svc2 := NewJWTService("shared-secret", time.Hour, 24*time.Hour)
+	svc1.SetSecurityStateStore(shared)
+	svc2.SetSecurityStateStore(shared)
+	pair, err := svc1.GenerateTokenPair("user123", "user")
+	if err != nil {
+		t.Fatalf("GenerateTokenPair: %v", err)
+	}
+	if _, err := svc1.RefreshToken(pair.RefreshToken); err != nil {
+		t.Fatalf("first RefreshToken: %v", err)
+	}
+	if _, err := svc2.RefreshToken(pair.RefreshToken); err == nil {
+		t.Fatal("expected refresh token replay to be rejected by second instance")
+	}
+}
+
 func TestJWTService_WrongSecret(t *testing.T) {
 	svc1 := NewJWTService("secret1", time.Hour, 24*time.Hour)
 	svc2 := NewJWTService("secret2", time.Hour, 24*time.Hour)

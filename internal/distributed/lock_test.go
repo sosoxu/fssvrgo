@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+type renewalFailingLock struct{}
+
+func (renewalFailingLock) Lock(context.Context, string, time.Duration) (string, error) {
+	return "test-token", nil
+}
+
+func (renewalFailingLock) Unlock(context.Context, string, string) error { return nil }
+
+func (renewalFailingLock) Extend(context.Context, string, string, time.Duration) error {
+	return errors.New("forced renewal failure")
+}
+
 func TestLocalLock(t *testing.T) {
 	l := NewLocalDistributedLock()
 	ctx := context.Background()
@@ -184,6 +196,22 @@ func TestAcquireLock_WithRetry(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("AcquireLock did not return in time")
+	}
+}
+
+func TestAcquireLockLeaseReportsRenewalFailure(t *testing.T) {
+	lease, err := AcquireLockLease(context.Background(), renewalFailingLock{}, "lease", 3*time.Second, 1, time.Millisecond)
+	if err != nil {
+		t.Fatalf("AcquireLockLease: %v", err)
+	}
+	defer lease.Stop()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for lease.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if lease.Err() == nil {
+		t.Fatal("expected renewal failure to be exposed through lease.Err")
 	}
 }
 

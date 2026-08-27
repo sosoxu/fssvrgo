@@ -37,16 +37,18 @@
   - 对象存储语义适配（`WriteAt` 显式返回 `ErrWriteAtUnsupported`、目录零字节标记、`Exists` 回退子对象前缀列举）
   - 跨后端错误归一（[errors.go](../internal/storage/errors.go) `IsNotExist()` 同时识别 `os.ErrNotExist` 与 S3 `NoSuchKey`）
 
-### 1.2 多方言 SQL 数据库抽象
+### 1.2 PostgreSQL 服务数据库与测试方言
 
-- **技术**：SQLite（纯 Go 无 CGO）+ PostgreSQL 双支持，手写 SQL 无 ORM
+- **技术**：服务部署统一使用 PostgreSQL；SQLite 仅用于隔离功能测试和方言兼容测试，手写 SQL 无 ORM
 - **库**：`modernc.org/sqlite`、`github.com/lib/pq`
 - **位置**：[internal/database/database.go](../internal/database/database.go)、[internal/database/dialect.go](../internal/database/dialect.go)、[internal/database/db.go](../internal/database/db.go)
 - **原理**：方言翻译层 `Dialect.Translate()` 自动将 `?` 占位符转为 PostgreSQL 的 `$N`
 - **亮点**：
   - 预处理语句缓存（`sync.Map` + `*sql.Stmt`，`LoadOrStore` 防并发重复 prepare）
-  - SQLite WAL 模式优化（`journal_mode=WAL`、`busy_timeout=5000`、`synchronous=NORMAL`）
+  - 服务配置校验拒绝 SQLite，避免将单写者数据库用于并发运行或性能验收
+  - SQLite 测试连接使用 WAL、`busy_timeout=5000`、`synchronous=NORMAL`；`:memory:` 固定单连接
   - 连接池管理（`SetMaxOpenConns`/`SetMaxIdleConns`/`SetConnMaxLifetime`/`SetConnMaxIdleTime`）
+  - PostgreSQL DSN 使用结构化 URL 编码凭据，并将毫秒级配置向上取整为 lib/pq 的秒级 `connect_timeout`
   - 事务封装 `Tx` 自动应用方言翻译
   - 迁移机制 `MigrationManager` 维护 `schema_migrations` 版本表，按 Version 升序执行
 
@@ -56,9 +58,10 @@
 - **位置**：[internal/database/audit_writer.go](../internal/database/audit_writer.go)
 - **原理**：`Submit` 非阻塞入队（满则丢弃告警，绝不阻塞请求），后台按 batchSize 或 flushInterval（默认 1s）批量 flush
 - **亮点**：
-  - `Close` 使用调用方 context 做最终 flush（避免自身 ctx 已取消无法 flush）
+  - `Close` 先停止接收并排空已接受队列；后台满批刷新不使用停止信号作为写入 context，最终 flush 使用调用方截止时间
   - 逐行写入命中预处理语句缓存（而非多行 INSERT）
   - ctx.Done 时 drain channel 到 pending
+- **限制**：HTTP 变更类成功操作与失败响应、gRPC 成功/失败请求会提交审计；HTTP 读取类成功请求未完整覆盖，队列满或数据库故障仍可能丢失
 
 ### 1.4 软删除 + 定期物理清理
 
@@ -67,10 +70,28 @@
 - **原理**：删除操作仅置 `is_deleted=TRUE`，`CleanupService` 后台按 retention 天数物理删除 DB 记录并清理存储对象
 - **亮点**：跨后端使用 `storage.IsNotExist(err)`（而非 `os.IsNotExist`）兼容 MinIO `NoSuchKey` 错误
 
-### 1.5 LIKE 通配符注入防护
+### 1.5 PostgreSQL 层级命名空间租约
+
+- **位置**：[internal/database/namespace_lock.go](../internal/database/namespace_lock.go)
+- **模型**：文件操作对祖先目录和文件自身持 shared holder，目录变更对目标子树根持 exclusive holder
+- **原子性**：同一路径获取判定在短事务中使用 advisory lock；shared 请求使用 `pg_advisory_xact_lock_shared` 并发判定，exclusive 请求使用 `pg_advisory_xact_lock`；不长期占用连接
+- **租约**：数据库 `CURRENT_TIMESTAMP` 统一时钟，后台续期，提交前检测租约丢失；过期 holder 可由后续获取清理
+- **Fencing**：PostgreSQL sequence 分配单调 token，`namespace_fence_heads` 保存最终写路径的最高 token；最终事务持有全部层级 shared/exclusive advisory locks，并在 exact-path transaction lock 内推进 head，低 token 即使 holder 仍存活也被拒绝
+- **性能语义**：兄弟文件共享祖先锁兼容，不退化成目录级单写；本地大文件先写存储根下隐藏 staging 目录并 `fsync`，最终原子替换才占用 PostgreSQL transaction，避免慢客户端长期占用连接，也避免父目录重命名带走 staging 文件
+- **获取优化**：祖先路径 advisory lock 仍按固定顺序获取，holder 过期清理、冲突统计和批量插入合并为一条 CTE，减少深层路径的 PostgreSQL 往返
+- **会话接管**：下载会话在 Redis 保存 holder token/加密标志，跨实例复用 token；分块读与完成分别用 shared/exclusive 会话租约协调
+
+### 1.6 LIKE 通配符注入防护
 
 - **技术**：`escapeLikePattern` 转义 `%`/`_`/`\` + `ESCAPE '\\'` 子句
 - **位置**：[internal/service/directory/manager.go](../internal/service/directory/manager.go)、[internal/service/filelist/service.go](../internal/service/filelist/service.go)
+
+### 1.7 上传终态账本
+
+- **位置**：[internal/database/transfer_result.go](../internal/database/transfer_result.go)、[internal/service/transfer/service.go](../internal/service/transfer/service.go)、[internal/service/transfer/multipart.go](../internal/service/transfer/multipart.go)
+- **模型**：`transfer_session_results` 按 session ID 保存 completed/aborted 终态及完成响应字段，默认保留 24 小时
+- **原子性**：文件元数据和 completed 结果在同一 PostgreSQL 事务提交；账本失败时回滚元数据并补偿存储写入
+- **幂等性**：完成/取消先查询账本；Redis 会话缓存丢失时另一实例仍可返回相同完成结果，并拒绝终态后的分块写入
 - **原理**：目录名/文件名含通配符时，未转义会导致跨目录误匹配（如 `a%` 匹配所有 a 开头路径），转义后作为字面量匹配
 
 ---
@@ -121,17 +142,17 @@
 - **技术**：对称加密 + scrypt 内存硬密钥派生
 - **库**：`crypto/aes`、`crypto/cipher`、`crypto/rand`、`golang.org/x/crypto/scrypt`
 - **位置**：[internal/crypto/crypto.go](../internal/crypto/crypto.go)
-- **原理**：随机 nonce + `gcm.Seal` 认证加密 + base64 编码（nonce 前置），密钥经 scrypt（N=32768, r=8, p=1）派生 32 字节
-- **亮点**：流式加密文件 `EncryptFile`/`DecryptFileStreaming`（注释坦承 AES-GCM 需全量密文认证，io.Copy 仅限制句柄持有时间）
+- **原理**：文件使用版本化分块格式，每个 4 MiB 明文块使用独立随机 nonce 和 `gcm.Seal` 认证；密钥经 scrypt（N=32768, r=8, p=1）派生 32 字节
+- **亮点**：`EncryptFile`/`DecryptFileStreaming` 内存有界，并兼容读取旧版 nonce 前置的 Base64 整文件格式
 
 ### 3.2 JWT 双 Token 认证
 
 - **技术**：access + refresh token，HS256 签名
 - **库**：`github.com/golang-jwt/jwt/v5`
 - **位置**：[internal/auth/jwt.go](../internal/auth/jwt.go)
-- **原理**：`GenerateTokenPair` 同时签发 access（默认 24h）和 refresh（默认 168h），每 token 带唯一 `jti`
+- **原理**：`GenerateTokenPair` 按 `auth.token_expiry` 和 `auth.refresh_expiry` 签发 access/refresh，每个 token 带唯一 `jti`
 - **亮点**：
-  - Refresh token 一次性使用（`RefreshToken` 将旧 jti 加入 `sync.Map` 黑名单，`ValidateToken` 拒绝黑名单）
+  - Refresh token 一次性使用；Redis 启用时通过原子 `SET NX` 跨实例消费旧 `jti`，否则使用单机内存状态
   - 签名方法校验防 alg=none 攻击（强制 `*jwt.SigningMethodHMAC`）
   - 后台 `cleanupBlacklist` 机会性清理过期黑名单防内存泄漏
 
@@ -143,7 +164,7 @@
 - **亮点**：
   - admin 精确匹配 + 逗号分隔多值匹配，避免 `strings.Contains` 误判（"not-admin" 不被提权）
   - `GetUserByApiKey` 支持 JWT access token（gRPC JWT 用户授权）
-  - 限流防爆破（10 次失败/300s 窗口触发 429）
+  - 限流防爆破（10 次失败/300s 窗口触发 429），Redis 启用时跨实例共享
   - gRPC `methodPermissions` map 按 FullMethod 映射 (resource, action)，拦截器先认证后授权
 
 ### 3.4 输入安全防护
@@ -158,10 +179,10 @@
 
 ### 3.5 临时文件路径校验
 
-- **技术**：强制 tempFilePath 位于系统临时目录
+- **技术**：强制 tempFilePath 位于系统临时目录或显式注册的可信上传目录
 - **位置**：[internal/storage/tempfile.go](../internal/storage/tempfile.go)
-- **原理**：`WriteFromTempFile` 接口可上传任意本地文件，校验 `tempFilePath` 必须位于 `os.TempDir()` 或 `/tmp/` 下，防止上传 `/etc/shadow` 等敏感文件
-- **亮点**：`filepath.Abs` 转绝对路径再前缀比较防相对路径绕过；双前缀检查跨平台兼容
+- **原理**：`SetTempDir` 注册共享上传根目录，`WriteFromTempFile` 仅接受系统临时目录或可信根内的文件
+- **亮点**：使用 `filepath.Rel` 做目录边界判断，避免 `/tmp/uploads-evil` 之类的前缀绕过
 
 ### 3.6 gRPC 内部错误屏蔽
 
@@ -197,15 +218,15 @@
   - `concurrencyMiddleware` 信号量限并发（workers*4，满则 503）
   - `authMiddleware` 支持 X-API-Key/Bearer/Api-Key 三种 header，API key 失败回退 JWT
   - `requirePermission(resource, action)` / `requireAdmin()` 路由级 RBAC 中间件
-  - 上传策略自适应（加密全量读/小文件缓冲/大文件流式三分支）
+  - 上传策略自适应（加密走传输会话分块处理，小文件缓冲，大文件流式）
   - 加密下载用 `http.ServeContent` 正确处理 Content-Length 与 Range
 
 ### 4.3 上传策略自适应
 
-- **技术**：三分支上传策略
+- **技术**：有界内存上传策略
 - **位置**：[internal/api/http/server.go](../internal/api/http/server.go) `handleUpload`
 - **原理**：
-  - 加密路径：全量读入内存加密（AES-GCM 需全量）
+  - 加密路径：按块写入传输会话，完成时流式生成分块 AEAD 文件
   - 小文件（≤1MB）：缓冲入内存走 `UploadFile`（`bytes.NewReader` Seeker，MinIO 单次 PUT 而非 multipart 3 次往返）
   - 大文件：流式 `UploadFileFromReader` 限内存峰值
 - **亮点**：防伪造 header.Size（读后判断 `len(data) > smallUploadThreshold` 报错）
@@ -223,14 +244,15 @@
 
 ### 5.1 分块上传 + 断点续传
 
-- **技术**：预分配临时文件 + `WriteAt` 随机偏移写入 + 跨实例会话恢复
+- **技术**：预分配临时文件 + 严格连续 `WriteAt` + 跨实例会话恢复
 - **位置**：[internal/service/transfer/service.go](../internal/service/transfer/service.go)
-- **原理**：创建会话时 `os.Create` + `file.Truncate(totalSize)` 预分配，`UploadChunk` 通过 `tempFile.WriteAt(data, offset)` 支持任意顺序到达
+- **原理**：创建会话时 `os.Create` + `file.Truncate(totalSize)` 预分配，`UploadChunk` 要求 `offset == uploadedSize`，避免重叠或空洞
 - **亮点**：
   - 跨实例会话恢复（内存未命中回退 Redis，重新打开临时文件句柄）
   - `LoadOrStore` 防恢复竞态（输掉竞态的 goroutine 关闭自己重开的 fd 防泄漏）
   - `SetTempDir` 支持共享卷（NFS）实现真正跨实例续传
   - 分布式锁 + 自动续约保证大文件上传期间锁不超时
+  - 每块写入先 `fsync`、再检查租约并持久化共享进度，成功响应不领先于数据落盘
   - DoS 配额（`atomic` 计数，`maxSessions=1000` 上限）
 
 ### 5.2 Multipart 分片上传
@@ -252,25 +274,21 @@
 - **技术**：信号量限并发（cap=8）+ `sync.WaitGroup`
 - **位置**：[internal/service/transfer/multipart.go](../internal/service/transfer/multipart.go) `ParallelDownloadChunks`
 
-### 5.5 会话更新批量化
+### 5.5 会话进度确认
 
-- **技术**：每 8 个 chunk 批量更新 Redis
+- **技术**：每个上传 chunk 先落盘，再持久化 Redis
 - **位置**：[internal/service/transfer/service.go](../internal/service/transfer/service.go) `UploadChunk`
-- **原理**：`chunkNum%8 == 0` 时才 `sessionStore.Set`，减少 87.5% 的 Redis 写入
+- **原理**：`WriteAt` → `fsync` → 检查会话租约 → `sessionStore.Set`，任何一步失败都由客户端从相同 offset 重试；查询和清理读取共享状态，清理按 `updated_at` 判断
 
 ---
 
 ## 六、一致性与服务治理
 
-### 6.1 可插拔一致性级别
+### 6.1 一致性级别边界
 
-- **技术**：None / Eventual / Strong 三档 + Quorum 仲裁
+- **状态**：当前运行时仅支持 `none`
 - **位置**：[internal/consistency/consistency.go](../internal/consistency/consistency.go)
-- **原理**：`BeforeWrite`/`BeforeRead` 按 `availableReplicas+1 >= writeQuorum/readQuorum` 判定；Strong 同步复制，Eventual 异步复制
-- **亮点**：
-  - 版本单调递增（`sync.RWMutex` 读写锁分离）
-  - `ValidateQuorum` 强制 `readQuorum + writeQuorum > replicaCount+1`（quorum 重叠定理）
-  - 副本健康检测后台循环（超 `syncInterval*3` 未同步标记不可用）
+- **说明**：`internal/consistency` 中存在原型代码，但未接入文件读写，也没有真实副本复制器；配置校验明确拒绝 `eventual` 和 `strong`，不得作为已实现能力宣传
 
 ### 6.2 文件/目录管理服务
 
@@ -279,7 +297,8 @@
 - **亮点**：
   - `TryLock` 安全回收锁条目防锁逃逸（删除正在使用的锁会导致后续 `LoadOrStore` 创建新 mutex，两 goroutine 持不同锁却操作同路径）
   - 目录递归删除分批事务（batchSize=500，每批 `BeginTx` 内批量 UPDATE + Commit）
-  - 回滚补偿（`RenameFile` 元数据更新失败回滚存储层 rename，回滚失败记录日志）
+  - 文件和目录重命名按固定顺序锁定源/目标；本地目录先整体移动，DB 事务失败回滚存储路径
+  - 回滚补偿（元数据更新失败回滚存储层 rename，回滚失败记录日志）
   - 元数据复用减少 DB 查询（`DownloadFileData`/`DownloadFileDataAt` 接受已查询的 meta）
 
 ### 6.3 游标式分页避免 COUNT
@@ -300,10 +319,12 @@
 - **位置**：[internal/metrics/metrics.go](../internal/metrics/metrics.go)
 - **指标**：
   - `fsserver_http_requests_total`（CounterVec，method/path/status 标签）
-  - `fsserver_http_request_duration_seconds`（HistogramVec，`DefBuckets`）
-  - `fsserver_upload_size_bytes`（Histogram，`ExponentialBuckets(1024, 2, 10)` 1KB~1MB）
-  - `fsserver_active_uploads`（Gauge，实时并发）
-- **亮点**：门面模式封装（`RecordHTTPRequest`/`RecordUpload`/`IncActiveUploads`），gRPC 拦截器自动记录
+  - `fsserver_http_request_duration_seconds`（HistogramVec，5ms~120s）
+  - `fsserver_grpc_requests_total`（CounterVec，method/code 标签）
+  - `fsserver_grpc_request_duration_seconds`（HistogramVec，method 标签，5ms~120s）
+  - `fsserver_upload_size_bytes`（Histogram，1KiB~4GiB）
+  - `fsserver_active_uploads`（Gauge，当前处理上传数据的请求数）
+- **亮点**：HTTP 与 gRPC 使用独立命名和状态语义，认证失败也由外层 gRPC 指标拦截器记录规范 code；上传大小只在提交成功后记录
 
 ### 7.2 zap 结构化日志
 
@@ -425,8 +446,8 @@
 
 | 场景 | 吞吐 |
 |------|------|
-| gRPC 流式上传 1GB | 409 MB/s |
-| gRPC 流式下载 1GB | 1635 MB/s |
+| Service 层流式上传 1GB | 409 MB/s |
+| Service 层流式下载 1GB | 1635 MB/s |
 | HTTP 流式上传 1GB | 189 MB/s |
 | 集中存储 vs 对象存储 | 快 6.6~7.6 倍 |
 
@@ -442,8 +463,9 @@
 ### 11.2 分段 vs 非分段对比测试
 
 - **位置**：[tests/segmented_vs_nonsegmented_test.go](../tests/segmented_vs_nonsegmented_test.go)
-- **测试矩阵**：3 文件大小 × 3 并发 × 2 协议 × 2 模式 × 2 操作
+- **测试矩阵**：3 文件大小 × 3 并发 × 2 调用层（HTTP/Service）× 2 模式 × 2 操作
 - **亮点**：`CompareResult` 结构化记录；自动计算加速比；配套 24 个 Benchmark 函数
+- **口径**：`Service` 为直接调用 `FileManager`/`TransferService`，不包含 gRPC 编解码与网络开销；真实 gRPC 数据必须由客户端连接实际 gRPC server 采集
 
 ### 11.3 边界测试
 
@@ -454,7 +476,7 @@
 ### 11.4 多实例一致性测试
 
 - **位置**：[tests/multi_instance_consistency_test.go](../tests/multi_instance_consistency_test.go)
-- **原理**：`MultiInstanceCluster` 框架，N 实例共享 SQLite DB + LocalStorage + Redis 锁，验证跨实例并发安全
+- **原理**：HTTP/gRPC 多实例、Redis 锁一致性、压力及性能测试共享 PostgreSQL；SQLite 只保留在隔离边界/通用 API 夹具和显式方言切换测试中
 
 ### 11.5 真实后端集成测试
 
@@ -607,7 +629,7 @@
 ## 技术亮点总结
 
 1. **统一 Adapter 接口**贯穿存储/缓存/锁/会话四层，后端切换是配置项而非代码改动
-2. **方言翻译层**让同一套 SQL 跑在 SQLite 和 PostgreSQL 上，保留预处理语句缓存
+2. **PostgreSQL 统一部署语义**避免 SQLite 单写者模型污染并发结论，同时保留 SQLite 方言用于快速隔离单测
 3. **分块/断点续传 + Multipart 字节覆盖追踪**的完整传输实现
 4. **锁逃逸/恢复竞态**等并发边界场景的针对性设计（TryLock 回收、LoadOrStore 竞态处理）
 5. **异步批写审计日志**通过 channel + 后台 goroutine 解耦持久化与请求路径

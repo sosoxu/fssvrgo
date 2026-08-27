@@ -24,40 +24,51 @@ import (
 )
 
 type UploadSession struct {
-	SessionID    string
-	FileID       string
-	FilePath     string
-	FileName     string
-	TotalSize    int64
-	UploadedSize int64
-	Hash         string
-	ClientID     string
-	Status       string
-	CreatedAt    string
-	UpdatedAt    string
-	chunkCount   int64
-	tempFile     *os.File
-	tempFileMu   sync.Mutex
-	hashWriter   hash.Hash
-	hashMu       sync.Mutex
-	lastOffset   int64
-	hashValid    int32
-	closed       int32
+	SessionID              string
+	FileID                 string
+	FilePath               string
+	FileName               string
+	TotalSize              int64
+	UploadedSize           int64
+	Hash                   string
+	ClientID               string
+	Status                 string
+	CreatedAt              string
+	UpdatedAt              string
+	CompletionFileHash     string
+	CompletionCreatedAt    string
+	CompletionHashProvided bool
+	CompletionHashVerified bool
+	chunkCount             int64
+	tempFile               *os.File
+	tempFileMu             sync.Mutex
+	hashWriter             hash.Hash
+	hashMu                 sync.Mutex
+	lastOffset             int64
+	hashValid              int32
+	closed                 int32
 }
 
 type DownloadSession struct {
-	SessionID         string
-	FileID            string
-	FilePath          string
-	TotalSize         int64
-	DownloadedSize    int64
-	ClientID          string
-	Status            string
-	CreatedAt         string
-	UpdatedAt         string
-	chunkCount        int64
-	decryptedTempPath string
-	decryptedFile     *os.File
+	SessionID           string
+	FileID              string
+	FilePath            string
+	TotalSize           int64
+	DownloadedSize      int64
+	ClientID            string
+	Status              string
+	CreatedAt           string
+	UpdatedAt           string
+	NamespaceLeaseToken string
+	Encrypted           bool
+	chunkCount          int64
+	decryptedTempPath   string
+	decryptedFile       *os.File
+	namespaceMu         sync.Mutex
+	namespaceLease      *database.NamespaceLease
+	readMu              sync.RWMutex
+	progressMu          sync.Mutex
+	prepareMu           sync.Mutex
 }
 
 type FileTransferService struct {
@@ -75,6 +86,87 @@ type FileTransferService struct {
 	cryptoSvc         *crypto.CryptoService
 	maxSessions       int   // maximum concurrent upload sessions (DoS protection)
 	sessionCount      int64 // current number of active upload sessions (atomic)
+}
+
+func commitStorageBackup(backup storage.ReplaceBackup, path string) {
+	if backup != nil {
+		if err := backup.Commit(); err != nil {
+			logger.Warn("failed to remove replacement backup for %s: %v", path, err)
+		}
+	}
+}
+
+func rollbackStorageBackup(backup storage.ReplaceBackup, path string) {
+	if backup != nil {
+		if err := backup.Rollback(); err != nil {
+			logger.Error("failed to restore replacement backup for %s: %v", path, err)
+		}
+	}
+}
+
+func rollbackStorageWrite(store storage.StorageAdapter, backup storage.ReplaceBackup, path string) {
+	if backup != nil {
+		rollbackStorageBackup(backup, path)
+		return
+	}
+	if err := store.Remove(path); err != nil {
+		logger.Error("failed to remove uncommitted storage object %s: %v", path, err)
+	}
+}
+
+func transferResultExpiry() string {
+	return utils.FormatTimestamp(time.Now().UTC().Add(24 * time.Hour))
+}
+
+func completeUploadResultFromLedger(result *database.TransferSessionResult) *CompleteUploadResult {
+	return &CompleteUploadResult{
+		FileID: result.FileID, FilePath: result.FilePath, FileName: result.FileName,
+		FileHash: result.FileHash, CreatedAt: result.FileCreatedAt,
+		HashProvided: result.HashProvided, HashVerified: result.HashVerified,
+		UploadedSize: result.UploadedSize, StorageType: result.StorageType,
+	}
+}
+
+func (s *FileTransferService) getTransferResult(sessionID string) (*database.TransferSessionResult, error) {
+	return database.NewTransferSessionResultService(s.db).Get(sessionID)
+}
+
+func (s *FileTransferService) acquireFileNamespace(path string) (*database.NamespaceLease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lease, err := s.db.AcquireNamespaceLease(ctx, database.FileNamespaceRequests(path), 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire upload namespace lease: %w", err)
+	}
+	return lease, nil
+}
+
+func (s *FileTransferService) resumeFileNamespace(path, token string) (*database.NamespaceLease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lease, err := s.db.ResumeNamespaceLease(ctx, token, database.FileNamespaceRequests(path), 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resume download namespace lease: %w", err)
+	}
+	return lease, nil
+}
+
+func (s *FileTransferService) acquireDownloadOperation(sessionID string, mode database.NamespaceLockMode) (*database.NamespaceLease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lease, err := s.db.AcquireNamespaceLease(ctx, database.DownloadSessionNamespaceRequests(sessionID, mode), 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire download session lease: %w", err)
+	}
+	return lease, nil
+}
+
+func releaseNamespaceLease(lease *database.NamespaceLease) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := lease.Release(ctx); err != nil {
+		logger.Warn("failed to release namespace lease: %v", err)
+	}
 }
 
 func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.DB) *FileTransferService {
@@ -147,6 +239,9 @@ func (s *FileTransferService) SetTempDir(dir string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create configured temp directory %s: %w", dir, err)
 	}
+	if err := storage.RegisterTrustedTempDir(dir); err != nil {
+		return err
+	}
 	s.tempDir = dir
 	return nil
 }
@@ -155,6 +250,62 @@ func (s *FileTransferService) SetTempDir(dir string) error {
 // for diagnostics and tests.
 func (s *FileTransferService) TempDir() string {
 	return s.tempDir
+}
+
+func (s *FileTransferService) loadUploadSession(ctx context.Context, sessionID string, refresh bool) (*UploadSession, error) {
+	if !refresh {
+		if val, ok := s.uploadSessions.Load(sessionID); ok {
+			return val.(*UploadSession), nil
+		}
+	}
+
+	var stored UploadSession
+	if err := s.sessionStore.Get(ctx, "upload", sessionID, &stored); err != nil {
+		return nil, fmt.Errorf("upload session not found: %s", sessionID)
+	}
+	if val, ok := s.uploadSessions.Load(sessionID); ok {
+		session := val.(*UploadSession)
+		session.FileID = stored.FileID
+		session.FilePath = stored.FilePath
+		session.FileName = stored.FileName
+		session.TotalSize = stored.TotalSize
+		atomic.StoreInt64(&session.UploadedSize, stored.UploadedSize)
+		session.Hash = stored.Hash
+		session.ClientID = stored.ClientID
+		session.Status = stored.Status
+		session.CreatedAt = stored.CreatedAt
+		session.UpdatedAt = stored.UpdatedAt
+		session.CompletionFileHash = stored.CompletionFileHash
+		session.CompletionCreatedAt = stored.CompletionCreatedAt
+		session.CompletionHashProvided = stored.CompletionHashProvided
+		session.CompletionHashVerified = stored.CompletionHashVerified
+		return session, nil
+	}
+	if stored.Status != "active" {
+		actual, _ := s.uploadSessions.LoadOrStore(sessionID, &stored)
+		return actual.(*UploadSession), nil
+	}
+
+	if !s.acquireSessionSlot() {
+		return nil, fmt.Errorf("maximum number of concurrent upload sessions reached")
+	}
+	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
+	file, err := os.OpenFile(tempPath, os.O_RDWR, 0644)
+	if err != nil {
+		s.releaseSessionSlot()
+		return nil, fmt.Errorf("failed to reopen upload temp file: %w", err)
+	}
+	stored.tempFile = file
+	stored.hashValid = 0
+	stored.hashWriter = nil
+	stored.lastOffset = stored.UploadedSize
+	actual, loaded := s.uploadSessions.LoadOrStore(sessionID, &stored)
+	if loaded {
+		file.Close()
+		s.releaseSessionSlot()
+		return actual.(*UploadSession), nil
+	}
+	return &stored, nil
 }
 
 func (s *FileTransferService) CreateUploadSession(filePath, fileName string, totalSize int64, clientID, hash string) (string, error) {
@@ -195,78 +346,60 @@ func (s *FileTransferService) CreateUploadSession(filePath, fileName string, tot
 
 	session.tempFile = file
 
-	if hash != "" {
-		session.hashWriter = sha256.New()
-		session.hashValid = 1
-		session.lastOffset = 0
-	}
+	session.hashWriter = sha256.New()
+	session.hashValid = 1
+	session.lastOffset = 0
 
 	s.uploadSessions.Store(sessionID, session)
 
 	ctx := context.Background()
 	if err := s.sessionStore.Set(ctx, "upload", sessionID, session, 2*time.Hour); err != nil {
-		logger.Warn("failed to store upload session in Redis: %v", err)
+		s.uploadSessions.Delete(sessionID)
+		file.Close()
+		os.Remove(tempPath)
+		s.releaseSessionSlot()
+		return "", fmt.Errorf("failed to persist upload session: %w", err)
 	}
 
 	return sessionID, nil
 }
 
 func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset int64) error {
-	// Use LoadOrStore to avoid a race where two goroutines both miss the cache
-	// and each creates an independent restored copy with its own mutex.
-	val, ok := s.uploadSessions.Load(sessionID)
-	if !ok {
-		ctx := context.Background()
-		var redisSession UploadSession
-		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
-			restored := &redisSession
-			// Re-open the temp file handle that was lost during JSON serialization.
-			tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
-			if f, err := os.OpenFile(tempPath, os.O_WRONLY, 0644); err == nil {
-				restored.tempFile = f
-			}
-			// hashWriter is non-serializable; mark hash as invalid so
-			// CompleteUpload falls back to full-file recompute.
-			atomic.StoreInt32(&restored.hashValid, 0)
-			restored.hashWriter = nil
-			// LoadOrStore ensures only the first restorer wins; others reuse it.
-			actual, loaded := s.uploadSessions.LoadOrStore(sessionID, restored)
-			val = actual
-			ok = true
-			if loaded && restored.tempFile != nil {
-				// 输掉了竞态：另一个 goroutine 的副本已在使用，关闭本副本
-				// 刚重新打开的 temp file 句柄，避免文件描述符泄漏。
-				restored.tempFile.Close()
-			}
-		}
+	lease, err := distributed.AcquireLockLease(context.Background(), s.distLock, "upload:"+sessionID, 10*time.Second, 10, 100*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("failed to acquire session lock: %w", err)
+	}
+	defer lease.Stop()
+	defer s.distLock.Unlock(context.Background(), "upload:"+sessionID, lease.Token)
+	terminal, err := s.getTransferResult(sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to check upload terminal state: %w", err)
+	}
+	if terminal != nil {
+		return fmt.Errorf("upload session is %s: %s", terminal.Status, sessionID)
 	}
 
-	if !ok {
-		return fmt.Errorf("upload session not found: %s", sessionID)
-	}
-
-	session := val.(*UploadSession)
-
-	// Acquire a distributed lock so concurrent writes from different instances
-	// are serialized on the same session.
-	if s.distLock != nil {
-		token, err := distributed.AcquireLock(context.Background(), s.distLock, "upload:"+sessionID, 10*time.Second, 10, 100*time.Millisecond)
-		if err != nil {
-			return fmt.Errorf("failed to acquire session lock: %w", err)
-		}
-		defer s.distLock.Unlock(context.Background(), "upload:"+sessionID, token)
+	session, err := s.loadUploadSession(context.Background(), sessionID, true)
+	if err != nil {
+		return err
 	}
 
 	if atomic.LoadInt32(&session.closed) == 1 {
 		return fmt.Errorf("upload session is closed: %s", sessionID)
 	}
+	if session.Status != "active" {
+		return fmt.Errorf("upload session is not active: %s", sessionID)
+	}
 
 	if offset < 0 {
 		return fmt.Errorf("invalid offset: %d", offset)
 	}
-
 	if offset+int64(len(data)) > session.TotalSize {
 		return fmt.Errorf("write beyond file size: offset=%d len=%d total=%d", offset, len(data), session.TotalSize)
+	}
+	expectedOffset := atomic.LoadInt64(&session.UploadedSize)
+	if offset != expectedOffset {
+		return fmt.Errorf("non-sequential upload offset: expected %d, got %d", expectedOffset, offset)
 	}
 
 	session.tempFileMu.Lock()
@@ -274,6 +407,10 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 		if _, err := session.tempFile.WriteAt(data, offset); err != nil {
 			session.tempFileMu.Unlock()
 			return fmt.Errorf("failed to write chunk: %w", err)
+		}
+		if err := session.tempFile.Sync(); err != nil {
+			session.tempFileMu.Unlock()
+			return fmt.Errorf("failed to sync chunk: %w", err)
 		}
 	} else {
 		tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
@@ -288,9 +425,17 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 			session.tempFileMu.Unlock()
 			return fmt.Errorf("failed to write chunk: %w", err)
 		}
+		if err := file.Sync(); err != nil {
+			file.Close()
+			session.tempFileMu.Unlock()
+			return fmt.Errorf("failed to sync chunk: %w", err)
+		}
 		file.Close()
 	}
 	session.tempFileMu.Unlock()
+	if err := lease.Err(); err != nil {
+		return err
+	}
 
 	if session.hashWriter != nil && atomic.LoadInt32(&session.hashValid) == 1 {
 		expectedOffset := atomic.LoadInt64(&session.lastOffset)
@@ -304,16 +449,19 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 		}
 	}
 
-	atomic.AddInt64(&session.UploadedSize, int64(len(data)))
-	atomic.AddInt64(&session.chunkCount, 1)
-
-	chunkNum := atomic.LoadInt64(&session.chunkCount)
-	if chunkNum%8 == 0 {
-		session.UpdatedAt = utils.GetCurrentTimestamp()
-		ctx := context.Background()
-		if err := s.sessionStore.Set(ctx, "upload", sessionID, session, 2*time.Hour); err != nil {
-			logger.Warn("failed to update upload session in Redis: %v", err)
-		}
+	previousSize := atomic.LoadInt64(&session.UploadedSize)
+	previousChunks := atomic.LoadInt64(&session.chunkCount)
+	atomic.StoreInt64(&session.UploadedSize, previousSize+int64(len(data)))
+	atomic.StoreInt64(&session.chunkCount, previousChunks+1)
+	session.UpdatedAt = utils.GetCurrentTimestamp()
+	ctx := context.Background()
+	if err := s.sessionStore.Set(ctx, "upload", sessionID, session, 2*time.Hour); err != nil {
+		// The bytes can be safely overwritten by a retry at the same offset. Roll
+		// back the acknowledged progress and force a full hash at completion.
+		atomic.StoreInt64(&session.UploadedSize, previousSize)
+		atomic.StoreInt64(&session.chunkCount, previousChunks)
+		atomic.StoreInt32(&session.hashValid, 0)
+		return fmt.Errorf("failed to persist upload progress: %w", err)
 	}
 
 	return nil
@@ -327,6 +475,10 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 // a hash mismatch error before returning).
 type CompleteUploadResult struct {
 	FileID       string
+	FilePath     string
+	FileName     string
+	FileHash     string
+	CreatedAt    string
 	HashProvided bool
 	HashVerified bool
 	UploadedSize int64
@@ -334,36 +486,36 @@ type CompleteUploadResult struct {
 }
 
 func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadResult, error) {
-	val, ok := s.uploadSessions.Load(sessionID)
-	if !ok {
-		ctx := context.Background()
-		var redisSession UploadSession
-		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
-			restored := &redisSession
-			// Re-open the temp file for syncing/closing.
-			tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
-			if f, err := os.OpenFile(tempPath, os.O_RDWR, 0644); err == nil {
-				restored.tempFile = f
-			}
-			atomic.StoreInt32(&restored.hashValid, 0)
-			restored.hashWriter = nil
-			actual, loaded := s.uploadSessions.LoadOrStore(sessionID, restored)
-			val = actual
-			ok = true
-			if loaded && restored.tempFile != nil {
-				restored.tempFile.Close()
-			}
+	sessionLease, err := distributed.AcquireLockLease(context.Background(), s.distLock, "upload:"+sessionID, 10*time.Second, 30, 50*time.Millisecond)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire upload session lock: %w", err)
+	}
+	defer sessionLease.Stop()
+	defer s.distLock.Unlock(context.Background(), "upload:"+sessionID, sessionLease.Token)
+	terminal, err := s.getTransferResult(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check upload terminal state: %w", err)
+	}
+	if terminal != nil {
+		if terminal.SessionType == "upload" && terminal.Status == "completed" {
+			return completeUploadResultFromLedger(terminal), nil
 		}
+		return nil, fmt.Errorf("upload session is %s: %s", terminal.Status, sessionID)
 	}
 
-	if !ok {
-		return nil, fmt.Errorf("upload session not found: %s", sessionID)
+	session, err := s.loadUploadSession(context.Background(), sessionID, true)
+	if err != nil {
+		return nil, err
 	}
-
-	session := val.(*UploadSession)
+	if session.Status != "active" {
+		return nil, fmt.Errorf("upload session is not active: %s", sessionID)
+	}
 
 	if atomic.LoadInt64(&session.UploadedSize) != session.TotalSize {
 		return nil, fmt.Errorf("upload incomplete: expected %d bytes, got %d bytes", session.TotalSize, atomic.LoadInt64(&session.UploadedSize))
+	}
+	if err := sessionLease.Err(); err != nil {
+		return nil, err
 	}
 
 	atomic.StoreInt32(&session.closed, 1)
@@ -398,22 +550,22 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 	// reports HashProvided=false so callers can tell the two cases apart.
 	hashProvided := session.Hash != ""
 	hashVerified := false
-	if session.Hash != "" {
-		var computedHash string
-		if session.hashWriter != nil && atomic.LoadInt32(&session.hashValid) == 1 {
-			session.hashMu.Lock()
-			computedHash = hex.EncodeToString(session.hashWriter.Sum(nil))
-			session.hashMu.Unlock()
-		} else {
-			var err error
-			computedHash, err = utils.SHA256File(tempPath)
-			if err != nil {
-				os.Remove(tempPath)
-				s.uploadSessions.Delete(sessionID)
-				s.releaseSessionSlot()
-				return nil, fmt.Errorf("failed to compute hash: %w", err)
-			}
+	var computedHash string
+	if session.hashWriter != nil && atomic.LoadInt32(&session.hashValid) == 1 {
+		session.hashMu.Lock()
+		computedHash = hex.EncodeToString(session.hashWriter.Sum(nil))
+		session.hashMu.Unlock()
+	} else {
+		var err error
+		computedHash, err = utils.SHA256File(tempPath)
+		if err != nil {
+			os.Remove(tempPath)
+			s.uploadSessions.Delete(sessionID)
+			s.releaseSessionSlot()
+			return nil, fmt.Errorf("failed to compute hash: %w", err)
 		}
+	}
+	if session.Hash != "" {
 		if computedHash != session.Hash {
 			os.Remove(tempPath)
 			s.uploadSessions.Delete(sessionID)
@@ -425,7 +577,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 
 	// Encrypt the temp file before writing to storage if encryption is enabled
 	storageTempPath := tempPath
-	storageHash := session.Hash
+	storageHash := computedHash
 	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
 		encTempPath := tempPath + ".enc"
 		if err := s.cryptoSvc.EncryptFile(tempPath, encTempPath); err != nil {
@@ -436,50 +588,84 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		}
 		os.Remove(tempPath)
 
-		// Compute hash on encrypted data
-		var err error
-		storageHash, err = utils.SHA256File(encTempPath)
-		if err != nil {
-			os.Remove(encTempPath)
-			s.uploadSessions.Delete(sessionID)
-			s.releaseSessionSlot()
-			return nil, fmt.Errorf("failed to compute encrypted hash: %w", err)
-		}
 		storageTempPath = encTempPath
 	}
+	if err := sessionLease.Err(); err != nil {
+		os.Remove(storageTempPath)
+		s.uploadSessions.Delete(sessionID)
+		s.releaseSessionSlot()
+		return nil, err
+	}
+	namespaceLease, err := s.acquireFileNamespace(session.FilePath)
+	if err != nil {
+		os.Remove(storageTempPath)
+		s.uploadSessions.Delete(sessionID)
+		s.releaseSessionSlot()
+		return nil, err
+	}
+	defer releaseNamespaceLease(namespaceLease)
 
-	token, cancelRenew, err := distributed.AcquireLockWithRenewal(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
+	fileLease, err := distributed.AcquireLockLease(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
 		s.releaseSessionSlot()
 		return nil, fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
-	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
-	defer cancelRenew()
+	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, fileLease.Token)
+	defer fileLease.Stop()
 
-	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
+	fileMetadataSvc := database.NewFileMetadataService(s.db)
+	tx, err := s.db.BeginNamespaceWrite(context.Background(), namespaceLease, session.FilePath)
+	if err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
 		s.releaseSessionSlot()
+		return nil, fmt.Errorf("failed to begin fenced upload transaction: %w", err)
+	}
+	rollbackTx := true
+	defer func() {
+		if rollbackTx {
+			_ = tx.Rollback()
+		}
+	}()
+	existingMeta, err := fileMetadataSvc.GetByPathTx(tx, session.FilePath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("failed to query existing metadata: %w", err)
+	}
+	var backup storage.ReplaceBackup
+	if existingMeta != nil {
+		backup, err = storage.BeginReplace(s.storage, session.FilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare upload commit: %w", err)
+		}
+	}
+	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
+		rollbackStorageBackup(backup, session.FilePath)
 		return nil, fmt.Errorf("failed to write file from temp: %w", err)
+	}
+	if err := fileLease.Err(); err != nil {
+		rollbackStorageWrite(s.storage, backup, session.FilePath)
+		return nil, err
+	}
+	if err := namespaceLease.Err(); err != nil {
+		rollbackStorageWrite(s.storage, backup, session.FilePath)
+		return nil, err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackStorageWrite(s.storage, backup, session.FilePath)
+		return nil, err
 	}
 
 	now := utils.GetCurrentTimestamp()
-
-	existingMeta, err := database.NewFileMetadataService(s.db).GetByPath(session.FilePath)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		// Log the error but continue - treat as new file
-		logger.Error("Failed to query existing metadata: %v", err)
-	}
-
 	var meta *database.FileMetadata
 	if existingMeta != nil {
 		existingMeta.Size = session.TotalSize
 		existingMeta.Hash = storageHash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
+		if err := fileMetadataSvc.UpdateTx(tx, existingMeta); err != nil {
+			rollbackStorageBackup(backup, session.FilePath)
 			s.uploadSessions.Delete(sessionID)
 			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to update file metadata: %w", err)
@@ -499,44 +685,89 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 			IsDeleted:       false,
 		}
 
-		if err := database.NewFileMetadataService(s.db).Create(meta); err != nil {
-			s.storage.Remove(session.FilePath)
+		if err := fileMetadataSvc.CreateTx(tx, meta); err != nil {
+			rollbackStorageWrite(s.storage, backup, session.FilePath)
 			s.uploadSessions.Delete(sessionID)
 			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to create file metadata: %w", err)
 		}
 	}
+	terminal = &database.TransferSessionResult{
+		SessionID: sessionID, SessionType: "upload", Status: "completed",
+		FileID: meta.ID, FilePath: meta.Path, FileName: meta.Name, FileHash: meta.Hash,
+		FileCreatedAt: meta.CreatedAt, HashProvided: hashProvided, HashVerified: hashVerified,
+		UploadedSize: session.TotalSize, StorageType: s.storage.StorageType(),
+		UpdatedAt: now, ExpiresAt: transferResultExpiry(),
+	}
+	if err := database.NewTransferSessionResultService(s.db).SaveTx(tx, terminal); err != nil {
+		rollbackStorageWrite(s.storage, backup, session.FilePath)
+		return nil, err
+	}
+	if err := namespaceLease.ValidateTx(tx); err != nil {
+		rollbackStorageWrite(s.storage, backup, session.FilePath)
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		rollbackStorageWrite(s.storage, backup, session.FilePath)
+		return nil, fmt.Errorf("failed to commit upload metadata transaction: %w", err)
+	}
+	rollbackTx = false
+	commitStorageBackup(backup, session.FilePath)
 
 	session.FileID = meta.ID
 	session.Status = "completed"
 	session.UpdatedAt = now
+	session.CompletionFileHash = meta.Hash
+	session.CompletionCreatedAt = meta.CreatedAt
+	session.CompletionHashProvided = hashProvided
+	session.CompletionHashVerified = hashVerified
+	if err := s.sessionStore.Set(context.Background(), "upload", sessionID, session, 5*time.Minute); err != nil {
+		logger.Warn("failed to persist completed upload session %s: %v", sessionID, err)
+	}
 
 	s.uploadSessions.Delete(sessionID)
 	s.releaseSessionSlot()
 
 	os.Remove(storageTempPath)
 
-	ctx := context.Background()
-	if err := s.sessionStore.Delete(ctx, "upload", sessionID); err != nil {
-		logger.Warn("Failed to delete session from store: %v", err)
-	}
-
-	return &CompleteUploadResult{
-		FileID:       meta.ID,
-		HashProvided: hashProvided,
-		HashVerified: hashVerified,
-		UploadedSize: session.TotalSize,
-		StorageType:  s.storage.StorageType(),
-	}, nil
+	return completeUploadResultFromLedger(terminal), nil
 }
 
 func (s *FileTransferService) AbortUpload(sessionID string) error {
-	val, ok := s.uploadSessions.Load(sessionID)
-	if !ok {
-		return fmt.Errorf("upload session not found: %s", sessionID)
+	lease, err := distributed.AcquireLockLease(context.Background(), s.distLock, "upload:"+sessionID, 10*time.Second, 30, 50*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("failed to acquire upload session lock: %w", err)
+	}
+	defer lease.Stop()
+	defer s.distLock.Unlock(context.Background(), "upload:"+sessionID, lease.Token)
+	terminal, err := s.getTransferResult(sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to check upload terminal state: %w", err)
+	}
+	if terminal != nil {
+		if terminal.SessionType == "upload" && terminal.Status == "aborted" {
+			return nil
+		}
+		return fmt.Errorf("upload session is %s: %s", terminal.Status, sessionID)
 	}
 
-	session := val.(*UploadSession)
+	session, err := s.loadUploadSession(context.Background(), sessionID, true)
+	if err != nil {
+		return err
+	}
+	if err := lease.Err(); err != nil {
+		return err
+	}
+	now := utils.GetCurrentTimestamp()
+	terminal = &database.TransferSessionResult{
+		SessionID: sessionID, SessionType: "upload", Status: "aborted",
+		FilePath: session.FilePath, FileName: session.FileName,
+		UploadedSize: atomic.LoadInt64(&session.UploadedSize), StorageType: s.storage.StorageType(),
+		UpdatedAt: now, ExpiresAt: transferResultExpiry(),
+	}
+	if err := database.NewTransferSessionResultService(s.db).Save(terminal); err != nil {
+		return err
+	}
 	atomic.StoreInt32(&session.closed, 1)
 	session.tempFileMu.Lock()
 	if session.tempFile != nil {
@@ -545,40 +776,99 @@ func (s *FileTransferService) AbortUpload(sessionID string) error {
 	}
 	session.tempFileMu.Unlock()
 	session.Status = "aborted"
-	session.UpdatedAt = utils.GetCurrentTimestamp()
+	session.UpdatedAt = now
+	if err := s.sessionStore.Set(context.Background(), "upload", sessionID, session, 5*time.Minute); err != nil {
+		logger.Warn("failed to persist aborted upload session %s: %v", sessionID, err)
+	}
 	s.uploadSessions.Delete(sessionID)
 	s.releaseSessionSlot()
 
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 	os.Remove(tempPath)
 
-	ctx := context.Background()
-	if err := s.sessionStore.Delete(ctx, "upload", sessionID); err != nil {
-		logger.Warn("Failed to delete session from store: %v", err)
-	}
-
 	return nil
 }
 
 func (s *FileTransferService) GetUploadSession(sessionID string) (*UploadSession, error) {
-	val, ok := s.uploadSessions.Load(sessionID)
-	if !ok {
-		ctx := context.Background()
-		var redisSession UploadSession
-		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
-			return &redisSession, nil
-		}
+	session, err := s.loadUploadSession(context.Background(), sessionID, true)
+	if err != nil {
+		return nil, err
+	}
+	if session.Status != "active" {
+		return nil, fmt.Errorf("upload session is %s: %s", session.Status, sessionID)
+	}
+	return session, nil
+}
+
+func (s *FileTransferService) prepareDownloadFile(session *DownloadSession) error {
+	session.prepareMu.Lock()
+	defer session.prepareMu.Unlock()
+	if !session.Encrypted || session.decryptedFile != nil {
+		return nil
+	}
+	if s.cryptoSvc == nil || !s.cryptoSvc.IsEnabled() {
+		return errors.New("download session requires the configured encryption key")
 	}
 
-	if !ok {
-		return nil, fmt.Errorf("upload session not found: %s", sessionID)
+	encTempPath := filepath.Join(s.tempDir, session.SessionID+".enc")
+	encFile, err := os.Create(encTempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file for encrypted data: %w", err)
+	}
+	reader, err := s.storage.OpenReader(session.FilePath)
+	if err != nil {
+		_ = encFile.Close()
+		_ = os.Remove(encTempPath)
+		return fmt.Errorf("failed to open encrypted file from storage: %w", err)
+	}
+	if _, err := io.Copy(encFile, reader); err != nil {
+		_ = reader.Close()
+		_ = encFile.Close()
+		_ = os.Remove(encTempPath)
+		return fmt.Errorf("failed to stream encrypted file: %w", err)
+	}
+	if err := reader.Close(); err != nil {
+		_ = encFile.Close()
+		_ = os.Remove(encTempPath)
+		return fmt.Errorf("failed to close encrypted storage reader: %w", err)
+	}
+	if err := encFile.Close(); err != nil {
+		_ = os.Remove(encTempPath)
+		return fmt.Errorf("failed to close encrypted temp file: %w", err)
 	}
 
-	return val.(*UploadSession), nil
+	decTempPath := filepath.Join(s.tempDir, session.SessionID+".dec")
+	if err := s.cryptoSvc.DecryptFileStreaming(encTempPath, decTempPath); err != nil {
+		_ = os.Remove(encTempPath)
+		_ = os.Remove(decTempPath)
+		return fmt.Errorf("failed to decrypt file: %w", err)
+	}
+	_ = os.Remove(encTempPath)
+	decFile, err := os.Open(decTempPath)
+	if err != nil {
+		_ = os.Remove(decTempPath)
+		return fmt.Errorf("failed to open decrypted temp file: %w", err)
+	}
+	session.decryptedTempPath = decTempPath
+	session.decryptedFile = decFile
+	if info, err := decFile.Stat(); err == nil {
+		session.TotalSize = info.Size()
+	}
+	return nil
 }
 
 func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (string, error) {
 	filePath = utils.NormalizePath(filePath)
+	namespaceLease, err := s.acquireFileNamespace(filePath)
+	if err != nil {
+		return "", err
+	}
+	keepNamespaceLease := false
+	defer func() {
+		if !keepNamespaceLease {
+			releaseNamespaceLease(namespaceLease)
+		}
+	}()
 	meta, err := database.NewFileMetadataService(s.db).GetByPath(filePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to get file metadata: %w", err)
@@ -591,91 +881,139 @@ func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (
 	now := utils.GetCurrentTimestamp()
 
 	session := &DownloadSession{
-		SessionID: sessionID,
-		FileID:    meta.ID,
-		FilePath:  filePath,
-		TotalSize: meta.Size,
-		ClientID:  clientID,
-		Status:    "active",
-		CreatedAt: now,
-		UpdatedAt: now,
+		SessionID:           sessionID,
+		FileID:              meta.ID,
+		FilePath:            filePath,
+		TotalSize:           meta.Size,
+		ClientID:            clientID,
+		Status:              "active",
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		NamespaceLeaseToken: namespaceLease.Token(),
+		Encrypted:           s.cryptoSvc != nil && s.cryptoSvc.IsEnabled(),
+		namespaceLease:      namespaceLease,
 	}
 
-	// If encryption is enabled, decrypt the file to a temp location for reading.
-	// We stream the encrypted file from storage to a local temp file first
-	// (to avoid holding the full ciphertext in memory), then decrypt.
-	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
-		encTempPath := filepath.Join(s.tempDir, sessionID+".enc")
-		encFile, err := os.Create(encTempPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to create temp file for encrypted data: %w", err)
-		}
-
-		// Stream the encrypted file from storage to the local temp file.
-		reader, err := s.storage.OpenReader(filePath)
-		if err != nil {
-			encFile.Close()
-			os.Remove(encTempPath)
-			return "", fmt.Errorf("failed to open encrypted file from storage: %w", err)
-		}
-		if _, err := io.Copy(encFile, reader); err != nil {
-			reader.Close()
-			encFile.Close()
-			os.Remove(encTempPath)
-			return "", fmt.Errorf("failed to stream encrypted file: %w", err)
-		}
-		reader.Close()
-		encFile.Close()
-
-		decTempPath := filepath.Join(s.tempDir, sessionID+".dec")
-		if err := s.cryptoSvc.DecryptFileStreaming(encTempPath, decTempPath); err != nil {
-			os.Remove(encTempPath)
-			return "", fmt.Errorf("failed to decrypt file: %w", err)
-		}
-		os.Remove(encTempPath)
-
-		decFile, err := os.Open(decTempPath)
-		if err != nil {
-			os.Remove(decTempPath)
-			return "", fmt.Errorf("failed to open decrypted temp file: %w", err)
-		}
-
-		session.decryptedTempPath = decTempPath
-		session.decryptedFile = decFile
-
-		// Update total size to the decrypted (plaintext) size
-		if info, err := decFile.Stat(); err == nil {
-			session.TotalSize = info.Size()
-		}
+	if err := s.prepareDownloadFile(session); err != nil {
+		return "", err
 	}
 
 	s.downloadSessions.Store(sessionID, session)
 
 	ctx := context.Background()
 	if err := s.sessionStore.Set(ctx, "download", sessionID, session, 2*time.Hour); err != nil {
-		logger.Warn("failed to store download session in Redis: %v", err)
+		s.downloadSessions.Delete(sessionID)
+		if session.decryptedFile != nil {
+			_ = session.decryptedFile.Close()
+		}
+		if session.decryptedTempPath != "" {
+			_ = os.Remove(session.decryptedTempPath)
+		}
+		return "", fmt.Errorf("failed to persist download session: %w", err)
 	}
+	keepNamespaceLease = true
 
 	return sessionID, nil
 }
 
-func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset int64) ([]byte, error) {
-	val, ok := s.downloadSessions.Load(sessionID)
-	if !ok {
-		ctx := context.Background()
-		var redisSession DownloadSession
-		if err := s.sessionStore.Get(ctx, "download", sessionID, &redisSession); err == nil {
-			val = &redisSession
-			s.downloadSessions.Store(sessionID, val)
-			ok = true
+func (s *FileTransferService) ensureDownloadNamespaceLease(session *DownloadSession) error {
+	session.namespaceMu.Lock()
+	defer session.namespaceMu.Unlock()
+	if session.namespaceLease != nil {
+		return session.namespaceLease.Err()
+	}
+	var lease *database.NamespaceLease
+	var err error
+	if session.NamespaceLeaseToken != "" {
+		lease, err = s.resumeFileNamespace(session.FilePath, session.NamespaceLeaseToken)
+		if errors.Is(err, database.ErrNamespaceLeaseGone) {
+			lease, err = s.acquireFileNamespace(session.FilePath)
 		}
+	} else {
+		// Backward compatibility for sessions persisted before lease tokens were stored.
+		lease, err = s.acquireFileNamespace(session.FilePath)
+	}
+	if err != nil {
+		return err
+	}
+	session.namespaceLease = lease
+	session.NamespaceLeaseToken = lease.Token()
+	return nil
+}
+
+func releaseDownloadNamespaceLease(session *DownloadSession) {
+	session.namespaceMu.Lock()
+	lease := session.namespaceLease
+	session.namespaceLease = nil
+	session.namespaceMu.Unlock()
+	if lease != nil {
+		releaseNamespaceLease(lease)
+	}
+}
+
+func (s *FileTransferService) loadDownloadSession(sessionID string) (*DownloadSession, error) {
+	if val, ok := s.downloadSessions.Load(sessionID); ok {
+		return val.(*DownloadSession), nil
 	}
 
-	if !ok {
+	var stored DownloadSession
+	if err := s.sessionStore.Get(context.Background(), "download", sessionID, &stored); err != nil {
 		return nil, fmt.Errorf("download session not found: %s", sessionID)
 	}
+	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
+		stored.Encrypted = true
+	}
+	actual, _ := s.downloadSessions.LoadOrStore(sessionID, &stored)
+	return actual.(*DownloadSession), nil
+}
 
-	session := val.(*DownloadSession)
+func downloadSessionSnapshot(session *DownloadSession) *DownloadSession {
+	session.progressMu.Lock()
+	updatedAt := session.UpdatedAt
+	session.progressMu.Unlock()
+	return &DownloadSession{
+		SessionID:           session.SessionID,
+		FileID:              session.FileID,
+		FilePath:            session.FilePath,
+		TotalSize:           session.TotalSize,
+		DownloadedSize:      atomic.LoadInt64(&session.DownloadedSize),
+		ClientID:            session.ClientID,
+		Status:              session.Status,
+		CreatedAt:           session.CreatedAt,
+		UpdatedAt:           updatedAt,
+		NamespaceLeaseToken: session.NamespaceLeaseToken,
+		Encrypted:           session.Encrypted,
+	}
+}
+
+func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset int64) ([]byte, error) {
+	operationLease, err := s.acquireDownloadOperation(sessionID, database.NamespaceShared)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseNamespaceLease(operationLease)
+
+	session, err := s.loadDownloadSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	session.readMu.RLock()
+	defer session.readMu.RUnlock()
+	exists, err := s.sessionStore.Exists(context.Background(), "download", sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify download session: %w", err)
+	}
+	if !exists {
+		s.downloadSessions.Delete(sessionID)
+		releaseDownloadNamespaceLease(session)
+		return nil, fmt.Errorf("download session not found: %s", sessionID)
+	}
+	if err := s.ensureDownloadNamespaceLease(session); err != nil {
+		return nil, err
+	}
+	if err := s.prepareDownloadFile(session); err != nil {
+		return nil, err
+	}
 
 	if offset < 0 {
 		return nil, fmt.Errorf("invalid offset: %d", offset)
@@ -686,7 +1024,6 @@ func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset i
 	}
 
 	var data []byte
-	var err error
 
 	// If a decrypted temp file is available, read from it instead of storage
 	if session.decryptedFile != nil {
@@ -705,28 +1042,50 @@ func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset i
 
 	atomic.AddInt64(&session.DownloadedSize, int64(len(data)))
 	atomic.AddInt64(&session.chunkCount, 1)
-
-	chunkNum := atomic.LoadInt64(&session.chunkCount)
-	if chunkNum%8 == 0 {
-		session.UpdatedAt = utils.GetCurrentTimestamp()
-		ctx := context.Background()
-		if err := s.sessionStore.Set(ctx, "download", sessionID, session, 2*time.Hour); err != nil {
-			logger.Warn("failed to update download session in Redis: %v", err)
-		}
+	session.progressMu.Lock()
+	session.UpdatedAt = utils.GetCurrentTimestamp()
+	session.progressMu.Unlock()
+	ctx := context.Background()
+	if err := s.sessionStore.Set(ctx, "download", sessionID, downloadSessionSnapshot(session), 2*time.Hour); err != nil {
+		logger.Warn("failed to update download session in Redis: %v", err)
 	}
 
 	return data, nil
 }
 
 func (s *FileTransferService) CompleteDownload(sessionID string) error {
-	val, ok := s.downloadSessions.Load(sessionID)
-	if !ok {
+	operationLease, err := s.acquireDownloadOperation(sessionID, database.NamespaceExclusive)
+	if err != nil {
+		return err
+	}
+	defer releaseNamespaceLease(operationLease)
+
+	session, err := s.loadDownloadSession(sessionID)
+	if err != nil {
+		return err
+	}
+	session.readMu.Lock()
+	defer session.readMu.Unlock()
+	if err := s.ensureDownloadNamespaceLease(session); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	exists, err := s.sessionStore.Exists(ctx, "download", sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to verify download session: %w", err)
+	}
+	if !exists {
+		s.downloadSessions.Delete(sessionID)
+		releaseDownloadNamespaceLease(session)
 		return fmt.Errorf("download session not found: %s", sessionID)
 	}
-
-	session := val.(*DownloadSession)
+	if err := s.sessionStore.Delete(ctx, "download", sessionID); err != nil {
+		return fmt.Errorf("failed to delete completed download session: %w", err)
+	}
+	session.progressMu.Lock()
 	session.Status = "completed"
 	session.UpdatedAt = utils.GetCurrentTimestamp()
+	session.progressMu.Unlock()
 
 	// Clean up decrypted temp file if present
 	if session.decryptedFile != nil {
@@ -737,22 +1096,44 @@ func (s *FileTransferService) CompleteDownload(sessionID string) error {
 	}
 
 	s.downloadSessions.Delete(sessionID)
-
-	ctx := context.Background()
-	s.sessionStore.Delete(ctx, "download", sessionID)
+	releaseDownloadNamespaceLease(session)
 
 	return nil
 }
 
 func (s *FileTransferService) AbortDownload(sessionID string) error {
-	val, ok := s.downloadSessions.Load(sessionID)
-	if !ok {
+	operationLease, err := s.acquireDownloadOperation(sessionID, database.NamespaceExclusive)
+	if err != nil {
+		return err
+	}
+	defer releaseNamespaceLease(operationLease)
+
+	session, err := s.loadDownloadSession(sessionID)
+	if err != nil {
+		return err
+	}
+	session.readMu.Lock()
+	defer session.readMu.Unlock()
+	if err := s.ensureDownloadNamespaceLease(session); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	exists, err := s.sessionStore.Exists(ctx, "download", sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to verify download session: %w", err)
+	}
+	if !exists {
+		s.downloadSessions.Delete(sessionID)
+		releaseDownloadNamespaceLease(session)
 		return fmt.Errorf("download session not found: %s", sessionID)
 	}
-
-	session := val.(*DownloadSession)
+	if err := s.sessionStore.Delete(ctx, "download", sessionID); err != nil {
+		return fmt.Errorf("failed to delete aborted download session: %w", err)
+	}
+	session.progressMu.Lock()
 	session.Status = "aborted"
 	session.UpdatedAt = utils.GetCurrentTimestamp()
+	session.progressMu.Unlock()
 
 	// Clean up decrypted temp file if present
 	if session.decryptedFile != nil {
@@ -763,33 +1144,48 @@ func (s *FileTransferService) AbortDownload(sessionID string) error {
 	}
 
 	s.downloadSessions.Delete(sessionID)
-
-	ctx := context.Background()
-	s.sessionStore.Delete(ctx, "download", sessionID)
+	releaseDownloadNamespaceLease(session)
 
 	return nil
 }
 
 func (s *FileTransferService) GetUploadProgress(sessionID string) int64 {
-	val, ok := s.uploadSessions.Load(sessionID)
-	if !ok {
-		return 0
+	var stored UploadSession
+	if err := s.sessionStore.Get(context.Background(), "upload", sessionID, &stored); err == nil {
+		return stored.UploadedSize
 	}
-	session := val.(*UploadSession)
-	return atomic.LoadInt64(&session.UploadedSize)
+	if val, ok := s.uploadSessions.Load(sessionID); ok {
+		return atomic.LoadInt64(&val.(*UploadSession).UploadedSize)
+	}
+	return 0
 }
 
 func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 	expiryTime := time.Now().Add(-time.Duration(maxAgeSeconds) * time.Second)
 	ctx := context.Background()
+	if err := database.NewTransferSessionResultService(s.db).DeleteExpired(); err != nil {
+		logger.Warn("failed to delete expired transfer session results: %v", err)
+	}
 
 	s.uploadSessions.Range(func(key, value interface{}) bool {
+		sessionID := key.(string)
 		session := value.(*UploadSession)
-		createdAt, err := utils.ParseTimestamp(session.CreatedAt)
+		lease, err := distributed.AcquireLockLease(ctx, s.distLock, "upload:"+sessionID, 10*time.Second, 1, 10*time.Millisecond)
 		if err != nil {
 			return true
 		}
-		if createdAt.Before(expiryTime) {
+		var stored UploadSession
+		if err := s.sessionStore.Get(ctx, "upload", sessionID, &stored); err == nil {
+			session.Status = stored.Status
+			session.UpdatedAt = stored.UpdatedAt
+		}
+		updatedAt, err := utils.ParseTimestamp(session.UpdatedAt)
+		if err != nil {
+			lease.Stop()
+			_ = s.distLock.Unlock(ctx, "upload:"+sessionID, lease.Token)
+			return true
+		}
+		if updatedAt.Before(expiryTime) {
 			session.Status = "expired"
 			atomic.StoreInt32(&session.closed, 1)
 			session.tempFileMu.Lock()
@@ -798,23 +1194,66 @@ func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 				session.tempFile = nil
 			}
 			session.tempFileMu.Unlock()
-			tempPath := filepath.Join(s.tempDir, key.(string)+".tmp")
+			tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 			os.Remove(tempPath)
 			s.uploadSessions.Delete(key)
 			s.releaseSessionSlot()
-			s.sessionStore.Delete(ctx, "upload", key.(string))
+			s.sessionStore.Delete(ctx, "upload", sessionID)
 		}
+		lease.Stop()
+		_ = s.distLock.Unlock(ctx, "upload:"+sessionID, lease.Token)
 		return true
 	})
 
 	s.downloadSessions.Range(func(key, value interface{}) bool {
 		session := value.(*DownloadSession)
-		createdAt, err := utils.ParseTimestamp(session.CreatedAt)
+		session.progressMu.Lock()
+		updatedAt, err := utils.ParseTimestamp(session.UpdatedAt)
+		session.progressMu.Unlock()
 		if err != nil {
 			return true
 		}
-		if createdAt.Before(expiryTime) {
+		if updatedAt.Before(expiryTime) {
+			operationLease, err := s.acquireDownloadOperation(key.(string), database.NamespaceExclusive)
+			if err != nil {
+				return true
+			}
+			session.readMu.Lock()
+			exists, existsErr := s.sessionStore.Exists(ctx, "download", key.(string))
+			if existsErr != nil {
+				session.readMu.Unlock()
+				releaseNamespaceLease(operationLease)
+				return true
+			}
+			if !exists {
+				s.downloadSessions.Delete(key)
+				releaseDownloadNamespaceLease(session)
+				session.readMu.Unlock()
+				releaseNamespaceLease(operationLease)
+				return true
+			}
+			var stored DownloadSession
+			if err = s.sessionStore.Get(ctx, "download", key.(string), &stored); err == nil {
+				updatedAt, err = utils.ParseTimestamp(stored.UpdatedAt)
+			}
+			if err != nil || !updatedAt.Before(expiryTime) {
+				if err == nil {
+					session.progressMu.Lock()
+					session.UpdatedAt = stored.UpdatedAt
+					session.progressMu.Unlock()
+				}
+				session.readMu.Unlock()
+				releaseNamespaceLease(operationLease)
+				return true
+			}
+			if err := s.sessionStore.Delete(ctx, "download", key.(string)); err != nil {
+				session.readMu.Unlock()
+				releaseNamespaceLease(operationLease)
+				return true
+			}
+			session.progressMu.Lock()
 			session.Status = "expired"
+			session.progressMu.Unlock()
 			if session.decryptedFile != nil {
 				session.decryptedFile.Close()
 			}
@@ -822,18 +1261,32 @@ func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 				os.Remove(session.decryptedTempPath)
 			}
 			s.downloadSessions.Delete(key)
-			s.sessionStore.Delete(ctx, "download", key.(string))
+			releaseDownloadNamespaceLease(session)
+			session.readMu.Unlock()
+			releaseNamespaceLease(operationLease)
 		}
 		return true
 	})
 
 	s.multipartSessions.Range(func(key, value interface{}) bool {
+		sessionID := key.(string)
 		session := value.(*MultipartUploadSession)
-		createdAt, err := utils.ParseTimestamp(session.CreatedAt)
+		lease, err := distributed.AcquireLockLease(ctx, s.distLock, "multipart:"+sessionID, 10*time.Second, 1, 10*time.Millisecond)
 		if err != nil {
 			return true
 		}
-		if createdAt.Before(expiryTime) {
+		var stored multipartUploadState
+		if err := s.sessionStore.Get(ctx, "multipart_upload", sessionID, &stored); err == nil {
+			session.Status = stored.Status
+			session.UpdatedAt = stored.UpdatedAt
+		}
+		updatedAt, err := utils.ParseTimestamp(session.UpdatedAt)
+		if err != nil {
+			lease.Stop()
+			_ = s.distLock.Unlock(ctx, "multipart:"+sessionID, lease.Token)
+			return true
+		}
+		if updatedAt.Before(expiryTime) {
 			session.Status = "expired"
 			atomic.StoreInt32(&session.closed, 1)
 			session.partsMu.Lock()
@@ -842,12 +1295,14 @@ func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
 				session.tempFile = nil
 			}
 			session.partsMu.Unlock()
-			tempPath := filepath.Join(s.tempDir, key.(string)+".tmp")
+			tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 			os.Remove(tempPath)
 			s.multipartSessions.Delete(key)
 			s.releaseSessionSlot()
-			s.sessionStore.Delete(ctx, "multipart_upload", key.(string))
+			s.sessionStore.Delete(ctx, "multipart_upload", sessionID)
 		}
+		lease.Stop()
+		_ = s.distLock.Unlock(ctx, "multipart:"+sessionID, lease.Token)
 		return true
 	})
 }

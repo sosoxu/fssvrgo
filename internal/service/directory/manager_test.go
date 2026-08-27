@@ -93,6 +93,24 @@ func TestDeleteDirectory_NonRecursive_Empty(t *testing.T) {
 	}
 }
 
+func TestDeleteDirectory_NonRecursive_RemovesLocalDirectory(t *testing.T) {
+	db := setupTestDB(t)
+	store := setupTestStore(t)
+	dm := NewDirectoryManagerWithStore(db, store)
+	if err := dm.CreateDirectory("foo"); err != nil {
+		t.Fatalf("CreateDirectory failed: %v", err)
+	}
+	if !store.Exists("foo") {
+		t.Fatal("local directory marker was not created")
+	}
+	if err := dm.DeleteDirectory("foo", false); err != nil {
+		t.Fatalf("DeleteDirectory failed: %v", err)
+	}
+	if store.Exists("foo") {
+		t.Fatal("local directory remained after non-recursive delete")
+	}
+}
+
 func TestDeleteDirectory_NonRecursive_NotEmpty(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
@@ -301,6 +319,49 @@ func TestDirectoryManagerWithStore_DeleteRemovesStorageObject(t *testing.T) {
 	if store.Exists("foo/bar.txt") {
 		t.Errorf("storage file should be removed after deletion")
 	}
+	if store.Exists("foo") {
+		t.Errorf("storage directory should be removed after deletion")
+	}
+}
+
+func TestDeleteDirectory_RecursiveTransactionRollsBackWholeTree(t *testing.T) {
+	db := setupTestDB(t)
+	store := setupTestStore(t)
+	dm := NewDirectoryManagerWithStore(db, store)
+	if err := dm.CreateDirectory("foo"); err != nil {
+		t.Fatalf("CreateDirectory foo: %v", err)
+	}
+	if err := dm.CreateDirectory("foo/sub"); err != nil {
+		t.Fatalf("CreateDirectory foo/sub: %v", err)
+	}
+	for _, path := range []string{"foo/a.txt", "foo/sub/b.txt"} {
+		if err := store.Write(path, []byte("x")); err != nil {
+			t.Fatalf("store.Write %s: %v", path, err)
+		}
+		createFileRecord(t, db, path, 1)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_recursive_directory_delete
+		BEFORE UPDATE OF is_deleted ON directories
+		WHEN OLD.path = 'foo/sub'
+		BEGIN SELECT RAISE(FAIL, 'forced recursive delete failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	if err := dm.DeleteDirectory("foo", true); err == nil {
+		t.Fatal("expected recursive metadata transaction to fail")
+	}
+	if !dm.Exists("foo") || !dm.Exists("foo/sub") {
+		t.Fatal("directory metadata was partially deleted")
+	}
+	for _, path := range []string{"foo/a.txt", "foo/sub/b.txt"} {
+		meta, err := database.NewFileMetadataService(db).GetByPath(path)
+		if err != nil || meta == nil {
+			t.Fatalf("file metadata %s was not rolled back: meta=%v err=%v", path, meta, err)
+		}
+		if !store.Exists(path) {
+			t.Fatalf("storage object %s was removed before metadata commit", path)
+		}
+	}
 }
 
 func TestDirectoryManagerWithStore_RenameMovesStorageObject(t *testing.T) {
@@ -337,5 +398,39 @@ func TestDirectoryManagerWithStore_RenameMovesStorageObject(t *testing.T) {
 	}
 	if fileMeta == nil {
 		t.Errorf("file metadata should exist at new path")
+	}
+}
+
+func TestRenameDirectoryRollsBackStorageWhenMetadataUpdateFails(t *testing.T) {
+	db := setupTestDB(t)
+	store := setupTestStore(t)
+	dm := NewDirectoryManagerWithStore(db, store)
+
+	if err := dm.CreateDirectory("foo"); err != nil {
+		t.Fatalf("CreateDirectory failed: %v", err)
+	}
+	if err := store.Write("foo/bar.txt", []byte("hello")); err != nil {
+		t.Fatalf("store.Write failed: %v", err)
+	}
+	createFileRecord(t, db, "foo/bar.txt", 5)
+	if _, err := db.Exec(`CREATE TRIGGER fail_directory_file_move BEFORE UPDATE OF path ON files BEGIN SELECT RAISE(FAIL, 'forced path update failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	if err := dm.RenameDirectory("foo", "bar"); err == nil {
+		t.Fatal("expected RenameDirectory metadata failure")
+	}
+	if !store.Exists("foo/bar.txt") {
+		t.Fatal("source storage object was not restored")
+	}
+	if store.Exists("bar/bar.txt") {
+		t.Fatal("target storage object remained after rollback")
+	}
+	if !dm.Exists("foo") || dm.Exists("bar") {
+		t.Fatal("directory metadata changed despite failed transaction")
+	}
+	meta, err := database.NewFileMetadataService(db).GetByPath("foo/bar.txt")
+	if err != nil || meta == nil {
+		t.Fatalf("source file metadata was not restored: meta=%v err=%v", meta, err)
 	}
 }

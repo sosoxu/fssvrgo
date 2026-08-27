@@ -195,6 +195,20 @@ func TestValidateTempFilePath(t *testing.T) {
 	}
 }
 
+func TestValidateTempFilePathRegisteredSharedRoot(t *testing.T) {
+	sharedRoot := t.TempDir()
+	if err := RegisterTrustedTempDir(sharedRoot); err != nil {
+		t.Fatalf("RegisterTrustedTempDir: %v", err)
+	}
+	if err := validateTempFilePath(filepath.Join(sharedRoot, "session.tmp")); err != nil {
+		t.Fatalf("registered shared temp path rejected: %v", err)
+	}
+	sibling := sharedRoot + "-sibling"
+	if pathWithinRoot(filepath.Join(sibling, "session.tmp"), sharedRoot) {
+		t.Fatal("prefix-sibling path should not be considered inside the root")
+	}
+}
+
 // TestCrossBackendWriteFromTempFileAcceptsTemp verifies both backends accept a
 // temp file that lives under the system temp directory and upload/copy it
 // correctly. Each backend gets its OWN temp file because LocalStorage moves

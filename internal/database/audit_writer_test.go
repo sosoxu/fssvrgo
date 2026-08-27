@@ -150,6 +150,26 @@ func TestAuditWriter_CloseIdempotent(t *testing.T) {
 	}
 }
 
+func TestAuditWriter_SubmitAfterCloseIsIgnored(t *testing.T) {
+	db := newTestDB(t)
+	if err := InitTables(db); err != nil {
+		t.Fatalf("InitTables: %v", err)
+	}
+
+	w := NewAuditWriter(db, 100, 10*time.Second)
+	w.Submit(newAuditEntry("before-close"))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	w.Submit(newAuditEntry("after-close"))
+
+	if got := countAuditRows(t, db); got != 1 {
+		t.Fatalf("expected only the pre-close entry, got %d rows", got)
+	}
+}
+
 // TestAuditWriter_NilDBIsNoop verifies that a nil DB produces a no-op writer:
 // Submit is safe and Close is safe, and nothing is persisted.
 func TestAuditWriter_NilDBIsNoop(t *testing.T) {

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -16,6 +17,11 @@ type JWTService struct {
 	tokenExpiry      time.Duration
 	refreshExpiry    time.Duration
 	refreshBlacklist sync.Map // jti -> expiry time.Time; prevents refresh token replay
+	stateStore       SecurityStateStore
+}
+
+func (s *JWTService) SetSecurityStateStore(store SecurityStateStore) {
+	s.stateStore = store
 }
 
 type Claims struct {
@@ -122,6 +128,17 @@ func (s *JWTService) ValidateToken(tokenStr string) (*Claims, error) {
 		if _, blacklisted := s.refreshBlacklist.Load(claims.ID); blacklisted {
 			return nil, errors.New("refresh token has been revoked")
 		}
+		if s.stateStore != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			revoked, err := s.stateStore.IsRefreshRevoked(ctx, claims.ID)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("failed to validate refresh token revocation: %w", err)
+			}
+			if revoked {
+				return nil, errors.New("refresh token has been revoked")
+			}
+		}
 	}
 
 	return claims, nil
@@ -140,6 +157,17 @@ func (s *JWTService) RefreshToken(refreshTokenStr string) (*TokenPair, error) {
 
 	// Invalidate the old refresh token to enforce one-time use.
 	if claims.ID != "" {
+		if s.stateStore != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			consumed, err := s.stateStore.ConsumeRefresh(ctx, claims.ID, s.refreshExpiry)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("failed to revoke refresh token: %w", err)
+			}
+			if !consumed {
+				return nil, errors.New("refresh token has already been used")
+			}
+		}
 		s.refreshBlacklist.Store(claims.ID, time.Now().Add(s.refreshExpiry))
 		s.cleanupBlacklist()
 	}

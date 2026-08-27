@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -92,6 +93,45 @@ func TestLocalStorageWriteFromTempFile(t *testing.T) {
 	}
 }
 
+func TestLocalStorageStagingIsRootScopedAndHidden(t *testing.T) {
+	dir := t.TempDir()
+	ls := NewLocalStorage(dir)
+	content := "staged content"
+	tempPath, size, err := StageReader(ls, "parent/file.txt", strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("StageReader failed: %v", err)
+	}
+	defer os.Remove(tempPath)
+	if filepath.Dir(tempPath) != filepath.Join(dir, localStagingDirectory) {
+		t.Fatalf("staging path = %s, want root staging directory", tempPath)
+	}
+	if size != int64(len(content)) {
+		t.Fatalf("staged size = %d, want %d", size, len(content))
+	}
+	names, err := ls.List("")
+	if err != nil {
+		t.Fatalf("list storage root: %v", err)
+	}
+	for _, name := range names {
+		if name == localStagingDirectory {
+			t.Fatal("internal staging directory leaked into root listing")
+		}
+	}
+	if err := ls.ValidatePath(localStagingDirectory + "/user.txt"); err == nil {
+		t.Fatal("reserved staging path was accepted as a user path")
+	}
+	if err := CommitStagedFile(ls, "parent/file.txt", tempPath); err != nil {
+		t.Fatalf("CommitStagedFile failed: %v", err)
+	}
+	stored, err := ls.Read("parent/file.txt")
+	if err != nil {
+		t.Fatalf("read committed staging file: %v", err)
+	}
+	if string(stored) != content {
+		t.Fatalf("committed content = %q, want %q", stored, content)
+	}
+}
+
 func TestLocalStorageRemove(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
@@ -151,6 +191,21 @@ func TestLocalStorageExists(t *testing.T) {
 
 	if ls.Exists("exists.txt") {
 		t.Errorf("file should not exist after remove")
+	}
+}
+
+func TestLocalStorageWriteCreatesInitiallyMissingRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing", "storage-root")
+	ls := NewLocalStorage(root)
+	if err := ls.Write("nested/file.txt", []byte("data")); err != nil {
+		t.Fatalf("Write with initially missing root: %v", err)
+	}
+	data, err := ls.Read("nested/file.txt")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(data) != "data" {
+		t.Fatalf("content = %q, want data", data)
 	}
 }
 

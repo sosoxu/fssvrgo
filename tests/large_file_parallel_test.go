@@ -4,12 +4,10 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
 	"github.com/sosoxu/fssvrgo/internal/storage"
@@ -32,18 +30,7 @@ func setupParallelTestEnv(t *testing.T) *ParallelTestEnv {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 
-	dbPath := filepath.Join(storageDir, "test.db")
-	dbCfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: dbPath,
-	}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		os.RemoveAll(storageDir)
-		t.Fatalf("failed to connect database: %v", err)
-	}
-
-	qdb := dbObj.GetQueryDB()
+	dbObj, qdb := connectPostgreSQLTestDB(t, 25)
 
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
@@ -809,15 +796,8 @@ func benchmarkMultipartUpload(b *testing.B, fileSize int64, concurrency int) {
 	}
 	defer os.RemoveAll(storageDir)
 
-	dbPath := filepath.Join(storageDir, "bench.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		b.Fatalf("failed to connect database: %v", err)
-	}
+	dbObj, qdb := connectPostgreSQLTestDB(b, 25)
 	defer dbObj.Close()
-
-	qdb := dbObj.GetQueryDB()
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1,
@@ -884,15 +864,8 @@ func benchmarkParallelDownload(b *testing.B, fileSize int64, concurrency int) {
 	}
 	defer os.RemoveAll(storageDir)
 
-	dbPath := filepath.Join(storageDir, "bench.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		b.Fatalf("failed to connect database: %v", err)
-	}
+	dbObj, qdb := connectPostgreSQLTestDB(b, 25)
 	defer dbObj.Close()
-
-	qdb := dbObj.GetQueryDB()
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1,

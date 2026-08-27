@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
@@ -26,24 +28,15 @@ func setupPostgreSQLTest(t *testing.T) (*filemanager.FileManager, *directory.Dir
 		t.Fatalf("failed to create storage dir: %v", err)
 	}
 
-	dbCfg := config.DatabaseConfig{
-		Type:     "postgresql",
-		Host:     "localhost",
-		Port:     5432,
-		Name:     "fsserver",
-		User:     "fsserver",
-		Password: "fsserver123",
-		SSLMode:  "disable",
-	}
-
 	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
+	if err := dbObj.Connect(postgreSQLTestConfig(25)); err != nil {
 		os.RemoveAll(storageDir)
 		t.Skipf("PostgreSQL not available, skipping: %v", err)
 	}
 
 	qdb := dbObj.GetQueryDB()
 
+	_, _ = qdb.Exec("DELETE FROM transfer_session_results")
 	_, _ = qdb.Exec("DELETE FROM transfer_tasks")
 	_, _ = qdb.Exec("DELETE FROM audit_log")
 	_, _ = qdb.Exec("DELETE FROM api_keys")
@@ -70,6 +63,7 @@ func setupPostgreSQLTest(t *testing.T) (*filemanager.FileManager, *directory.Dir
 	transferSvc := transfer.NewFileTransferService(store, qdb)
 
 	cleanup := func() {
+		_, _ = qdb.Exec("DELETE FROM transfer_session_results")
 		_, _ = qdb.Exec("DELETE FROM transfer_tasks")
 		_, _ = qdb.Exec("DELETE FROM audit_log")
 		_, _ = qdb.Exec("DELETE FROM api_keys")
@@ -296,28 +290,44 @@ func TestPostgreSQL_ListFiles(t *testing.T) {
 }
 
 func TestPostgreSQL_ConcurrentWrites(t *testing.T) {
-	fm, _, _, _, _, _, cleanup := setupPostgreSQLTest(t)
+	fm, _, _, _, _, db, cleanup := setupPostgreSQLTest(t)
 	defer cleanup()
 
-	errCh := make(chan error, 10)
-	for i := 0; i < 10; i++ {
+	const concurrency = 100
+	errCh := make(chan error, concurrency)
+	var wg sync.WaitGroup
+	startedAt := time.Now()
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
 		go func(idx int) {
+			defer wg.Done()
 			data := []byte(fmt.Sprintf("concurrent data %d", idx))
 			_, err := fm.UploadFile(fmt.Sprintf("/pg_concurrent_%d.txt", idx), data)
 			errCh <- err
 		}(i)
 	}
+	wg.Wait()
+	close(errCh)
 
-	for i := 0; i < 10; i++ {
-		if err := <-errCh; err != nil {
-			t.Errorf("concurrent upload %d failed: %v", i, err)
+	for err := range errCh {
+		if err != nil {
+			t.Errorf("concurrent upload failed: %v", err)
 		}
 	}
+	t.Logf("completed %d concurrent PostgreSQL-backed writes in %s", concurrency, time.Since(startedAt))
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < concurrency; i++ {
 		if !fm.Exists(fmt.Sprintf("/pg_concurrent_%d.txt", i)) {
 			t.Errorf("file /pg_concurrent_%d.txt should exist", i)
 		}
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM files WHERE is_deleted = ?", false).Scan(&count); err != nil {
+		t.Fatalf("count concurrent metadata rows: %v", err)
+	}
+	if count != concurrency {
+		t.Fatalf("expected %d metadata rows after concurrent writes, got %d", concurrency, count)
 	}
 }
 

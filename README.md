@@ -1,14 +1,14 @@
 # fssvrgo
 
-高性能分布式文件存储服务，支持 HTTP 和 gRPC 双协议访问，提供大文件分段并发传输、多实例部署数据一致性保障。
+文件存储服务，支持 HTTP 和 gRPC 双协议访问、大文件分段并发传输，以及基于 PostgreSQL、Redis 和共享存储的多实例协调。
 
 ## 特性
 
 - **双协议支持** — 同时提供 RESTful HTTP API 和 gRPC 服务
 - **大文件分段传输** — 支持并发分段上传/下载（Multipart Upload/Parallel Download），GB 级文件传输效率显著提升
 - **增量哈希校验** — 顺序上传时边写边计算 SHA256，完成时无需重新读取文件
-- **多数据库支持** — SQLite（单机）和 PostgreSQL（生产），通过配置切换，SQL 方言自动翻译
-- **分布式一致性** — Redis 分布式锁（SET NX + Lua 原子解锁）+ Redis 会话存储，支持多实例部署
+- **PostgreSQL 元数据存储** — 服务部署统一使用 PostgreSQL；SQLite 仅保留给隔离功能测试和 SQL 方言兼容测试
+- **多实例协调** — Redis 分布式锁（SET NX + Lua 原子解锁）+ Redis 会话状态 + 共享临时目录
 - **文件句柄缓存** — 上传会话保持临时文件打开，避免每次 chunk 的 open/close 开销
 - **预分配空间** — 创建上传会话时预分配文件空间（Truncate），减少文件系统碎片
 - **细粒度路径锁** — sync.Map 实现按路径加锁，不同文件并发无阻塞
@@ -43,7 +43,7 @@
 ├─────────────────────────────────────────────────────┤
 │              Storage & Database                      │
 │  ┌──────────────┐ ┌──────────────────────────────┐  │
-│  │ LocalStorage │ │  Database (SQLite/PostgreSQL) │  │
+│  │ LocalStorage │ │  Database (PostgreSQL)        │  │
 │  │ (sync.Map    │ │  - Dialect Translation        │  │
 │  │  path locks) │ │  - Prepared Stmt Cache        │  │
 │  └──────────────┘ └──────────────────────────────┘  │
@@ -123,12 +123,19 @@ server:
 
 storage:
   type: local
+  temp_dir: /shared/fsserver-upload-tmp # 所有实例共享的上传临时目录
   local:
     root_dir: /data/fsserver
 
 database:
-  type: sqlite          # 或 postgresql
-  path: /data/fsserver/fsserver.db
+  type: postgresql
+  host: localhost
+  port: 5432
+  name: fsserver
+  user: fsserver
+  password: your_password
+  sslmode: disable
+  pool_size: 25
 
 redis:
   enabled: false        # 多实例部署时启用
@@ -268,33 +275,35 @@ curl -H "Range: bytes=0-1048575" \
 
 测试环境：Intel Xeon Platinum 8457C, 本地文件系统, SQLite
 
+以下为历史参考结果，不是当前发布验收报告。其中原标为 gRPC 的数据实际是直接调用服务层，不包含 gRPC 编解码和网络开销，现统一标为 Service。正式验收应按 [需求文档](docs/requirements.md) 中定义的环境信息、样本数、p95 和错误率口径重新执行。
+
 ### 分段 vs 不分段
 
-| 操作 | 协议 | 模式 | 并发 | 吞吐量 |
+| 操作 | 调用层 | 模式 | 并发 | 吞吐量 |
 |------|------|------|------|--------|
 | 上传 256MB | HTTP | 不分段 | 1 | 105.55 MB/s |
 | 上传 256MB | HTTP | 分段 | 4 | **117.28 MB/s** (+11%) |
-| 上传 256MB | gRPC | 不分段 | 1 | 128.53 MB/s |
-| 上传 256MB | gRPC | 分段 | 8 | **134.65 MB/s** (+5%) |
+| 上传 256MB | Service | 不分段 | 1 | 128.53 MB/s |
+| 上传 256MB | Service | 分段 | 8 | **134.65 MB/s** (+5%) |
 | 下载 100MB | HTTP | 不分段 | 1 | 313.99 MB/s |
 | 下载 100MB | HTTP | 分段 | 4 | **503.62 MB/s** (+60%) |
-| 下载 100MB | gRPC | 不分段 | 1 | 820.93 MB/s |
-| 下载 100MB | gRPC | 分段 | 4 | **1309.00 MB/s** (+59%) |
-| 下载 256MB | gRPC | 分段 | 4 | **1375.40 MB/s** |
+| 下载 100MB | Service | 不分段 | 1 | 820.93 MB/s |
+| 下载 100MB | Service | 分段 | 4 | **1309.00 MB/s** (+59%) |
+| 下载 256MB | Service | 分段 | 4 | **1375.40 MB/s** |
 
-### HTTP vs gRPC
+### HTTP vs Service（仅历史参考）
 
-| 操作 | HTTP | gRPC | gRPC 加速 |
+| 操作 | HTTP | Service | Service 加速 |
 |------|------|------|-----------|
 | 下载 100MB (分段 c=4) | 504 MB/s | 1309 MB/s | **2.60x** |
 | 下载 256MB (分段 c=4) | 410 MB/s | 1375 MB/s | **3.35x** |
 
 ### 关键结论
 
-- **下载场景**：分段传输全面优于不分段，gRPC 分段4并发比不分段快 59%~67%
+- **下载场景**：历史 Service 层结果中，分段 4 并发比不分段快 59%~67%
 - **上传场景**：小文件不分段略优（会话开销），大文件分段开始占优
 - **最优并发数**：4 并发是最佳平衡点，超过后锁竞争增加
-- **gRPC 下载远快于 HTTP**：直连内存操作 vs 网络栈序列化，差距 2.6x~3.4x
+- **禁止协议推断**：HTTP 与直接 Service 调用不具可比协议栈，不能据此得出 gRPC 比 HTTP 更快的结论
 
 ## 多实例部署
 
@@ -347,9 +356,15 @@ storage:
 ### 一致性保障
 
 - **分布式锁**：文件操作前获取 Redis 锁，保证跨实例互斥
-- **会话可见性**：上传/下载会话存储在 Redis，任意实例可恢复
+- **会话恢复**：状态存储在 Redis，上传临时数据位于共享 `storage.temp_dir`
 - **锁获取策略**：指数退避 + 随机抖动，避免惊群效应
-- **Redis 会话更新批量化**：每 8 个 chunk 更新一次，减少 87.5% 的 Redis 写入
+- **进度确认**：每个成功上传块先 `fsync`，再检查租约并持久化共享状态；任一步失败时客户端从相同 offset 重试
+- **重命名互斥**：源和目标路径按固定顺序双锁，本地目录 DB 更新失败会回滚存储移动
+- **层级命名空间租约**：文件读写共享锁定祖先目录，目录变更独占子树根；活跃下载会话可跨实例接管且完成后旧实例不能继续读取
+- **最终写 fencing**：PostgreSQL 分配单调 token 并保存每个路径的最高 token；低 token 即使租约仍存活也不能再次提交文件或目录元数据
+- **上传终态账本**：顺序和 Multipart 上传的完成/取消结果写入 PostgreSQL；完成结果与文件元数据同事务提交，响应丢失后可跨实例幂等重试
+
+当前 `consistency.level` 只支持 `none`；`eventual`/`strong` 没有真实复制链路，会在配置校验时报错。目录与子文件已有 PostgreSQL 层级命名空间租约和持久化 path fencing，递归删除元数据也已改为单事务更新，本地目录删除使用可回滚同盘备份。但本地文件系统和 MinIO 并非原生 token-aware 存储，且存储与数据库之间没有跨资源原子事务，因此不能承诺任意网络分区和进程故障下的全局线性一致性。本轮未提供 MinIO 环境，MinIO 专属行为未纳入本次验收。
 
 ## 测试
 
@@ -381,7 +396,7 @@ go test ./tests/ -run TestSegmentedVsNonSegmented -v
 
 # Benchmark
 go test ./tests/ -bench=BenchmarkMultipartUpload -benchmem
-go test ./tests/ -bench=BenchmarkGRPC_SegmentedDownload -benchmem
+go test ./tests/ -bench=BenchmarkService_SegmentedDownload -benchmem
 ```
 
 ## 技术栈
@@ -390,7 +405,8 @@ go test ./tests/ -bench=BenchmarkGRPC_SegmentedDownload -benchmem
 |------|------|
 | HTTP 框架 | Gin |
 | gRPC | google.golang.org/grpc |
-| 数据库 | SQLite (modernc.org/sqlite) / PostgreSQL (lib/pq) |
+| 服务数据库 | PostgreSQL (lib/pq) |
+| 测试数据库 | SQLite (modernc.org/sqlite，仅隔离功能/兼容测试) |
 | 分布式锁/会话 | Redis (go-redis/v9) |
 | 日志 | Zap |
 | 指标 | Prometheus client_golang |

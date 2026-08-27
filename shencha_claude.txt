@@ -1,0 +1,56 @@
+审查完成。先说结论：整体架构与此前 14 个已关闭 issue 的大部分修复都能在代码中对上，但发现 2 处"已修复"问题实际回归/未落地，以及若干新问题，其中断点续传路径有两个较严重的完整性/可用性缺陷。另外说明：本轮执行环境的命令安全分类器持续不可用，go build/go test多次重试都无法执行，以下结论基于纯静态审查。
+
+  一、回归：ISSUES.md 声称已修复但代码中不存在
+
+  R1（P2·审计）审计日志未记录真实调用者 —— GitHub #64 (https://github.com/sosoxu/fssvrgo/issues/64) 的修复不在代码里。 ISSUES.md写明"auditLog 从 gin context 读取 user 值，记录 user:<ID>"，但当前实现仍只脱敏记录凭证类型：
+
+  1464:1471:internal/api/http/server.go
+        userIdentifier := "anonymous"
+        apiKeyHeader := c.GetHeader("X-API-Key")
+        authHeader := c.GetHeader("Authorization")
+        if apiKeyHeader != "" {
+                userIdentifier = "api-key:***"
+        } else if strings.HasPrefix(authHeader, "Bearer ") {
+                userIdentifier = "bearer:***"
+        }
+
+  authMiddleware 已经 c.Set("user", user)，这里却没有读取。
+
+  R2（P2·安全）Content-Disposition 转义 —— GitHub #65 (https://github.com/sosoxu/fssvrgo/issues/65) 细节项的修复不在代码里。handleDownload（第 611 行）和 handleEncryptedDownload（第 699 行）都是裸格式化：
+
+  611:611:internal/api/http/server.go
+        c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", meta.Name))
+
+  IsValidFileName 禁止了控制字符（所以无法 CRLF 注入头部），但允许双引号，文件名 a".txt 会产生畸形header，可能被客户端解析成非预期文件名。ISSUES.md 声称已加引号转义 + filename*=UTF-8''，均不存在。
+
+  这两项要么是修复提交被回滚/丢失，要么 ISSUES.md 记录失实，建议先查 git 历史确认。
+
+  二、新发现问题
+
+  N1（P1·完整性）分块上传（uploads 会话）没有字节区间覆盖校验 —— #57 只修了 multipart 路径。 UploadChunk 只累加 UploadedSize计数，CompleteUpload 只校验计数相等（service.go 第 365 行）。客户端对两个不同 chunk 写了同一 offset 时，计数达到 TotalSize 但预分配文件里留有零填充空洞——不带 hash 的上传会静默接受损坏文件。multipart 的 coveredRanges 机制应同样应用到这条路径。
+
+  N2（P1·可用性）chunk/part 重试会永久毁掉会话。 网络重试是常态（响应丢失后客户端重发同一分块），但重发会使计数重复累加：
+  - uploads 路径：UploadedSize 超过 TotalSize，CompleteUpload 的相等性检查永远失败；若重发时 offset+len > TotalSize 还会直接被拒。
+  - multipart 路径：uploadedSize 双倍计数，CompleteMultipartUpload 第 271 行 totalUploaded != session.TotalSize 先于覆盖检查失败——尽管coveredRanges 明明能证明数据完整。
+
+  multipart 修复很直接：完成时用 coveredRanges 推导已上传字节数，替代原始计数做相等性判断。
+
+  N3（P2·多实例）启动时误删同主机其他实例的临时目录。 main.go 第 182–191 行无条件删除 os.TempDir() 下所有 fsserver-uploads-*目录。同一台机器跑两个实例时，后启动的实例会删掉先启动实例正在使用的上传临时目录，导致其所有进行中的会话写入失败。
+
+  N4（P2·运维）/health 和 /ready 也经过并发限流中间件。 setupRoutes 里 concurrencyMiddleware 通过 engine.Use 全局注册（第 124 行），先于健康检查路由。服务器满载时探针拿不到信号量返回 503，Kubernetes会把高负载实例判定为不健康并重启——恰好在最不该重启的时候放大故障。健康检查应绕过该信号量。
+
+  N5（P2·审计）gRPC 侧完全没有审计日志。 HTTP 的上传/删除/重命名等写操作都有 auditLog，gRPC 的同类RPC（UploadFile、DeleteFile、DeleteDirectory 等）一条都不记。同一操作经由不同协议审计覆盖不一致。
+
+  P3 级别问题（列出供选择性处理）：
+  - 上传/multipart 会话无属主绑定：任何通过认证的用户凭 sessionID 即可向他人会话写数据、complete 或 abort（sessionID 是 UUID难以猜测，风险低）。
+  - JWT refresh 黑名单是进程内 sync.Map：多实例间旧 refresh token 可在其他实例重放；重启后黑名单清空。Redis 已可用时可下沉到 Redis。
+  - 跨实例断点续传的两处不一致：会话每 8 个 chunk 才同步一次 Redis，另一实例执行 Complete 时 UploadedSize 可能过期而误报incomplete；加密下载会话被另一实例从 Redis 恢复后 decryptedFile 为 nil，会直接从存储读出密文返回给客户端（service.go DownloadChunk 第 692–704 行）。
+  - GET /uploads/:id/progress 对不存在的会话返回 200 + uploaded_bytes: 0，应返回 404。
+  - gRPC 指标 statusCodeFromErr 只区分 200/500，丢失了 NotFound/InvalidArgument 等分类；grpc/server.go 末尾的 computeNewPath 是死代码。
+  - JWT 签名密钥仍与 defaultApiKeyHash 同值（hashApiKey(apiKey)），#65当时只改了注释；建议按注释所述做域分离（hashApiKey("jwt:"+apiKey)），注意这会使已签发 token 失效。
+
+  三、确认完好的部分
+
+  历史修复 #55（认证默认开启 + CORS 白名单）、#56（锁续期）、#57（multipart 覆盖校验）、#58（gRPC RBAC）、#60（refresh轮换）、#61（认证解耦 + token 提权防护）、#62（recursive 参数）、#63（会话配额）均在代码中核实存在。路径校验（IsValidFilePath + LocalStorage.ValidatePath 的符号链接解析）、排序字段白名单（防 SQL 注入）、config.Validate 对空 secret 的拒绝也都完好。
+
+  建议优先处理顺序：先用 git 历史核实 R1/R2 是回归还是记录失实，然后修 N1/N2（同属分块上传完整性，可一并修复），再处理N3/N4。环境恢复后需要跑一遍 go build ./... && go test ./... 确认基线。

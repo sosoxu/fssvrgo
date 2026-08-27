@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/database"
 )
@@ -86,6 +87,35 @@ func TestRateLimiting(t *testing.T) {
 
 	if svc.IsRateLimited("192.168.1.2") {
 		t.Errorf("different IP should not be rate limited")
+	}
+}
+
+func TestRateLimitingSharedAcrossInstances(t *testing.T) {
+	shared := NewMemorySecurityStateStore()
+	svc1 := NewAuthService()
+	svc2 := NewAuthService()
+	svc1.SetSecurityStateStore(shared)
+	svc2.SetSecurityStateStore(shared)
+	svc1.Init(true, "test-key")
+	svc2.Init(true, "test-key")
+	for i := 0; i < 5; i++ {
+		svc1.RecordAuthFailure("192.0.2.10")
+		svc2.RecordAuthFailure("192.0.2.10")
+	}
+	if !svc1.IsRateLimited("192.0.2.10") || !svc2.IsRateLimited("192.0.2.10") {
+		t.Fatal("expected shared authentication failures to rate-limit both instances")
+	}
+}
+
+func TestConfiguredTokenExpiryIsApplied(t *testing.T) {
+	svc := NewAuthService()
+	svc.InitWithExpiry(true, "test-key", 2*time.Hour, 48*time.Hour)
+	pair, err := svc.GetJWTService().GenerateTokenPair("user", "user")
+	if err != nil {
+		t.Fatalf("GenerateTokenPair: %v", err)
+	}
+	if pair.ExpiresIn != int64((2 * time.Hour).Seconds()) {
+		t.Fatalf("ExpiresIn = %d, want %d", pair.ExpiresIn, int64((2 * time.Hour).Seconds()))
 	}
 }
 

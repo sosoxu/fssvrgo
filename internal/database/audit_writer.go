@@ -20,12 +20,15 @@ import (
 type AuditWriter struct {
 	svc *AuditLogService
 
-	ch       chan *AuditLog
-	batchSize int
+	ch            chan *AuditLog
+	batchSize     int
 	flushInterval time.Duration
 
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	acceptMu sync.RWMutex
+	closed   bool
 
 	// mu guards pending so that the flush goroutine and an explicit Close
 	// (which does a final flush) cannot race.
@@ -71,6 +74,11 @@ func (w *AuditWriter) Submit(entry *AuditLog) {
 	if w == nil || w.svc == nil || w.svc.db == nil {
 		return
 	}
+	w.acceptMu.RLock()
+	defer w.acceptMu.RUnlock()
+	if w.closed {
+		return
+	}
 	select {
 	case w.ch <- entry:
 	default:
@@ -85,9 +93,12 @@ func (w *AuditWriter) Close(ctx context.Context) error {
 	if w == nil || w.svc == nil || w.svc.db == nil {
 		return nil
 	}
+	w.acceptMu.Lock()
+	w.closed = true
 	if w.cancel != nil {
 		w.cancel()
 	}
+	w.acceptMu.Unlock()
 	// Wait for the loop to exit. The loop drains the channel into w.pending on
 	// its way out but does NOT flush — Close does the final flush so it can use
 	// the caller's (still-valid) context. This matters because the loop's own
@@ -116,14 +127,16 @@ func (w *AuditWriter) loop(ctx context.Context) {
 		case entry := <-w.ch:
 			w.mu.Lock()
 			w.pending = append(w.pending, entry)
-			if len(w.pending) >= w.batchSize {
-				w.flushLocked(ctx)
+			if len(w.pending) >= w.batchSize && ctx.Err() == nil {
+				// Cancellation is only a stop signal. An in-flight batch must
+				// finish instead of dropping its unwritten tail during Close.
+				w.flushLocked(context.Background())
 			}
 			w.mu.Unlock()
 		case <-ticker.C:
 			w.mu.Lock()
-			if len(w.pending) > 0 {
-				w.flushLocked(ctx)
+			if len(w.pending) > 0 && ctx.Err() == nil {
+				w.flushLocked(context.Background())
 			}
 			w.mu.Unlock()
 		case <-ctx.Done():

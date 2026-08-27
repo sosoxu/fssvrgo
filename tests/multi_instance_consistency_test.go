@@ -69,15 +69,7 @@ func NewMultiInstanceCluster(t *testing.T, numInstances int) *MultiInstanceClust
 		t.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	dbPath := filepath.Join(tempDir, "shared.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		os.RemoveAll(tempDir)
-		t.Fatalf("Failed to connect to database: %v", err)
-	}
-
-	qdb := dbObj.GetQueryDB()
+	dbObj, qdb := connectPostgreSQLTestDB(t, 25)
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1,
@@ -96,7 +88,7 @@ func NewMultiInstanceCluster(t *testing.T, numInstances int) *MultiInstanceClust
 
 	cluster := &MultiInstanceCluster{
 		StorageDir:  storageDir,
-		DBPath:      dbPath,
+		DBPath:      "postgresql",
 		TempDir:     tempDir,
 		SharedDB:    qdb,
 		SharedStore: store,
@@ -220,7 +212,7 @@ func getMetadataHTTP(baseURL, filePath string) (map[string]interface{}, int, err
 }
 
 func listFilesHTTP(baseURL string) (map[string]interface{}, int, error) {
-	resp, err := http.Get(baseURL + "/api/v1/files")
+	resp, err := http.Get(baseURL + "/api/v1/files?include_total=true")
 	if err != nil {
 		return nil, 0, err
 	}

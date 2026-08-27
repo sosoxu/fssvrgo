@@ -239,6 +239,42 @@ func TestDirectoryManager_NilDistLockStillWorks(t *testing.T) {
 	}
 }
 
+func TestDirectoryManager_ConcurrentRenameSameTarget(t *testing.T) {
+	db := setupTestDB(t)
+	dm := NewDirectoryManagerWithDistLock(db, nil, distributed.NewLocalDistributedLock())
+	for _, path := range []string{"foo", "bar"} {
+		if err := dm.CreateDirectory(path); err != nil {
+			t.Fatalf("CreateDirectory %s: %v", path, err)
+		}
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, source := range []string{"foo", "bar"} {
+		go func(path string) {
+			<-start
+			errs <- dm.RenameDirectory(path, "target")
+		}(source)
+	}
+	close(start)
+	err1, err2 := <-errs, <-errs
+	if (err1 == nil) == (err2 == nil) {
+		t.Fatalf("exactly one directory rename must succeed, got errors %v and %v", err1, err2)
+	}
+	if !dm.Exists("target") {
+		t.Fatal("target directory does not exist")
+	}
+	remaining := 0
+	for _, source := range []string{"foo", "bar"} {
+		if dm.Exists(source) {
+			remaining++
+		}
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining source count = %d, want 1", remaining)
+	}
+}
+
 // TestDirectoryManager_RenameAtomicOnStorageFailure verifies that if a storage
 // rename fails AFTER the DB transaction commits, the DB still ends up with all
 // children at the new path (atomic), rather than half-old/half-new. The

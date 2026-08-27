@@ -40,6 +40,7 @@ type AuthService struct {
 	rateLimitSeconds  int
 	jwtService        *JWTService
 	apiKeyLookupFn    apiKeyLookup
+	securityState     SecurityStateStore
 }
 
 func NewAuthService() *AuthService {
@@ -60,20 +61,30 @@ func (as *AuthService) SetApiKeyLookup(fn func(ctx context.Context, keyHash stri
 }
 
 func (as *AuthService) Init(authEnabled bool, apiKey string) {
+	as.InitWithExpiry(authEnabled, apiKey, 24*time.Hour, 168*time.Hour)
+}
+
+func (as *AuthService) InitWithExpiry(authEnabled bool, apiKey string, tokenExpiry, refreshExpiry time.Duration) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 
 	as.authEnabled = authEnabled
 	if authEnabled && apiKey != "" {
 		as.defaultApiKeyHash = hashApiKey(apiKey)
-		// JWT signing secret is derived from the admin API key value by hashing
-		// it to obtain a 32-byte key. NOTE: this produces the same value as
-		// defaultApiKeyHash above; consider using a domain-specific prefix
-		// (e.g. hashApiKey("jwt:"+apiKey)) for stronger key separation.
-		tokenExpiry := time.Duration(24) * time.Hour
-		refreshExpiry := time.Duration(168) * time.Hour
-		as.jwtService = NewJWTService(hashApiKey(apiKey), tokenExpiry, refreshExpiry)
+		as.jwtService = NewJWTService(hashApiKey("jwt:"+apiKey), tokenExpiry, refreshExpiry)
+		if as.securityState != nil {
+			as.jwtService.SetSecurityStateStore(as.securityState)
+		}
 	}
+}
+
+func (as *AuthService) SetSecurityStateStore(store SecurityStateStore) {
+	as.mu.Lock()
+	as.securityState = store
+	if as.jwtService != nil {
+		as.jwtService.SetSecurityStateStore(store)
+	}
+	as.mu.Unlock()
 }
 
 func (as *AuthService) GetJWTService() *JWTService {
@@ -283,6 +294,16 @@ func (as *AuthService) GetUserById(userId string) (*User, error) {
 
 func (as *AuthService) IsRateLimited(clientIP string) bool {
 	as.mu.RLock()
+	state := as.securityState
+	limit := as.maxAuthFailures
+	as.mu.RUnlock()
+	if state != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		count, err := state.AuthFailureCount(ctx, strings.TrimSpace(clientIP))
+		cancel()
+		return err != nil || count >= limit
+	}
+	as.mu.RLock()
 	defer as.mu.RUnlock()
 
 	record, exists := as.authFailures[clientIP]
@@ -298,6 +319,16 @@ func (as *AuthService) IsRateLimited(clientIP string) bool {
 }
 
 func (as *AuthService) RecordAuthFailure(clientIP string) {
+	as.mu.RLock()
+	state := as.securityState
+	window := time.Duration(as.rateLimitSeconds) * time.Second
+	as.mu.RUnlock()
+	if state != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = state.RecordAuthFailure(ctx, strings.TrimSpace(clientIP), window)
+		cancel()
+		return
+	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 
@@ -331,6 +362,15 @@ func (as *AuthService) RecordAuthFailure(clientIP string) {
 }
 
 func (as *AuthService) ClearAuthFailure(clientIP string) {
+	as.mu.RLock()
+	state := as.securityState
+	as.mu.RUnlock()
+	if state != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = state.ClearAuthFailure(ctx, strings.TrimSpace(clientIP))
+		cancel()
+		return
+	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 

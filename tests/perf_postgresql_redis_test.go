@@ -457,79 +457,79 @@ func BenchmarkPostgreSQLRedis_HTTP_StreamingDownload_50MB(b *testing.B) {
 	benchmarkHTTPStreamingDownload(b, 50*1024*1024)
 }
 
-func BenchmarkPostgreSQLRedis_GRPC_Upload_1KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Upload_1KB(b *testing.B) {
 	benchmarkGRPCUpload(b, 1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Upload_64KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Upload_64KB(b *testing.B) {
 	benchmarkGRPCUpload(b, 64*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Upload_256KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Upload_256KB(b *testing.B) {
 	benchmarkGRPCUpload(b, 256*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Upload_1MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Upload_1MB(b *testing.B) {
 	benchmarkGRPCUpload(b, 1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Upload_10MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Upload_10MB(b *testing.B) {
 	benchmarkGRPCUpload(b, 10*1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Upload_50MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Upload_50MB(b *testing.B) {
 	benchmarkGRPCUpload(b, 50*1024*1024)
 }
 
-func BenchmarkPostgreSQLRedis_GRPC_Download_1KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Download_1KB(b *testing.B) {
 	benchmarkGRPCDownload(b, 1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Download_64KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Download_64KB(b *testing.B) {
 	benchmarkGRPCDownload(b, 64*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Download_256KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Download_256KB(b *testing.B) {
 	benchmarkGRPCDownload(b, 256*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Download_1MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Download_1MB(b *testing.B) {
 	benchmarkGRPCDownload(b, 1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Download_10MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Download_10MB(b *testing.B) {
 	benchmarkGRPCDownload(b, 10*1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_Download_50MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_Download_50MB(b *testing.B) {
 	benchmarkGRPCDownload(b, 50*1024*1024)
 }
 
-func BenchmarkPostgreSQLRedis_GRPC_StreamingUpload_1KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingUpload_1KB(b *testing.B) {
 	benchmarkGRPCStreamingUpload(b, 1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingUpload_64KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingUpload_64KB(b *testing.B) {
 	benchmarkGRPCStreamingUpload(b, 64*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingUpload_256KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingUpload_256KB(b *testing.B) {
 	benchmarkGRPCStreamingUpload(b, 256*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingUpload_1MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingUpload_1MB(b *testing.B) {
 	benchmarkGRPCStreamingUpload(b, 1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingUpload_10MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingUpload_10MB(b *testing.B) {
 	benchmarkGRPCStreamingUpload(b, 10*1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingUpload_50MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingUpload_50MB(b *testing.B) {
 	benchmarkGRPCStreamingUpload(b, 50*1024*1024)
 }
 
-func BenchmarkPostgreSQLRedis_GRPC_StreamingDownload_1KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingDownload_1KB(b *testing.B) {
 	benchmarkGRPCStreamingDownload(b, 1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingDownload_64KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingDownload_64KB(b *testing.B) {
 	benchmarkGRPCStreamingDownload(b, 64*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingDownload_256KB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingDownload_256KB(b *testing.B) {
 	benchmarkGRPCStreamingDownload(b, 256*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingDownload_1MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingDownload_1MB(b *testing.B) {
 	benchmarkGRPCStreamingDownload(b, 1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingDownload_10MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingDownload_10MB(b *testing.B) {
 	benchmarkGRPCStreamingDownload(b, 10*1024*1024)
 }
-func BenchmarkPostgreSQLRedis_GRPC_StreamingDownload_50MB(b *testing.B) {
+func BenchmarkPostgreSQLRedis_Service_StreamingDownload_50MB(b *testing.B) {
 	benchmarkGRPCStreamingDownload(b, 50*1024*1024)
 }
 
@@ -922,7 +922,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			_, err := inst.FM.UploadFile(path, data)
 			dur := time.Since(start)
 			if err != nil {
-				results = append(results, PerfResult{Operation: "Upload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
+				results = append(results, PerfResult{Operation: "Upload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "Service", Error: err.Error()})
 				continue
 			}
 			durations = append(durations, dur)
@@ -932,11 +932,11 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			Operation:   "Upload",
 			FileSize:    sizeLabel,
 			FileSizeInt: size,
-			Protocol:    "gRPC",
+			Protocol:    "Service",
 			Duration:    avgDur,
 			Throughput:  float64(size) / avgDur.Seconds() / 1024 / 1024,
 		})
-		t.Logf("  gRPC Upload:     %v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
+		t.Logf("  Service Upload:  %v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
 		durations = nil
 
 		grpcPath := fmt.Sprintf("/perf/grpc/upload/%s/0", sizeLabel)
@@ -945,11 +945,11 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			downloaded, err := inst.FM.DownloadFile(grpcPath)
 			dur := time.Since(start)
 			if err != nil {
-				results = append(results, PerfResult{Operation: "Download", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
+				results = append(results, PerfResult{Operation: "Download", FileSize: sizeLabel, FileSizeInt: size, Protocol: "Service", Error: err.Error()})
 				continue
 			}
 			if len(downloaded) != int(size) {
-				results = append(results, PerfResult{Operation: "Download", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: "size mismatch"})
+				results = append(results, PerfResult{Operation: "Download", FileSize: sizeLabel, FileSizeInt: size, Protocol: "Service", Error: "size mismatch"})
 				continue
 			}
 			durations = append(durations, dur)
@@ -959,11 +959,11 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			Operation:   "Download",
 			FileSize:    sizeLabel,
 			FileSizeInt: size,
-			Protocol:    "gRPC",
+			Protocol:    "Service",
 			Duration:    avgDur,
 			Throughput:  float64(size) / avgDur.Seconds() / 1024 / 1024,
 		})
-		t.Logf("  gRPC Download:   %v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
+		t.Logf("  Service Download:%v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
 		durations = nil
 
 		cluster.CleanFiles()
@@ -973,7 +973,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			start := time.Now()
 			sessionID, err := inst.TransferSvc.CreateUploadSession(path, fmt.Sprintf("perf_%s.dat", sizeLabel), int64(size), "perf", hash)
 			if err != nil {
-				results = append(results, PerfResult{Operation: "StreamUpload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
+				results = append(results, PerfResult{Operation: "StreamUpload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "Service", Error: err.Error()})
 				continue
 			}
 			cs := chunkSize
@@ -990,7 +990,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			_, err = inst.TransferSvc.CompleteUpload(sessionID)
 			dur := time.Since(start)
 			if err != nil {
-				results = append(results, PerfResult{Operation: "StreamUpload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
+				results = append(results, PerfResult{Operation: "StreamUpload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "Service", Error: err.Error()})
 				continue
 			}
 			durations = append(durations, dur)
@@ -1000,11 +1000,11 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			Operation:   "StreamUpload",
 			FileSize:    sizeLabel,
 			FileSizeInt: size,
-			Protocol:    "gRPC",
+			Protocol:    "Service",
 			Duration:    avgDur,
 			Throughput:  float64(size) / avgDur.Seconds() / 1024 / 1024,
 		})
-		t.Logf("  gRPC Stream UL:  %v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
+		t.Logf("  Service Stream UL: %v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
 		durations = nil
 
 		grpcStreamPath := fmt.Sprintf("/perf/grpc/stream_upload/%s/0", sizeLabel)
@@ -1012,7 +1012,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			start := time.Now()
 			dlSessionID, err := inst.TransferSvc.CreateDownloadSession(grpcStreamPath, "perf")
 			if err != nil {
-				results = append(results, PerfResult{Operation: "StreamDownload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
+				results = append(results, PerfResult{Operation: "StreamDownload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "Service", Error: err.Error()})
 				continue
 			}
 			var reassembled []byte
@@ -1035,7 +1035,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			}
 			dur := time.Since(start)
 			if len(reassembled) != int(size) {
-				results = append(results, PerfResult{Operation: "StreamDownload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: fmt.Sprintf("size mismatch: got %d", len(reassembled))})
+				results = append(results, PerfResult{Operation: "StreamDownload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "Service", Error: fmt.Sprintf("size mismatch: got %d", len(reassembled))})
 				continue
 			}
 			durations = append(durations, dur)
@@ -1045,11 +1045,11 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 			Operation:   "StreamDownload",
 			FileSize:    sizeLabel,
 			FileSizeInt: size,
-			Protocol:    "gRPC",
+			Protocol:    "Service",
 			Duration:    avgDur,
 			Throughput:  float64(size) / avgDur.Seconds() / 1024 / 1024,
 		})
-		t.Logf("  gRPC Stream DL:  %v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
+		t.Logf("  Service Stream DL: %v (%.2f MB/s)", avgDur, float64(size)/avgDur.Seconds()/1024/1024)
 		durations = nil
 
 		cluster.CleanFiles()
@@ -1081,29 +1081,29 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 
 	t.Log(strings.Repeat("-", 100))
 
-	t.Log("\n========== HTTP vs gRPC Comparison ==========")
+	t.Log("\n========== HTTP vs direct service-layer comparison ==========")
 	for _, size := range sizes {
 		sizeLabel := formatSize(size)
 		t.Logf("\n--- %s ---", sizeLabel)
 		for _, op := range []string{"Upload", "Download", "StreamUpload", "StreamDownload"} {
-			var httpResult, grpcResult *PerfResult
+			var httpResult, serviceResult *PerfResult
 			for _, r := range results {
 				if r.FileSizeInt == size && r.Operation == op && r.Protocol == "HTTP" && r.Error == "" {
 					httpResult = &r
 				}
-				if r.FileSizeInt == size && r.Operation == op && r.Protocol == "gRPC" && r.Error == "" {
-					grpcResult = &r
+				if r.FileSizeInt == size && r.Operation == op && r.Protocol == "Service" && r.Error == "" {
+					serviceResult = &r
 				}
 			}
-			if httpResult != nil && grpcResult != nil {
-				ratio := grpcResult.Throughput / httpResult.Throughput
-				faster := "gRPC"
-				if httpResult.Throughput > grpcResult.Throughput {
-					ratio = httpResult.Throughput / grpcResult.Throughput
+			if httpResult != nil && serviceResult != nil {
+				ratio := serviceResult.Throughput / httpResult.Throughput
+				faster := "Service"
+				if httpResult.Throughput > serviceResult.Throughput {
+					ratio = httpResult.Throughput / serviceResult.Throughput
 					faster = "HTTP"
 				}
-				t.Logf("  %-15s: HTTP=%.2f MB/s, gRPC=%.2f MB/s, %s %.2fx faster",
-					op, httpResult.Throughput, grpcResult.Throughput, faster, ratio)
+				t.Logf("  %-15s: HTTP=%.2f MB/s, Service=%.2f MB/s, %s %.2fx faster",
+					op, httpResult.Throughput, serviceResult.Throughput, faster, ratio)
 			}
 		}
 	}

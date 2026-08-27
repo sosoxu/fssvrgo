@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
@@ -52,15 +51,7 @@ func NewGRPCCluster(t *testing.T, numInstances int) *GRPCCluster {
 		t.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	dbPath := filepath.Join(tempDir, "shared.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		os.RemoveAll(tempDir)
-		t.Fatalf("Failed to connect to database: %v", err)
-	}
-
-	qdb := dbObj.GetQueryDB()
+	dbObj, qdb := connectPostgreSQLTestDB(t, 25)
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1,
@@ -77,7 +68,7 @@ func NewGRPCCluster(t *testing.T, numInstances int) *GRPCCluster {
 
 	cluster := &GRPCCluster{
 		StorageDir:  storageDir,
-		DBPath:      dbPath,
+		DBPath:      "postgresql",
 		TempDir:     tempDir,
 		SharedDB:    qdb,
 		SharedStore: store,

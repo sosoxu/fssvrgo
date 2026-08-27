@@ -12,6 +12,7 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/auth"
 	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/crypto"
+	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/logger"
 	"github.com/sosoxu/fssvrgo/internal/metrics"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
@@ -23,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -59,9 +61,10 @@ type Server struct {
 	authSvc     *auth.AuthService
 	cryptoSvc   *crypto.CryptoService
 	metricsSvc  *metrics.Metrics
+	auditWriter *database.AuditWriter
 }
 
-func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, metricsSvc *metrics.Metrics) *Server {
+func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *directory.DirectoryManager, flSvc *filelist.FileListService, transferSvc *transfer.FileTransferService, authSvc *auth.AuthService, cryptoSvc *crypto.CryptoService, metricsSvc *metrics.Metrics, db ...*database.DB) *Server {
 	s := &Server{
 		config:      cfg,
 		fm:          fm,
@@ -72,13 +75,58 @@ func NewServer(cfg config.ServerConfig, fm *filemanager.FileManager, dirSvc *dir
 		cryptoSvc:   cryptoSvc,
 		metricsSvc:  metricsSvc,
 	}
+	if len(db) > 0 && db[0] != nil {
+		s.auditWriter = database.NewAuditWriter(db[0], 100, time.Second)
+	}
 
 	s.grpcServer = grpc.NewServer(
-		grpc.ChainUnaryInterceptor(s.unaryAuthInterceptor, s.unaryMetricsInterceptor),
-		grpc.ChainStreamInterceptor(s.streamAuthInterceptor, s.streamMetricsInterceptor),
+		grpc.ChainUnaryInterceptor(s.unaryMetricsInterceptor, s.unaryAuditInterceptor, s.unaryAuthInterceptor),
+		grpc.ChainStreamInterceptor(s.streamMetricsInterceptor, s.streamAuditInterceptor, s.streamAuthInterceptor),
 	)
 	pb.RegisterFileServiceServer(s.grpcServer, s)
 	return s
+}
+
+func (s *Server) unaryAuditInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	resp, err := handler(ctx, req)
+	s.auditRPC(ctx, info.FullMethod, err)
+	return resp, err
+}
+
+func (s *Server) streamAuditInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	err := handler(srv, ss)
+	s.auditRPC(ss.Context(), info.FullMethod, err)
+	return err
+}
+
+func (s *Server) auditRPC(ctx context.Context, method string, err error) {
+	if s.auditWriter == nil {
+		return
+	}
+	clientIP := ""
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		clientIP = p.Addr.String()
+	}
+	userIdentifier := "anonymous"
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if len(md.Get("x-api-key")) > 0 {
+			userIdentifier = "api-key:***"
+		} else if len(md.Get("authorization")) > 0 {
+			userIdentifier = "authorization:***"
+		}
+	}
+	code := status.Code(err)
+	s.auditWriter.Submit(&database.AuditLog{
+		ID:             utils.GenerateUUID(),
+		Timestamp:      utils.GetCurrentTimestamp(),
+		Operation:      "grpc_request",
+		ResourcePath:   method,
+		UserIdentifier: userIdentifier,
+		ClientIP:       clientIP,
+		UserAgent:      "grpc",
+		Success:        err == nil,
+		Details:        "code=" + code.String(),
+	})
 }
 
 func (s *Server) unaryAuthInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
@@ -107,7 +155,7 @@ func (s *Server) unaryMetricsInterceptor(ctx context.Context, req interface{}, i
 	if s.metricsSvc != nil {
 		start := time.Now()
 		resp, err := handler(ctx, req)
-		s.metricsSvc.RecordHTTPRequest("gRPC", info.FullMethod, statusCodeFromErr(err), time.Since(start))
+		s.metricsSvc.RecordGRPCRequest(info.FullMethod, status.Code(err).String(), time.Since(start))
 		return resp, err
 	}
 	return handler(ctx, req)
@@ -117,17 +165,10 @@ func (s *Server) streamMetricsInterceptor(srv interface{}, ss grpc.ServerStream,
 	if s.metricsSvc != nil {
 		start := time.Now()
 		err := handler(srv, ss)
-		s.metricsSvc.RecordHTTPRequest("gRPC", info.FullMethod, statusCodeFromErr(err), time.Since(start))
+		s.metricsSvc.RecordGRPCRequest(info.FullMethod, status.Code(err).String(), time.Since(start))
 		return err
 	}
 	return handler(srv, ss)
-}
-
-func statusCodeFromErr(err error) int {
-	if err == nil {
-		return 200
-	}
-	return 500
 }
 
 func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
@@ -267,9 +308,20 @@ func (s *Server) Stop() {
 			s.grpcServer.Stop()
 		}
 	}
+	if s.auditWriter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.auditWriter.Close(ctx); err != nil {
+			logger.Warn("failed to flush gRPC audit logs: %v", err)
+		}
+	}
 }
 
 func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, pb.UploadResponse]) error {
+	if s.metricsSvc != nil {
+		s.metricsSvc.IncActiveUploads()
+		defer s.metricsSvc.DecActiveUploads()
+	}
 	// 读取元数据（必须为第一条消息）
 	req, err := stream.Recv()
 	if err != nil {
@@ -321,7 +373,7 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 	// 单消息上限 4MB 已隐式约束，但显式守卫可防御未来调大 MaxRecvMsgSize
 	// 的配置变更导致大文件全量驻留内存。
 	nextReq, nextErr := stream.Recv()
-	if nextErr == io.EOF && firstChunk.Offset == 0 && int64(len(firstChunk.Data)) == meta.TotalSize && int64(len(firstChunk.Data)) <= grpcFastPathMaxSize {
+	if nextErr == io.EOF && firstChunk.Offset == 0 && int64(len(firstChunk.Data)) == meta.TotalSize && int64(len(firstChunk.Data)) <= grpcFastPathMaxSize && (s.cryptoSvc == nil || !s.cryptoSvc.IsEnabled()) {
 		return s.uploadFileFastPath(stream, meta, firstChunk.Data)
 	}
 
@@ -375,21 +427,18 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 	if err != nil {
 		return fmt.Errorf("failed to complete upload: %w", err)
 	}
-	_ = result // hash verification status is surfaced via HTTP API; gRPC response already carries file metadata
-
-	fileMeta, err := s.fm.GetFileMetadata(meta.Path)
-	if err != nil {
-		return fmt.Errorf("failed to get file metadata after upload: %w", err)
+	if s.metricsSvc != nil {
+		s.metricsSvc.RecordUpload(float64(result.UploadedSize))
 	}
 
-	createdAt, _ := parseTimestamp(fileMeta.CreatedAt)
+	createdAt, _ := parseTimestamp(result.CreatedAt)
 
 	return stream.SendAndClose(&pb.UploadResponse{
-		Id:        fileMeta.ID,
-		Path:      fileMeta.Path,
-		Name:      fileMeta.Name,
-		Size:      fileMeta.Size,
-		Hash:      fileMeta.Hash,
+		Id:        result.FileID,
+		Path:      result.FilePath,
+		Name:      result.FileName,
+		Size:      result.UploadedSize,
+		Hash:      result.FileHash,
 		CreatedAt: createdAt,
 	})
 }
@@ -416,6 +465,9 @@ func (s *Server) uploadFileFastPath(stream grpc.ClientStreamingServer[pb.UploadR
 	if err != nil {
 		return fmt.Errorf("failed to upload file: %w", err)
 	}
+	if s.metricsSvc != nil {
+		s.metricsSvc.RecordUpload(float64(fileMeta.Size))
+	}
 	createdAt, _ := parseTimestamp(fileMeta.CreatedAt)
 	return stream.SendAndClose(&pb.UploadResponse{
 		Id:        fileMeta.ID,
@@ -431,10 +483,11 @@ func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreami
 	if !utils.IsValidFilePath(req.Path) {
 		return status.Error(codes.InvalidArgument, "invalid file path")
 	}
-	meta, err := s.fm.GetFileMetadata(req.Path)
+	meta, releaseRead, err := s.fm.BeginRead(req.Path)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata: %w", err)
 	}
+	defer releaseRead()
 
 	chunkSize := int(req.ChunkSize)
 	if chunkSize <= 0 {
@@ -452,8 +505,22 @@ func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreami
 		offset = req.Offset
 	}
 
+	var encryptedSessionID string
+	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
+		encryptedSessionID, err = s.transferSvc.CreateDownloadSession(req.Path, "")
+		if err != nil {
+			return fmt.Errorf("failed to create encrypted download session: %w", err)
+		}
+		defer s.transferSvc.CompleteDownload(encryptedSessionID)
+	}
+
 	for offset < meta.Size {
-		data, err := s.fm.DownloadFileDataAt(meta, chunkSize, offset)
+		var data []byte
+		if encryptedSessionID != "" {
+			data, err = s.transferSvc.DownloadChunk(encryptedSessionID, chunkSize, offset)
+		} else {
+			data, err = s.fm.DownloadFileDataAt(meta, chunkSize, offset)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to read file chunk: %w", err)
 		}

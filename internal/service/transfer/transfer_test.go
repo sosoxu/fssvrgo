@@ -2,15 +2,19 @@ package transfer
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/config"
+	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
@@ -123,6 +127,155 @@ func TestUploadChunk(t *testing.T) {
 	}
 }
 
+func TestUploadChunkRejectsNonSequentialOffsets(t *testing.T) {
+	svc, _, _ := setupTestEnv(t)
+
+	sessionID, err := svc.CreateUploadSession("sequential.txt", "sequential.txt", 8, "client1", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession failed: %v", err)
+	}
+	if err := svc.UploadChunk(sessionID, []byte("abcd"), 0); err != nil {
+		t.Fatalf("first UploadChunk failed: %v", err)
+	}
+	if err := svc.UploadChunk(sessionID, []byte("xx"), 2); err == nil {
+		t.Fatal("expected overlapping chunk to be rejected")
+	}
+	if err := svc.UploadChunk(sessionID, []byte("yy"), 6); err == nil {
+		t.Fatal("expected offset gap to be rejected")
+	}
+	if err := svc.UploadChunk(sessionID, []byte("efgh"), 4); err != nil {
+		t.Fatalf("second sequential UploadChunk failed: %v", err)
+	}
+	if _, err := svc.CompleteUpload(sessionID); err != nil {
+		t.Fatalf("CompleteUpload failed: %v", err)
+	}
+}
+
+func TestSequentialUploadResumesOnAnotherInstance(t *testing.T) {
+	svc1, store, db := setupTestEnv(t)
+	sharedSessions := distributed.NewMemorySessionStore()
+	sharedLock := distributed.NewLocalDistributedLock()
+	sharedTemp := t.TempDir()
+	svc1.sessionStore = sharedSessions
+	svc1.distLock = sharedLock
+	if err := svc1.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc1: %v", err)
+	}
+	svc2 := NewFileTransferServiceWithRedis(store, db, sharedSessions, sharedLock)
+	if err := svc2.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc2: %v", err)
+	}
+
+	sessionID, err := svc1.CreateUploadSession("resume-sequential.txt", "resume-sequential.txt", 8, "client", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if err := svc1.UploadChunk(sessionID, []byte("abcd"), 0); err != nil {
+		t.Fatalf("UploadChunk on first instance: %v", err)
+	}
+	if err := svc2.UploadChunk(sessionID, []byte("efgh"), 4); err != nil {
+		t.Fatalf("UploadChunk on second instance: %v", err)
+	}
+	if _, err := svc2.CompleteUpload(sessionID); err != nil {
+		t.Fatalf("CompleteUpload on second instance: %v", err)
+	}
+	if active := atomic.LoadInt64(&svc2.sessionCount); active != 0 {
+		t.Fatalf("second instance active session count = %d, want 0", active)
+	}
+	data, err := store.Read("resume-sequential.txt")
+	if err != nil {
+		t.Fatalf("Read completed upload: %v", err)
+	}
+	if string(data) != "abcdefgh" {
+		t.Fatalf("completed data = %q, want %q", data, "abcdefgh")
+	}
+}
+
+func TestEncryptedDownloadResumesOnAnotherInstance(t *testing.T) {
+	svc1, store, db := setupTestEnv(t)
+	sharedSessions := distributed.NewMemorySessionStore()
+	sharedLock := distributed.NewLocalDistributedLock()
+	svc1.sessionStore = sharedSessions
+	svc1.distLock = sharedLock
+	svc2 := NewFileTransferServiceWithRedis(store, db, sharedSessions, sharedLock)
+	cryptoSvc := crypto.NewCryptoService()
+	if err := cryptoSvc.Init("test-encryption-key"); err != nil {
+		t.Fatalf("initialize crypto: %v", err)
+	}
+	svc1.SetCryptoService(cryptoSvc)
+	svc2.SetCryptoService(cryptoSvc)
+
+	plaintext := []byte("cross-instance encrypted download")
+	sessionID, err := svc1.CreateUploadSession("encrypted.bin", "encrypted.bin", int64(len(plaintext)), "client", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if err := svc1.UploadChunk(sessionID, plaintext, 0); err != nil {
+		t.Fatalf("UploadChunk: %v", err)
+	}
+	if _, err := svc1.CompleteUpload(sessionID); err != nil {
+		t.Fatalf("CompleteUpload: %v", err)
+	}
+
+	downloadID, err := svc1.CreateDownloadSession("encrypted.bin", "client")
+	if err != nil {
+		t.Fatalf("CreateDownloadSession: %v", err)
+	}
+	data, err := svc2.DownloadChunk(downloadID, len(plaintext), 0)
+	if err != nil {
+		t.Fatalf("DownloadChunk on second instance: %v", err)
+	}
+	if !bytes.Equal(data, plaintext) {
+		t.Fatalf("resumed plaintext = %q, want %q", data, plaintext)
+	}
+	if err := svc2.CompleteDownload(downloadID); err != nil {
+		t.Fatalf("CompleteDownload on second instance: %v", err)
+	}
+}
+
+func TestMultipartUploadResumesOnAnotherInstance(t *testing.T) {
+	svc1, store, db := setupTestEnv(t)
+	sharedSessions := distributed.NewMemorySessionStore()
+	sharedLock := distributed.NewLocalDistributedLock()
+	sharedTemp := t.TempDir()
+	svc1.sessionStore = sharedSessions
+	svc1.distLock = sharedLock
+	if err := svc1.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc1: %v", err)
+	}
+	svc2 := NewFileTransferServiceWithRedis(store, db, sharedSessions, sharedLock)
+	if err := svc2.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc2: %v", err)
+	}
+
+	sessionID, _, err := svc1.CreateMultipartUpload("resume-multipart.txt", "resume-multipart.txt", 8, "client", "")
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+	if err := svc1.UploadPartData(sessionID, 1, 0, []byte("abcd")); err != nil {
+		t.Fatalf("UploadPartData on first instance: %v", err)
+	}
+	if uploaded, total, parts := svc2.GetMultipartUploadProgress(sessionID); uploaded != 4 || total != 8 || parts != 1 {
+		t.Fatalf("restored progress = (%d,%d,%d), want (4,8,1)", uploaded, total, parts)
+	}
+	if err := svc2.UploadPartData(sessionID, 2, 4, []byte("efgh")); err != nil {
+		t.Fatalf("UploadPartData on second instance: %v", err)
+	}
+	if err := svc2.CompleteMultipartUpload(sessionID); err != nil {
+		t.Fatalf("CompleteMultipartUpload on second instance: %v", err)
+	}
+	if active := atomic.LoadInt64(&svc2.sessionCount); active != 0 {
+		t.Fatalf("second instance active session count = %d, want 0", active)
+	}
+	data, err := store.Read("resume-multipart.txt")
+	if err != nil {
+		t.Fatalf("Read completed upload: %v", err)
+	}
+	if string(data) != "abcdefgh" {
+		t.Fatalf("completed data = %q, want %q", data, "abcdefgh")
+	}
+}
+
 func TestCompleteUpload(t *testing.T) {
 	svc, _, db := setupTestEnv(t)
 
@@ -149,6 +302,134 @@ func TestCompleteUpload(t *testing.T) {
 	}
 	if meta.Size != int64(len(data)) {
 		t.Errorf("expected size %d, got %d", len(data), meta.Size)
+	}
+}
+
+func TestCompleteUploadIsIdempotentAfterSessionCacheLoss(t *testing.T) {
+	svc, store, db := setupTestEnv(t)
+	data := []byte("idempotent completion")
+	sessionID, err := svc.CreateUploadSession("idempotent.txt", "idempotent.txt", int64(len(data)), "client", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if err := svc.UploadChunk(sessionID, data, 0); err != nil {
+		t.Fatalf("UploadChunk: %v", err)
+	}
+	first, err := svc.CompleteUpload(sessionID)
+	if err != nil {
+		t.Fatalf("first CompleteUpload: %v", err)
+	}
+	if err := svc.sessionStore.Delete(context.Background(), "upload", sessionID); err != nil {
+		t.Fatalf("delete cached terminal state: %v", err)
+	}
+	svc2 := NewFileTransferService(store, db)
+	second, err := svc2.CompleteUpload(sessionID)
+	if err != nil {
+		t.Fatalf("idempotent CompleteUpload: %v", err)
+	}
+	if *first != *second {
+		t.Fatalf("completion result changed: first=%+v second=%+v", first, second)
+	}
+	if got, err := store.Read("idempotent.txt"); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("committed file changed: data=%q err=%v", got, err)
+	}
+}
+
+func TestCompleteUploadRollsBackWhenTerminalLedgerFails(t *testing.T) {
+	svc, store, db := setupTestEnv(t)
+	if _, err := db.Exec(`CREATE TRIGGER fail_upload_terminal BEFORE INSERT ON transfer_session_results
+		WHEN NEW.session_type = 'upload' BEGIN SELECT RAISE(FAIL, 'forced terminal failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	data := []byte("must roll back")
+	sessionID, err := svc.CreateUploadSession("ledger-failure.txt", "ledger-failure.txt", int64(len(data)), "client", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if err := svc.UploadChunk(sessionID, data, 0); err != nil {
+		t.Fatalf("UploadChunk: %v", err)
+	}
+	if _, err := svc.CompleteUpload(sessionID); err == nil {
+		t.Fatal("expected terminal ledger failure")
+	}
+	meta, err := database.NewFileMetadataService(db).GetByPath("ledger-failure.txt")
+	if err != nil {
+		t.Fatalf("GetByPath: %v", err)
+	}
+	if meta != nil || store.Exists("ledger-failure.txt") {
+		t.Fatalf("failed completion left metadata=%v storageExists=%v", meta, store.Exists("ledger-failure.txt"))
+	}
+}
+
+func TestCompleteMultipartUploadIsIdempotentAfterSessionCacheLoss(t *testing.T) {
+	svc, store, db := setupTestEnv(t)
+	data := []byte("multipart-idempotent")
+	sessionID, _, err := svc.CreateMultipartUpload("multipart-idempotent.txt", "multipart-idempotent.txt", int64(len(data)), "client", "")
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+	if err := svc.UploadPartData(sessionID, 1, 0, data); err != nil {
+		t.Fatalf("UploadPartData: %v", err)
+	}
+	if err := svc.CompleteMultipartUpload(sessionID); err != nil {
+		t.Fatalf("first CompleteMultipartUpload: %v", err)
+	}
+	if err := svc.sessionStore.Delete(context.Background(), "multipart_upload", sessionID); err != nil {
+		t.Fatalf("delete cached terminal state: %v", err)
+	}
+	svc2 := NewFileTransferService(store, db)
+	if err := svc2.CompleteMultipartUpload(sessionID); err != nil {
+		t.Fatalf("idempotent CompleteMultipartUpload: %v", err)
+	}
+	if got, err := store.Read("multipart-idempotent.txt"); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("committed multipart file changed: data=%q err=%v", got, err)
+	}
+}
+
+func TestCompleteMultipartUploadRollsBackWhenTerminalLedgerFails(t *testing.T) {
+	svc, store, db := setupTestEnv(t)
+	if _, err := db.Exec(`CREATE TRIGGER fail_multipart_terminal BEFORE INSERT ON transfer_session_results
+		WHEN NEW.session_type = 'multipart' BEGIN SELECT RAISE(FAIL, 'forced terminal failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	data := []byte("multipart rollback")
+	sessionID, _, err := svc.CreateMultipartUpload("multipart-ledger-failure.txt", "multipart-ledger-failure.txt", int64(len(data)), "client", "")
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+	if err := svc.UploadPartData(sessionID, 1, 0, data); err != nil {
+		t.Fatalf("UploadPartData: %v", err)
+	}
+	if err := svc.CompleteMultipartUpload(sessionID); err == nil {
+		t.Fatal("expected terminal ledger failure")
+	}
+	meta, err := database.NewFileMetadataService(db).GetByPath("multipart-ledger-failure.txt")
+	if err != nil {
+		t.Fatalf("GetByPath: %v", err)
+	}
+	if meta != nil || store.Exists("multipart-ledger-failure.txt") {
+		t.Fatalf("failed multipart completion left metadata=%v storageExists=%v", meta, store.Exists("multipart-ledger-failure.txt"))
+	}
+}
+
+func TestAbortMultipartUploadIsIdempotentAfterSessionCacheLoss(t *testing.T) {
+	svc, store, db := setupTestEnv(t)
+	sessionID, _, err := svc.CreateMultipartUpload("multipart-abort.txt", "multipart-abort.txt", 8, "client", "")
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+	if err := svc.AbortMultipartUpload(sessionID); err != nil {
+		t.Fatalf("first AbortMultipartUpload: %v", err)
+	}
+	if err := svc.sessionStore.Delete(context.Background(), "multipart_upload", sessionID); err != nil {
+		t.Fatalf("delete cached terminal state: %v", err)
+	}
+	svc2 := NewFileTransferService(store, db)
+	if err := svc2.AbortMultipartUpload(sessionID); err != nil {
+		t.Fatalf("idempotent AbortMultipartUpload: %v", err)
+	}
+	if err := svc2.UploadPartData(sessionID, 1, 0, []byte("12345678")); err == nil {
+		t.Fatal("aborted multipart session accepted a part after cache loss")
 	}
 }
 
@@ -210,6 +491,27 @@ func TestAbortUpload(t *testing.T) {
 	}
 }
 
+func TestAbortUploadIsIdempotentAfterSessionCacheLoss(t *testing.T) {
+	svc, store, db := setupTestEnv(t)
+	sessionID, err := svc.CreateUploadSession("abort-idempotent.txt", "abort-idempotent.txt", 8, "client", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if err := svc.AbortUpload(sessionID); err != nil {
+		t.Fatalf("first AbortUpload: %v", err)
+	}
+	if err := svc.sessionStore.Delete(context.Background(), "upload", sessionID); err != nil {
+		t.Fatalf("delete cached terminal state: %v", err)
+	}
+	svc2 := NewFileTransferService(store, db)
+	if err := svc2.AbortUpload(sessionID); err != nil {
+		t.Fatalf("idempotent AbortUpload: %v", err)
+	}
+	if err := svc2.UploadChunk(sessionID, []byte("12345678"), 0); err == nil {
+		t.Fatal("aborted session accepted a chunk after cache loss")
+	}
+}
+
 func TestGetUploadProgress(t *testing.T) {
 	svc, _, _ := setupTestEnv(t)
 
@@ -231,6 +533,33 @@ func TestGetUploadProgress(t *testing.T) {
 	progress = svc.GetUploadProgress(sessionID)
 	if progress != int64(len(chunk)) {
 		t.Errorf("expected progress %d, got %d", len(chunk), progress)
+	}
+}
+
+func TestGetUploadProgressFromSharedSessionStore(t *testing.T) {
+	svc1, store, db := setupTestEnv(t)
+	sharedSessions := distributed.NewMemorySessionStore()
+	sharedLock := distributed.NewLocalDistributedLock()
+	sharedTemp := t.TempDir()
+	svc1.sessionStore = sharedSessions
+	svc1.distLock = sharedLock
+	if err := svc1.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc1: %v", err)
+	}
+	svc2 := NewFileTransferServiceWithRedis(store, db, sharedSessions, sharedLock)
+	if err := svc2.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc2: %v", err)
+	}
+
+	sessionID, err := svc1.CreateUploadSession("shared-progress.txt", "shared-progress.txt", 8, "client", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if err := svc1.UploadChunk(sessionID, []byte("abcd"), 0); err != nil {
+		t.Fatalf("UploadChunk: %v", err)
+	}
+	if got := svc2.GetUploadProgress(sessionID); got != 4 {
+		t.Fatalf("cross-instance progress = %d, want 4", got)
 	}
 }
 
@@ -408,13 +737,57 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	}
 
 	session, _ := svc.GetUploadSession(sessionID)
-	session.CreatedAt = utils.FormatTimestamp(time.Now().Add(-2 * time.Hour))
+	old := utils.FormatTimestamp(time.Now().Add(-2 * time.Hour))
+	session.CreatedAt = old
+	session.UpdatedAt = old
+	if err := svc.sessionStore.Set(context.Background(), "upload", sessionID, session, 2*time.Hour); err != nil {
+		t.Fatalf("persist expired session: %v", err)
+	}
 
 	svc.CleanupExpiredSessions(3600)
 
 	_, err = svc.GetUploadSession(sessionID)
 	if err == nil {
 		t.Errorf("expected expired session to be cleaned up, got nil")
+	}
+}
+
+func TestCleanupExpiredSessionsUsesSharedLastActivity(t *testing.T) {
+	svc1, store, db := setupTestEnv(t)
+	sharedSessions := distributed.NewMemorySessionStore()
+	sharedLock := distributed.NewLocalDistributedLock()
+	sharedTemp := t.TempDir()
+	svc1.sessionStore = sharedSessions
+	svc1.distLock = sharedLock
+	if err := svc1.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc1: %v", err)
+	}
+	svc2 := NewFileTransferServiceWithRedis(store, db, sharedSessions, sharedLock)
+	if err := svc2.SetTempDir(sharedTemp); err != nil {
+		t.Fatalf("SetTempDir svc2: %v", err)
+	}
+
+	sessionID, err := svc1.CreateUploadSession("active.txt", "active.txt", 8, "client", "")
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	local, err := svc1.GetUploadSession(sessionID)
+	if err != nil {
+		t.Fatalf("GetUploadSession: %v", err)
+	}
+	local.CreatedAt = utils.FormatTimestamp(time.Now().Add(-2 * time.Hour))
+	local.UpdatedAt = local.CreatedAt
+
+	if err := svc2.UploadChunk(sessionID, []byte("abcd"), 0); err != nil {
+		t.Fatalf("UploadChunk on second instance: %v", err)
+	}
+	svc1.CleanupExpiredSessions(3600)
+
+	if got := svc2.GetUploadProgress(sessionID); got != 4 {
+		t.Fatalf("active shared session was cleaned, progress = %d, want 4", got)
+	}
+	if _, err := os.Stat(filepath.Join(sharedTemp, sessionID+".tmp")); err != nil {
+		t.Fatalf("active shared temp file was removed: %v", err)
 	}
 }
 

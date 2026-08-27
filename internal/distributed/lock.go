@@ -18,6 +18,36 @@ type DistributedLock interface {
 	Extend(ctx context.Context, key string, token string, ttl time.Duration) error
 }
 
+type LockLease struct {
+	Token  string
+	cancel context.CancelFunc
+	mu     sync.RWMutex
+	lost   error
+}
+
+func (l *LockLease) Stop() {
+	if l != nil && l.cancel != nil {
+		l.cancel()
+	}
+}
+
+func (l *LockLease) Err() error {
+	if l == nil {
+		return ErrLockNotHeld
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.lost
+}
+
+func (l *LockLease) markLost(err error) {
+	l.mu.Lock()
+	if l.lost == nil {
+		l.lost = err
+	}
+	l.mu.Unlock()
+}
+
 type RedisDistributedLock struct {
 	client *redis.Client
 }
@@ -228,12 +258,23 @@ func generateToken() string {
 // essential for long-running operations (e.g. large file uploads) where the
 // lock TTL would otherwise expire before the operation completes.
 func AcquireLockWithRenewal(ctx context.Context, dl DistributedLock, key string, ttl time.Duration, retryCount int, retryDelay time.Duration) (string, context.CancelFunc, error) {
-	token, err := AcquireLock(ctx, dl, key, ttl, retryCount, retryDelay)
+	lease, err := AcquireLockLease(ctx, dl, key, ttl, retryCount, retryDelay)
 	if err != nil {
 		return "", nil, err
 	}
+	return lease.Token, lease.Stop, nil
+}
+
+// AcquireLockLease exposes renewal failure through Err. Durable write paths
+// must check the lease immediately before committing metadata.
+func AcquireLockLease(ctx context.Context, dl DistributedLock, key string, ttl time.Duration, retryCount int, retryDelay time.Duration) (*LockLease, error) {
+	token, err := AcquireLock(ctx, dl, key, ttl, retryCount, retryDelay)
+	if err != nil {
+		return nil, err
+	}
 
 	renewCtx, cancel := context.WithCancel(ctx)
+	lease := &LockLease{Token: token, cancel: cancel}
 	go func() {
 		interval := ttl / 3
 		if interval < 2*time.Second {
@@ -247,6 +288,7 @@ func AcquireLockWithRenewal(ctx context.Context, dl DistributedLock, key string,
 				renewCtx2, cancel2 := context.WithTimeout(renewCtx, 5*time.Second)
 				if err := dl.Extend(renewCtx2, key, token, ttl); err != nil {
 					cancel2()
+					lease.markLost(fmt.Errorf("lock lease lost for %s: %w", key, err))
 					return
 				}
 				cancel2()
@@ -256,7 +298,7 @@ func AcquireLockWithRenewal(ctx context.Context, dl DistributedLock, key string,
 		}
 	}()
 
-	return token, cancel, nil
+	return lease, nil
 }
 
 var (

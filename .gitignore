@@ -1,6 +1,8 @@
 perfbench
 tests.test
 fsserver
+*.test
+tk.txt
 
 # 性能测试产物（日志、Redis 转储）
 *.log

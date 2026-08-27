@@ -67,19 +67,7 @@ type CompCluster struct {
 type compClusterConfig struct {
 	storageType string // "local" or "minio"
 	useRedis    bool   // enable Redis distributed lock + session store
-	usePgSQL    bool   // enable PostgreSQL (true) or SQLite (false)
 	numInstance int    // number of fsserver instances
-}
-
-// resetPgDB wipes all tables so each test starts from a clean PostgreSQL state.
-func resetPgDB(t *testing.T, qdb *database.DB) {
-	t.Helper()
-	for _, tbl := range []string{"transfer_tasks", "audit_log", "api_keys", "files", "directories", "schema_migrations"} {
-		if _, err := qdb.Exec("DELETE FROM " + tbl); err != nil {
-			// Table may not exist yet on first run; ignore.
-			_ = err
-		}
-	}
 }
 
 // NewCompCluster builds a cluster with the requested backends.
@@ -99,32 +87,7 @@ func NewCompCluster(t *testing.T, cfg compClusterConfig) *CompCluster {
 	_ = logger.Initialize("", "error")
 
 	// --- Database ---
-	var dbCfg config.DatabaseConfig
-	if cfg.usePgSQL {
-		dbCfg = config.DatabaseConfig{
-			Type:     "postgresql",
-			Host:     "localhost",
-			Port:     5432,
-			Name:     "fsserver",
-			User:     "fsserver",
-			Password: "fsserver123",
-			SSLMode:  "disable",
-		}
-	} else {
-		dbCfg = config.DatabaseConfig{Type: "sqlite", Path: filepath.Join(tempDir, "test.db")}
-	}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		os.RemoveAll(tempDir)
-		if cfg.usePgSQL {
-			t.Skipf("PostgreSQL not available: %v", err)
-		}
-		t.Fatalf("connect database: %v", err)
-	}
-	qdb := dbObj.GetQueryDB()
-	if cfg.usePgSQL {
-		resetPgDB(t, qdb)
-	}
+	dbObj, qdb := connectPostgreSQLTestDB(t, 25)
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1, Name: "initial_schema",
@@ -395,14 +358,14 @@ func formatBytes(b int64) string {
 }
 
 // ---------------------------------------------------------------------------
-// SECTION 1: MinIO object storage tests (HTTP + service layer / "gRPC")
+// SECTION 1: MinIO object storage tests (HTTP + service layer)
 // ---------------------------------------------------------------------------
 
 // TestComprehensive_MinIO_Basic verifies CRUD operations against MinIO object
-// storage using the HTTP API and the service layer (gRPC-equivalent path).
+// storage using the HTTP API and the service layer.
 func TestComprehensive_MinIO_Basic(t *testing.T) {
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "minio", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "minio", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -439,7 +402,7 @@ func TestComprehensive_MinIO_Basic(t *testing.T) {
 		t.Run(fmt.Sprintf("ServiceLayer_%s", formatBytes(int64(size))), func(t *testing.T) {
 			data := genData(size)
 			path := fmt.Sprintf("minio/svc/%d.bin", size)
-			// Upload via FileManager (gRPC service layer equivalent)
+			// Upload directly via FileManager.
 			meta, err := inst.FM.UploadFile(path, data)
 			if err != nil {
 				t.Fatalf("UploadFile: %v", err)
@@ -504,7 +467,7 @@ func TestComprehensive_MinIO_Basic(t *testing.T) {
 // MinIO object storage with Redis session store.
 func TestComprehensive_MinIO_Streaming(t *testing.T) {
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "minio", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "minio", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -537,7 +500,7 @@ func TestComprehensive_GB_HttpStreaming(t *testing.T) {
 		t.Skip("skipping GB-level test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "local", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -655,7 +618,7 @@ func TestComprehensive_GB_Multipart(t *testing.T) {
 		t.Skip("skipping GB-level test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "local", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -803,13 +766,13 @@ func TestComprehensive_GB_Multipart(t *testing.T) {
 }
 
 // TestComprehensive_GB_ServiceLayer tests 1GB upload/download via the service
-// layer (gRPC-equivalent path) with Redis + PostgreSQL + local storage.
+// layer with Redis + PostgreSQL + local storage.
 func TestComprehensive_GB_ServiceLayer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping GB-level test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "local", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -906,10 +869,10 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 	}
 
 	sizes := []int64{
-		1 * 1024,        // 1KB
-		64 * 1024,       // 64KB
-		1024 * 1024,     // 1MB
-		10 * 1024 * 1024, // 10MB
+		1 * 1024,          // 1KB
+		64 * 1024,         // 64KB
+		1024 * 1024,       // 1MB
+		10 * 1024 * 1024,  // 10MB
 		100 * 1024 * 1024, // 100MB
 	}
 
@@ -919,16 +882,16 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 	for _, st := range storageTypes {
 		t.Run("storage_"+st, func(t *testing.T) {
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: 1,
+				storageType: st, useRedis: true, numInstance: 1,
 			})
 			defer cluster.Cleanup()
 			inst := cluster.Instances[0]
 
 			for _, size := range sizes {
 				// --- HTTP upload/download ---
-			data := genData(int(size))
-			hash := compSha256Hex(data)
-			pathHTTP := fmt.Sprintf("perf/%s/http/%s.bin", st, formatBytes(size))
+				data := genData(int(size))
+				hash := compSha256Hex(data)
+				pathHTTP := fmt.Sprintf("perf/%s/http/%s.bin", st, formatBytes(size))
 
 				// HTTP upload
 				upStart := time.Now()
@@ -942,8 +905,8 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 				// HTTP download
 				dlStart := time.Now()
 				got := httpDownload(t, inst.BaseURL, pathHTTP)
-			dlElapsed := time.Since(dlStart)
-			hashOK := compSha256Hex(got) == hash
+				dlElapsed := time.Since(dlStart)
+				hashOK := compSha256Hex(got) == hash
 
 				records = append(records, perfRecord{
 					Operation: "upload", Storage: st, Protocol: "HTTP",
@@ -958,7 +921,7 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 					HashOK: hashOK,
 				})
 
-				// --- Service layer (gRPC-equivalent) upload/download ---
+				// --- Direct service-layer upload/download ---
 				pathSL := fmt.Sprintf("perf/%s/svc/%s.bin", st, formatBytes(size))
 				upStart = time.Now()
 				_, err := inst.FM.UploadFile(pathSL, data)
@@ -972,17 +935,17 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 				if err != nil {
 					t.Fatalf("svc download %s: %v", formatBytes(size), err)
 				}
-			dlElapsed = time.Since(dlStart)
-			hashOK = compSha256Hex(got) == hash
+				dlElapsed = time.Since(dlStart)
+				hashOK = compSha256Hex(got) == hash
 
 				records = append(records, perfRecord{
-					Operation: "upload", Storage: st, Protocol: "gRPC",
+					Operation: "upload", Storage: st, Protocol: "Service",
 					FileSize: formatBytes(size), SizeBytes: size,
 					Duration: upElapsed, Throughput: float64(size) / 1024 / 1024 / upElapsed.Seconds(),
 					HashOK: true,
 				})
 				records = append(records, perfRecord{
-					Operation: "download", Storage: st, Protocol: "gRPC",
+					Operation: "download", Storage: st, Protocol: "Service",
 					FileSize: formatBytes(size), SizeBytes: size,
 					Duration: dlElapsed, Throughput: float64(size) / 1024 / 1024 / dlElapsed.Seconds(),
 					HashOK: hashOK,
@@ -1044,7 +1007,7 @@ func TestComprehensive_Stress_ConcurrentUploads(t *testing.T) {
 				numInst = 1
 			}
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: numInst,
+				storageType: st, useRedis: true, numInstance: numInst,
 			})
 			defer cluster.Cleanup()
 
@@ -1120,7 +1083,7 @@ func TestComprehensive_Stress_MixedWorkload(t *testing.T) {
 				numInst = 1
 			}
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: numInst,
+				storageType: st, useRedis: true, numInstance: numInst,
 			})
 			defer cluster.Cleanup()
 
@@ -1169,12 +1132,16 @@ func TestComprehensive_Stress_MixedWorkload(t *testing.T) {
 								continue
 							}
 							resp.Body.Close()
-							mu.Lock(); opCounts["download"]++; mu.Unlock()
+							mu.Lock()
+							opCounts["download"]++
+							mu.Unlock()
 						case 2, 3: // upload new file
 							path := fmt.Sprintf("mixed/%s/w%d-o%d.bin", st, workerID, op)
 							resp := httpUpload(t, inst.BaseURL, path, genData(fileSize))
 							resp.Body.Close()
-							mu.Lock(); opCounts["upload"]++; mu.Unlock()
+							mu.Lock()
+							opCounts["upload"]++
+							mu.Unlock()
 						case 4: // delete a file (may already be deleted — that's OK)
 							idx := (workerID*opsPerWorker + op) % prePopulate
 							path := fmt.Sprintf("mixed/%s/pre-%d.bin", st, idx)
@@ -1185,7 +1152,9 @@ func TestComprehensive_Stress_MixedWorkload(t *testing.T) {
 								continue
 							}
 							resp.Body.Close()
-							mu.Lock(); opCounts["delete"]++; mu.Unlock()
+							mu.Lock()
+							opCounts["delete"]++
+							mu.Unlock()
 						}
 					}
 				}(w)
@@ -1219,7 +1188,7 @@ func TestComprehensive_Stress_RedisLock_Mutex(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 3,
+		storageType: "local", useRedis: true, numInstance: 3,
 	})
 	defer cluster.Cleanup()
 
@@ -1240,7 +1209,9 @@ func TestComprehensive_Stress_RedisLock_Mutex(t *testing.T) {
 			resp := httpUpload(t, inst.BaseURL, path, data)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusCreated {
-				mu.Lock(); successCount++; mu.Unlock()
+				mu.Lock()
+				successCount++
+				mu.Unlock()
 			}
 		}(w)
 	}
@@ -1273,7 +1244,7 @@ func TestComprehensive_MultiInstance_Consistency(t *testing.T) {
 	for _, st := range storageTypes {
 		t.Run("storage_"+st, func(t *testing.T) {
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: 3,
+				storageType: st, useRedis: true, numInstance: 3,
 			})
 			defer cluster.Cleanup()
 

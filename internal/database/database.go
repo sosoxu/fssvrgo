@@ -3,8 +3,12 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,11 +19,11 @@ import (
 )
 
 type Database struct {
-	db       *sql.DB
-	config   config.DatabaseConfig
-	dialect  Dialect
-	queryDB  *DB
-	mu       sync.RWMutex
+	db        *sql.DB
+	config    config.DatabaseConfig
+	dialect   Dialect
+	queryDB   *DB
+	mu        sync.RWMutex
 	lastError string
 }
 
@@ -53,6 +57,10 @@ func (d *Database) Connect(cfg config.DatabaseConfig) error {
 	if maxOpenConns < 1 {
 		maxOpenConns = 25
 	}
+	if d.dialect == DialectSQLite && cfg.Path == ":memory:" {
+		// Each :memory: SQLite connection is a separate database.
+		maxOpenConns = 1
+	}
 	maxIdleConns := maxOpenConns
 	if maxIdleConns > 10 {
 		maxIdleConns = 10
@@ -80,7 +88,15 @@ func (d *Database) connectSQLite(cfg config.DatabaseConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", cfg.Path)
+	params := url.Values{}
+	params.Add("_pragma", "busy_timeout=5000")
+	params.Add("_pragma", "journal_mode(WAL)")
+	params.Add("_pragma", "synchronous(NORMAL)")
+	separator := "?"
+	if strings.Contains(cfg.Path, "?") {
+		separator = "&"
+	}
+	db, err := sql.Open("sqlite", cfg.Path+separator+params.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
@@ -108,10 +124,24 @@ func (d *Database) connectPostgreSQL(cfg config.DatabaseConfig) (*sql.DB, error)
 	if sslmode == "" {
 		sslmode = "disable"
 	}
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Name, sslmode)
+	connectTimeoutMs := cfg.ConnectionTimeoutMs
+	if connectTimeoutMs < 1 {
+		connectTimeoutMs = 5000
+	}
+	connectTimeoutSeconds := (connectTimeoutMs + 999) / 1000
 
-	db, err := sql.Open("postgres", dsn)
+	dsnURL := &url.URL{
+		Scheme: "postgres",
+		Host:   net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
+		User:   url.UserPassword(cfg.User, cfg.Password),
+		Path:   "/" + cfg.Name,
+	}
+	params := dsnURL.Query()
+	params.Set("sslmode", sslmode)
+	params.Set("connect_timeout", strconv.Itoa(connectTimeoutSeconds))
+	dsnURL.RawQuery = params.Encode()
+
+	db, err := sql.Open("postgres", dsnURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open postgresql database: %w", err)
 	}

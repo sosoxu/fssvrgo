@@ -97,6 +97,49 @@ func InitTables(db *DB) error {
 	if err := initApiKeyTable(db); err != nil {
 		return err
 	}
+	if err := InitNamespaceLockTable(db); err != nil {
+		return err
+	}
+	if err := InitTransferSessionResultTable(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func InitNamespaceLockTable(db *DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS namespace_lock_holders (
+		path VARCHAR(1024) NOT NULL,
+		token VARCHAR(36) NOT NULL,
+		mode VARCHAR(16) NOT NULL,
+		fence_token BIGINT NOT NULL DEFAULT 0,
+		expires_at TIMESTAMP NOT NULL,
+		PRIMARY KEY (path, token)
+	)`); err != nil {
+		return fmt.Errorf("failed to create namespace lock holders table: %w", err)
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_namespace_locks_expiry ON namespace_lock_holders(expires_at)"); err != nil {
+		return fmt.Errorf("failed to create namespace lock expiry index: %w", err)
+	}
+	if db.dialect == DialectPostgreSQL {
+		if _, err := db.Exec("ALTER TABLE namespace_lock_holders ADD COLUMN IF NOT EXISTS fence_token BIGINT NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("failed to add namespace fencing token column: %w", err)
+		}
+		if _, err := db.Exec("CREATE SEQUENCE IF NOT EXISTS namespace_fence_seq"); err != nil {
+			return fmt.Errorf("failed to create namespace fencing sequence: %w", err)
+		}
+		// Holders created before fencing have the migration default token 0.
+		// Invalidate them instead of allowing an unsequenced writer to commit.
+		if _, err := db.Exec("DELETE FROM namespace_lock_holders WHERE fence_token <= 0"); err != nil {
+			return fmt.Errorf("failed to invalidate legacy namespace holders: %w", err)
+		}
+		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS namespace_fence_heads (
+			path VARCHAR(1024) PRIMARY KEY,
+			fence_token BIGINT NOT NULL,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`); err != nil {
+			return fmt.Errorf("failed to create namespace fencing heads table: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -267,8 +310,43 @@ func (s *FileMetadataService) Create(m *FileMetadata) error {
 	return nil
 }
 
+func (s *FileMetadataService) CreateTx(tx *Tx, m *FileMetadata) error {
+	m.Path = utils.NormalizePath(m.Path)
+	var existingID string
+	err := tx.QueryRow("SELECT id FROM files WHERE path = ? AND is_deleted = TRUE", m.Path).Scan(&existingID)
+	if err == nil {
+		_, err = tx.Exec(`UPDATE files SET id = ?, name = ?, size = ?, hash = ?, storage_type = ?,
+			storage_location = ?, created_at = ?, updated_at = ?, is_deleted = FALSE WHERE path = ?`,
+			m.ID, m.Name, m.Size, m.Hash, m.StorageType, m.StorageLocation, m.CreatedAt, m.UpdatedAt, m.Path)
+		if err != nil {
+			return fmt.Errorf("failed to restore deleted file record: %w", err)
+		}
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check deleted file record: %w", err)
+	}
+	_, err = tx.Exec(`INSERT INTO files (id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ID, m.Path, m.Name, m.Size, m.Hash, m.StorageType, m.StorageLocation, m.CreatedAt, m.UpdatedAt, m.IsDeleted)
+	if err != nil {
+		return fmt.Errorf("failed to create file metadata: %w", err)
+	}
+	return nil
+}
+
 func (s *FileMetadataService) Update(m *FileMetadata) error {
 	_, err := s.db.Exec(`UPDATE files SET path = ?, name = ?, size = ?, hash = ?, storage_type = ?,
+		storage_location = ?, updated_at = ?, is_deleted = ? WHERE id = ?`,
+		m.Path, m.Name, m.Size, m.Hash, m.StorageType, m.StorageLocation, m.UpdatedAt, m.IsDeleted, m.ID)
+	if err != nil {
+		return fmt.Errorf("failed to update file metadata: %w", err)
+	}
+	return nil
+}
+
+func (s *FileMetadataService) UpdateTx(tx *Tx, m *FileMetadata) error {
+	_, err := tx.Exec(`UPDATE files SET path = ?, name = ?, size = ?, hash = ?, storage_type = ?,
 		storage_location = ?, updated_at = ?, is_deleted = ? WHERE id = ?`,
 		m.Path, m.Name, m.Size, m.Hash, m.StorageType, m.StorageLocation, m.UpdatedAt, m.IsDeleted, m.ID)
 	if err != nil {
@@ -285,6 +363,14 @@ func (s *FileMetadataService) Remove(id string) error {
 	return nil
 }
 
+func (s *FileMetadataService) RemoveTx(tx *Tx, id string) error {
+	_, err := tx.Exec("UPDATE files SET is_deleted = TRUE, updated_at = ? WHERE id = ?", time.Now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return fmt.Errorf("failed to remove file metadata: %w", err)
+	}
+	return nil
+}
+
 func (s *FileMetadataService) GetById(id string) (*FileMetadata, error) {
 	row := s.db.QueryRow(`SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted
 		FROM files WHERE id = ? AND is_deleted = FALSE`, id)
@@ -294,6 +380,13 @@ func (s *FileMetadataService) GetById(id string) (*FileMetadata, error) {
 func (s *FileMetadataService) GetByPath(path string) (*FileMetadata, error) {
 	path = utils.NormalizePath(path)
 	row := s.db.QueryRow(`SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted
+		FROM files WHERE path = ? AND is_deleted = FALSE`, path)
+	return scanFileMetadata(row)
+}
+
+func (s *FileMetadataService) GetByPathTx(tx *Tx, path string) (*FileMetadata, error) {
+	path = utils.NormalizePath(path)
+	row := tx.QueryRow(`SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted
 		FROM files WHERE path = ? AND is_deleted = FALSE`, path)
 	return scanFileMetadata(row)
 }
@@ -398,6 +491,30 @@ func (s *DirectoryMetadataService) Create(m *DirectoryMetadata) error {
 	return nil
 }
 
+func (s *DirectoryMetadataService) CreateTx(tx *Tx, m *DirectoryMetadata) error {
+	m.Path = utils.NormalizePath(m.Path)
+	var existingID string
+	err := tx.QueryRow("SELECT id FROM directories WHERE path = ? AND is_deleted = TRUE", m.Path).Scan(&existingID)
+	if err == nil {
+		_, err = tx.Exec(`UPDATE directories SET id = ?, name = ?, created_at = ?, updated_at = ?, is_deleted = FALSE WHERE path = ?`,
+			m.ID, m.Name, m.CreatedAt, m.UpdatedAt, m.Path)
+		if err != nil {
+			return fmt.Errorf("failed to restore deleted directory record: %w", err)
+		}
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check deleted directory record: %w", err)
+	}
+	_, err = tx.Exec(`INSERT INTO directories (id, path, name, created_at, updated_at, is_deleted)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		m.ID, m.Path, m.Name, m.CreatedAt, m.UpdatedAt, m.IsDeleted)
+	if err != nil {
+		return fmt.Errorf("failed to create directory metadata: %w", err)
+	}
+	return nil
+}
+
 func (s *DirectoryMetadataService) Update(m *DirectoryMetadata) error {
 	_, err := s.db.Exec(`UPDATE directories SET path = ?, name = ?, updated_at = ?, is_deleted = ? WHERE id = ?`,
 		m.Path, m.Name, m.UpdatedAt, m.IsDeleted, m.ID)
@@ -415,6 +532,14 @@ func (s *DirectoryMetadataService) Remove(id string) error {
 	return nil
 }
 
+func (s *DirectoryMetadataService) RemoveTx(tx *Tx, id string) error {
+	_, err := tx.Exec("UPDATE directories SET is_deleted = TRUE, updated_at = ? WHERE id = ?", time.Now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return fmt.Errorf("failed to remove directory metadata: %w", err)
+	}
+	return nil
+}
+
 func (s *DirectoryMetadataService) GetById(id string) (*DirectoryMetadata, error) {
 	row := s.db.QueryRow(`SELECT id, path, name, created_at, updated_at, is_deleted
 		FROM directories WHERE id = ? AND is_deleted = FALSE`, id)
@@ -424,6 +549,13 @@ func (s *DirectoryMetadataService) GetById(id string) (*DirectoryMetadata, error
 func (s *DirectoryMetadataService) GetByPath(path string) (*DirectoryMetadata, error) {
 	path = utils.NormalizePath(path)
 	row := s.db.QueryRow(`SELECT id, path, name, created_at, updated_at, is_deleted
+		FROM directories WHERE path = ? AND is_deleted = FALSE`, path)
+	return scanDirectoryMetadata(row)
+}
+
+func (s *DirectoryMetadataService) GetByPathTx(tx *Tx, path string) (*DirectoryMetadata, error) {
+	path = utils.NormalizePath(path)
+	row := tx.QueryRow(`SELECT id, path, name, created_at, updated_at, is_deleted
 		FROM directories WHERE path = ? AND is_deleted = FALSE`, path)
 	return scanDirectoryMetadata(row)
 }

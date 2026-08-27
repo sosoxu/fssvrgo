@@ -35,8 +35,11 @@ func validConfig() *Config {
 			},
 		},
 		Database: DatabaseConfig{
-			Type:     "sqlite",
-			Path:     "/data/test.db",
+			Type:     "postgresql",
+			Host:     "localhost",
+			Port:     5432,
+			Name:     "fsserver",
+			User:     "fsserver",
 			PoolSize: 10,
 		},
 	}
@@ -57,8 +60,11 @@ storage:
   local:
     root_dir: /data/test
 database:
-  type: sqlite
-  path: /data/test.db
+  type: postgresql
+  host: localhost
+  port: 5432
+  name: fsserver
+  user: fsserver
   pool_size: 10
 logging:
   level: info
@@ -74,6 +80,14 @@ crypto:
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate failed: %v", err)
+	}
+}
+
+func TestDatabaseDefaultsToPostgreSQL(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.Database.Type != "postgresql" {
+		t.Fatalf("expected PostgreSQL default, got %q", cfg.Database.Type)
 	}
 }
 
@@ -177,11 +191,27 @@ func TestInvalidDatabaseType(t *testing.T) {
 	}
 }
 
+func TestRejectsSQLiteForServerDeployment(t *testing.T) {
+	cfg := validConfig()
+	cfg.Database = DatabaseConfig{Type: "sqlite", Path: "/data/test.db", PoolSize: 10}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected SQLite server configuration to be rejected")
+	}
+}
+
 func TestInvalidPoolSize(t *testing.T) {
 	cfg := validConfig()
 	cfg.Database.PoolSize = 0
 	if err := cfg.Validate(); err == nil {
 		t.Errorf("expected validation error for pool_size=0")
+	}
+}
+
+func TestRejectsUnimplementedConsistencyLevels(t *testing.T) {
+	cfg := validConfig()
+	cfg.Consistency.Level = "strong"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected strong consistency configuration to be rejected until replication is implemented")
 	}
 }
 
@@ -206,8 +236,8 @@ func TestConfigFieldAccess(t *testing.T) {
 	if cfg.GetStorage().Type != "local" {
 		t.Errorf("GetStorage().Type expected local, got %s", cfg.GetStorage().Type)
 	}
-	if cfg.GetDatabase().Type != "sqlite" {
-		t.Errorf("GetDatabase().Type expected sqlite, got %s", cfg.GetDatabase().Type)
+	if cfg.GetDatabase().Type != "postgresql" {
+		t.Errorf("GetDatabase().Type expected postgresql, got %s", cfg.GetDatabase().Type)
 	}
 	if cfg.GetLogging().Level != "debug" {
 		t.Errorf("GetLogging().Level expected debug, got %s", cfg.GetLogging().Level)

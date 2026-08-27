@@ -132,6 +132,7 @@ func (s *Server) setupRoutes() {
 
 	api := s.engine.Group("/api/v1")
 	api.Use(s.metricsMiddleware())
+	api.Use(s.failureAuditMiddleware())
 	api.Use(s.authMiddleware())
 	{
 		api.POST("/files", s.requirePermission("files", "write"), s.handleUpload)
@@ -384,6 +385,21 @@ func (s *Server) metricsMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) failureAuditMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+		if c.Writer.Status() >= http.StatusBadRequest {
+			s.auditLog(
+				"http_request",
+				c.Request.URL.Path,
+				c,
+				false,
+				fmt.Sprintf("method=%s status=%d", c.Request.Method, c.Writer.Status()),
+			)
+		}
+	}
+}
+
 func (s *Server) handleHealth(c *gin.Context) {
 	s.handleHealthCheck(c, false)
 }
@@ -456,6 +472,10 @@ func (s *Server) handleHealthCheck(c *gin.Context, includeStorage bool) {
 const smallUploadThreshold = 1 * 1024 * 1024 // 1 MB
 
 func (s *Server) handleUpload(c *gin.Context) {
+	if s.metricsSvc != nil {
+		s.metricsSvc.IncActiveUploads()
+		defer s.metricsSvc.DecActiveUploads()
+	}
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		sendError(c, http.StatusBadRequest, "No file provided")
@@ -484,33 +504,54 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
-	// Encryption requires the full plaintext in memory (AES-GCM authenticates
-	// the whole message), so for the encrypted path we still read the body —
-	// but bounded by maxUploadSize. For the non-encrypted path we stream the
-	// multipart body straight into storage via UploadFileFromReader so peak
-	// memory stays bounded by the copy buffer instead of the file size,
-	// avoiding OOM under concurrent large uploads (#33).
+	// Encrypted uploads use the same durable transfer-session path as explicit
+	// chunked uploads. Completion writes the versioned chunk-AEAD format, so peak
+	// memory is bounded and HTTP/gRPC share identical encryption semantics.
 	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
-		data, err := io.ReadAll(io.LimitReader(file, s.maxUploadSize+1))
+		sessionID, err := s.transferSvc.CreateUploadSession(filePath, fileName, header.Size, "", "")
 		if err != nil {
-			sendError(c, http.StatusInternalServerError, "Failed to read file data")
+			sendInternalError(c, err, "Failed to create encrypted upload session")
 			return
 		}
-		if int64(len(data)) > s.maxUploadSize {
-			sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
+		completed := false
+		defer func() {
+			if !completed {
+				_ = s.transferSvc.AbortUpload(sessionID)
+			}
+		}()
+		buffer := make([]byte, 1024*1024)
+		var offset int64
+		for {
+			n, readErr := file.Read(buffer)
+			if n > 0 {
+				if err := s.transferSvc.UploadChunk(sessionID, buffer[:n], offset); err != nil {
+					sendInternalError(c, err, "Failed to upload encrypted file chunk")
+					return
+				}
+				offset += int64(n)
+			}
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				sendInternalError(c, readErr, "Failed to read encrypted upload")
+				return
+			}
+		}
+		if _, err := s.transferSvc.CompleteUpload(sessionID); err != nil {
+			sendInternalError(c, err, "Failed to complete encrypted upload")
 			return
 		}
-		encrypted, err := s.cryptoSvc.Encrypt(string(data))
+		completed = true
+		meta, err := s.fm.GetFileMetadata(filePath)
 		if err != nil {
-			sendError(c, http.StatusInternalServerError, "Failed to encrypt file")
-			return
-		}
-		meta, err := s.fm.UploadFile(filePath, []byte(encrypted))
-		if err != nil {
-			sendInternalError(c, err, "Failed to upload file")
+			sendInternalError(c, err, "Failed to read uploaded file metadata")
 			return
 		}
 		s.auditLog("upload", filePath, c, true, "")
+		if s.metricsSvc != nil {
+			s.metricsSvc.RecordUpload(float64(meta.Size))
+		}
 		c.JSON(http.StatusCreated, meta)
 		return
 	}
@@ -545,6 +586,9 @@ func (s *Server) handleUpload(c *gin.Context) {
 			return
 		}
 		s.auditLog("upload", filePath, c, true, "")
+		if s.metricsSvc != nil {
+			s.metricsSvc.RecordUpload(float64(meta.Size))
+		}
 		c.JSON(http.StatusCreated, meta)
 		return
 	}
@@ -565,6 +609,9 @@ func (s *Server) handleUpload(c *gin.Context) {
 	}
 
 	s.auditLog("upload", filePath, c, true, "")
+	if s.metricsSvc != nil {
+		s.metricsSvc.RecordUpload(float64(meta.Size))
+	}
 	c.JSON(http.StatusCreated, meta)
 }
 
@@ -585,11 +632,12 @@ func (s *Server) handleDownload(c *gin.Context) {
 	// would otherwise reject a leading "/" on MinIO) sees a clean object key.
 	filePath = utils.NormalizePath(filePath)
 
-	meta, err := s.fm.GetFileMetadata(filePath)
+	meta, releaseRead, err := s.fm.BeginRead(filePath)
 	if err != nil {
 		sendError(c, http.StatusNotFound, "File not found")
 		return
 	}
+	defer releaseRead()
 
 	// 加密文件统一走解密临时文件路径：http.ServeContent 会基于明文临时文件
 	// 正确处理 Content-Length（明文大小）和 Range 请求（基于明文偏移），
@@ -1081,6 +1129,10 @@ func (s *Server) handleCreateUploadSession(c *gin.Context) {
 }
 
 func (s *Server) handleUploadChunk(c *gin.Context) {
+	if s.metricsSvc != nil {
+		s.metricsSvc.IncActiveUploads()
+		defer s.metricsSvc.DecActiveUploads()
+	}
 	sessionID := c.Param("id")
 
 	file, _, err := c.Request.FormFile("data")
@@ -1128,6 +1180,9 @@ func (s *Server) handleCompleteUpload(c *gin.Context) {
 	if err != nil {
 		sendInternalError(c, err, "Failed to complete upload")
 		return
+	}
+	if s.metricsSvc != nil {
+		s.metricsSvc.RecordUpload(float64(result.UploadedSize))
 	}
 
 	s.auditLog("complete_upload", "", c, true, fmt.Sprintf("session_id=%s hash_provided=%v hash_verified=%v", sessionID, result.HashProvided, result.HashVerified))
@@ -1438,6 +1493,7 @@ func isValidFilePath(p string) bool {
 //   - "user"：普通用户角色
 //   - 逗号分隔的 "user:read"、"user:write" 等细粒度权限
 //   - 空字符串（默认 user 角色）
+//
 // 拒绝任何含 "admin" 子串的非预期值，避免与 auth.go 的 admin 判定产生歧义。
 func isValidPermissions(permissions string) bool {
 	if permissions == "" {
@@ -1475,7 +1531,7 @@ func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, succes
 
 	// Persist asynchronously via the AuditWriter. The request path must never
 	// block on a DB write for audit logging; the logger.Info call above is the
-	// immediate durable record, and the DB row is the queryable best-effort
+	// immediate observable record, and the DB row is the queryable best-effort
 	// copy. Submit drops the entry (with a warning) if the buffer is full
 	// rather than stalling the request.
 	if s.auditWriter != nil {
@@ -1487,7 +1543,7 @@ func (s *Server) auditLog(operation, resourcePath string, c *gin.Context, succes
 			UserIdentifier: userIdentifier,
 			ClientIP:       clientIP,
 			UserAgent:      userAgent,
-			Success:         success,
+			Success:        success,
 			Details:        details,
 		})
 	}
@@ -1558,6 +1614,10 @@ func (s *Server) handleCreateMultipartUpload(c *gin.Context) {
 }
 
 func (s *Server) handleUploadPart(c *gin.Context) {
+	if s.metricsSvc != nil {
+		s.metricsSvc.IncActiveUploads()
+		defer s.metricsSvc.DecActiveUploads()
+	}
 	sessionID := c.Param("id")
 	partNumber, err := strconv.Atoi(c.Param("partNumber"))
 	if err != nil || partNumber < 1 {
@@ -1619,9 +1679,13 @@ func (s *Server) handleGetMultipartUploadStatus(c *gin.Context) {
 
 func (s *Server) handleCompleteMultipartUpload(c *gin.Context) {
 	sessionID := c.Param("id")
+	_, totalSize, _ := s.transferSvc.GetMultipartUploadProgress(sessionID)
 	if err := s.transferSvc.CompleteMultipartUpload(sessionID); err != nil {
 		sendInternalError(c, err, "Internal server error")
 		return
+	}
+	if s.metricsSvc != nil {
+		s.metricsSvc.RecordUpload(float64(totalSize))
 	}
 
 	s.auditLog("complete_multipart_upload", "", c, true, fmt.Sprintf("session_id=%s", sessionID))

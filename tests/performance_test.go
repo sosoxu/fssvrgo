@@ -2,16 +2,16 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
 	"github.com/sosoxu/fssvrgo/internal/storage"
@@ -21,27 +21,15 @@ import (
 // It mirrors the setupBoundaryEnv pattern but accepts testing.TB so it can
 // serve both *testing.T (stress tests) and *testing.B (benchmarks).
 //
-// The environment uses LocalStorage backed by a t.TempDir() directory, a
-// file-based SQLite database stored in the same temp directory, and the
-// default in-process distributed lock that NewFileManager / NewFileTransferService
-// install via distributed.NewLocalDistributedLock(). No Redis or MinIO
-// dependencies are required.
+// The environment uses LocalStorage, PostgreSQL, and the default in-process
+// distributed lock. Redis and MinIO are intentionally outside these local
+// service-layer microbenchmarks.
 func setupPerfEnv(tb testing.TB) *boundaryEnv {
 	tb.Helper()
 
 	storageDir := tb.TempDir()
 
-	dbPath := filepath.Join(storageDir, "perf.db")
-	dbCfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: dbPath,
-	}
-	dbObj := database.NewDatabase()
-	if err := dbObj.Connect(dbCfg); err != nil {
-		tb.Fatalf("failed to connect database: %v", err)
-	}
-
-	qdb := dbObj.GetQueryDB()
+	dbObj, qdb := connectPostgreSQLTestDB(tb, 25)
 
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
@@ -53,14 +41,6 @@ func setupPerfEnv(tb testing.TB) *boundaryEnv {
 		dbObj.Close()
 		tb.Fatalf("failed to run migrations: %v", err)
 	}
-
-	// SQLite allows only one writer at a time, and the per-connection
-	// busy_timeout PRAGMA set in connectSQLite does not propagate to every
-	// connection in the pool. Pin the pool to a single connection so the
-	// Go database/sql layer serializes access and we avoid SQLITE_BUSY
-	// errors under concurrent stress workloads.
-	dbObj.GetDB().SetMaxOpenConns(1)
-	dbObj.GetDB().SetMaxIdleConns(1)
 
 	ls := storage.NewLocalStorage(storageDir)
 	fm := filemanager.NewFileManager(ls, qdb)
@@ -281,7 +261,6 @@ func BenchmarkCrypto_EncryptDecrypt(b *testing.B) {
 // TestStress_ConcurrentUploads exercises 100 goroutines uploading distinct
 // files concurrently through FileManager.
 func TestStress_ConcurrentUploads(t *testing.T) {
-	t.Parallel()
 	env := setupPerfEnv(t)
 
 	const n = 100
@@ -314,7 +293,6 @@ func TestStress_ConcurrentUploads(t *testing.T) {
 
 // TestStress_ConcurrentReads exercises 100 goroutines reading the same file.
 func TestStress_ConcurrentReads(t *testing.T) {
-	t.Parallel()
 	env := setupPerfEnv(t)
 
 	path := "stress_read_target.bin"
@@ -354,7 +332,6 @@ func TestStress_ConcurrentReads(t *testing.T) {
 // (50 reads + 30 writes + 20 deletes) concurrently. Each operation targets
 // a disjoint file set so that no two operations collide on the same path.
 func TestStress_MixedWorkload(t *testing.T) {
-	t.Parallel()
 	env := setupPerfEnv(t)
 
 	const (
@@ -429,7 +406,6 @@ func TestStress_MixedWorkload(t *testing.T) {
 // TestStress_LargeFileStreaming performs a 10MB streaming upload via the
 // transfer service and verifies the resulting file's integrity.
 func TestStress_LargeFileStreaming(t *testing.T) {
-	t.Parallel()
 	env := setupPerfEnv(t)
 
 	totalSize := int64(10 * 1024 * 1024) // 10MB
@@ -483,7 +459,6 @@ func TestStress_LargeFileStreaming(t *testing.T) {
 // TestStress_MultipartUpload uploads a 5MB file split into 5 parts uploaded
 // concurrently, then verifies the assembled file's integrity.
 func TestStress_MultipartUpload(t *testing.T) {
-	t.Parallel()
 	env := setupPerfEnv(t)
 
 	totalSize := int64(5 * 1024 * 1024) // 5MB
@@ -548,8 +523,9 @@ func TestStress_MultipartUpload(t *testing.T) {
 // TestStress_SessionCleanup verifies that CleanupExpiredSessions removes
 // sessions older than the max age while preserving recent sessions.
 func TestStress_SessionCleanup(t *testing.T) {
-	t.Parallel()
 	env := setupPerfEnv(t)
+	sharedSessions := distributed.NewMemorySessionStore()
+	env.transferSvc = transfer.NewFileTransferServiceWithRedis(env.storage, env.db, sharedSessions, distributed.NewLocalDistributedLock())
 
 	const totalSessions = 5
 	const expiredCount = 3
@@ -572,6 +548,10 @@ func TestStress_SessionCleanup(t *testing.T) {
 			t.Fatalf("GetUploadSession %d failed: %v", i, err)
 		}
 		sess.CreatedAt = oldTimestamp
+		sess.UpdatedAt = oldTimestamp
+		if err := sharedSessions.Set(context.Background(), "upload", sessionIDs[i], sess, 2*time.Hour); err != nil {
+			t.Fatalf("persist expired session %d: %v", i, err)
+		}
 	}
 
 	// Run cleanup with a 1-hour max age window.
