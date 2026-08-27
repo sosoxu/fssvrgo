@@ -1,0 +1,88 @@
+{
+  "generated_at": "2026-08-27T12:24:35.108204Z",
+  "go_version": "go1.26.4",
+  "os": "darwin",
+  "arch": "amd64",
+  "gomaxprocs": 4,
+  "concurrency": 4,
+  "warmup_runs": 0,
+  "sample_runs": 3,
+  "backend": "PostgreSQL + LocalStorage",
+  "protocol": "in-process FileManager",
+  "redis": "disabled",
+  "encryption": "disabled",
+  "measurements": [
+    {
+      "size": "1K",
+      "size_bytes": 1024,
+      "operation": "concurrent_read",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 26.937,
+      "p95_duration_ms": 78.575,
+      "p99_duration_ms": 78.575,
+      "p50_mib_per_sec": 0.14501247840497375,
+      "p95_mib_per_sec": 0.25713360197884094,
+      "p99_mib_per_sec": 0.25713360197884094,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 78.575,
+          "mib_per_sec": 0.049713454511689605,
+          "transferred_bytes": 4096
+        },
+        {
+          "run": 2,
+          "duration_ms": 15.191,
+          "mib_per_sec": 0.25713360197884094,
+          "transferred_bytes": 4096
+        },
+        {
+          "run": 3,
+          "duration_ms": 26.937,
+          "mib_per_sec": 0.14501247840497375,
+          "transferred_bytes": 4096
+        }
+      ]
+    },
+    {
+      "size": "1G",
+      "size_bytes": 1073741824,
+      "operation": "concurrent_read",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 1413.321,
+      "p95_duration_ms": 1467.972,
+      "p99_duration_ms": 1467.972,
+      "p50_mib_per_sec": 2898.1376284578278,
+      "p95_mib_per_sec": 3062.066822111711,
+      "p99_mib_per_sec": 3062.066822111711,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 1337.658,
+          "mib_per_sec": 3062.066822111711,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 2,
+          "duration_ms": 1467.972,
+          "mib_per_sec": 2790.242910196107,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 3,
+          "duration_ms": 1413.321,
+          "mib_per_sec": 2898.1376284578278,
+          "transferred_bytes": 4294967296
+        }
+      ]
+    }
+  ]
+}

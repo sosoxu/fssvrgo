@@ -720,7 +720,14 @@ func (s *FileTransferService) AbortMultipartUpload(sessionID string) error {
 }
 
 func (s *FileTransferService) GetMultipartUploadSession(sessionID string) (*MultipartUploadSession, error) {
-	return s.loadMultipartSession(context.Background(), sessionID, true)
+	session, err := s.loadMultipartSession(context.Background(), sessionID, true)
+	if err != nil {
+		return nil, err
+	}
+	if session.Status != "active" {
+		return nil, fmt.Errorf("multipart upload session is %s: %s", session.Status, sessionID)
+	}
+	return session, nil
 }
 
 func (s *FileTransferService) GetMultipartUploadProgress(sessionID string) (uploaded int64, total int64, completedParts int) {

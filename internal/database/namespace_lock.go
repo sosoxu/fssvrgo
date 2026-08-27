@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"sort"
 	"strings"
@@ -175,6 +176,31 @@ func (l *NamespaceLease) Release(ctx context.Context) error {
 	return releaseErr
 }
 
+// ReleaseTx removes the holder in the protected metadata transaction. The
+// transaction advisory locks remain held until commit, so this avoids a
+// separate WAL commit without opening a namespace race after the holder row is
+// deleted.
+func (l *NamespaceLease) ReleaseTx(tx *Tx) error {
+	if l == nil || l.db == nil || l.token == "" || tx == nil {
+		return nil
+	}
+	if _, err := tx.Exec("DELETE FROM namespace_lock_holders WHERE token = ?", l.token); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarkReleased records that a ReleaseTx deletion committed successfully.
+func (l *NamespaceLease) MarkReleased() {
+	if l == nil {
+		return
+	}
+	if l.cancel != nil {
+		l.cancel()
+	}
+	l.released.Do(func() {})
+}
+
 func normalizeNamespacePath(value string) string {
 	value = utils.NormalizePath(value)
 	if value == "." || value == "" || value == "/" {
@@ -276,7 +302,7 @@ func (d *DB) AcquireNamespaceLease(ctx context.Context, requests []NamespaceLock
 		if err == nil {
 			return lease, nil
 		}
-		if !errors.Is(err, errNamespaceConflict) {
+		if !errors.Is(err, errNamespaceConflict) && !isRetryableNamespaceError(err) {
 			return nil, err
 		}
 		select {
@@ -285,6 +311,11 @@ func (d *DB) AcquireNamespaceLease(ctx context.Context, requests []NamespaceLock
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
+}
+
+func isRetryableNamespaceError(err error) bool {
+	var networkError net.Error
+	return errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary())
 }
 
 // BeginNamespaceWrite uses a fenced transaction in PostgreSQL and a regular

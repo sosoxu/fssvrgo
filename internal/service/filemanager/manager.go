@@ -26,6 +26,15 @@ type FileManager struct {
 	initialized bool
 	fileLocks   sync.Map
 	distLock    distributed.DistributedLock
+	readLeaseMu sync.Mutex
+	readLeases  map[string]*sharedReadLease
+}
+
+type sharedReadLease struct {
+	ready chan struct{}
+	lease *database.NamespaceLease
+	err   error
+	refs  int
 }
 
 func commitReplaceBackup(backup storage.ReplaceBackup, path string) {
@@ -135,6 +144,59 @@ func releaseNamespaceLease(lease *database.NamespaceLease) {
 	}
 }
 
+func (fm *FileManager) acquireSharedReadNamespace(path string) (*database.NamespaceLease, func(), error) {
+	fm.readLeaseMu.Lock()
+	if fm.readLeases == nil {
+		fm.readLeases = make(map[string]*sharedReadLease)
+	}
+	entry, ok := fm.readLeases[path]
+	if ok {
+		entry.refs++
+		fm.readLeaseMu.Unlock()
+		<-entry.ready
+		if entry.err != nil {
+			return nil, nil, entry.err
+		}
+		return entry.lease, fm.sharedReadRelease(path, entry), nil
+	}
+	entry = &sharedReadLease{ready: make(chan struct{}), refs: 1}
+	fm.readLeases[path] = entry
+	fm.readLeaseMu.Unlock()
+
+	entry.lease, entry.err = fm.acquireFileNamespace(path)
+	fm.readLeaseMu.Lock()
+	if entry.err != nil {
+		delete(fm.readLeases, path)
+	}
+	close(entry.ready)
+	fm.readLeaseMu.Unlock()
+	if entry.err != nil {
+		return nil, nil, entry.err
+	}
+	return entry.lease, fm.sharedReadRelease(path, entry), nil
+}
+
+func (fm *FileManager) sharedReadRelease(path string, entry *sharedReadLease) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			var lease *database.NamespaceLease
+			fm.readLeaseMu.Lock()
+			if fm.readLeases[path] == entry {
+				entry.refs--
+				if entry.refs == 0 {
+					delete(fm.readLeases, path)
+					lease = entry.lease
+				}
+			}
+			fm.readLeaseMu.Unlock()
+			if lease != nil {
+				releaseNamespaceLease(lease)
+			}
+		})
+	}
+}
+
 func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
 	namespaceLease, err := fm.acquireFileNamespace(path)
@@ -220,10 +282,15 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 		rollbackFileWrite(fm.storage, backup, path)
 		return nil, err
 	}
+	if err := namespaceLease.ReleaseTx(tx); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, fmt.Errorf("failed to release upload namespace lease: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		rollbackFileWrite(fm.storage, backup, path)
 		return nil, fmt.Errorf("failed to commit file metadata: %w", err)
 	}
+	namespaceLease.MarkReleased()
 	rollbackTx = false
 	commitReplaceBackup(backup, path)
 
@@ -342,10 +409,15 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 		rollbackFileWrite(fm.storage, backup, path)
 		return nil, err
 	}
+	if err := namespaceLease.ReleaseTx(tx); err != nil {
+		rollbackFileWrite(fm.storage, backup, path)
+		return nil, fmt.Errorf("failed to release streaming upload namespace lease: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		rollbackFileWrite(fm.storage, backup, path)
 		return nil, fmt.Errorf("failed to commit file metadata: %w", err)
 	}
+	namespaceLease.MarkReleased()
 	rollbackTx = false
 	commitReplaceBackup(backup, path)
 
@@ -387,11 +459,10 @@ func (fm *FileManager) DownloadFileAt(path string, size int, offset int64) ([]by
 // from moving the object between the metadata lookup and the final read.
 func (fm *FileManager) BeginRead(path string) (*database.FileMetadata, func(), error) {
 	path = utils.NormalizePath(path)
-	lease, err := fm.acquireFileNamespace(path)
+	_, release, err := fm.acquireSharedReadNamespace(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	release := func() { releaseNamespaceLease(lease) }
 	meta, err := fm.GetFileMetadata(path)
 	if err != nil {
 		release()

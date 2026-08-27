@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -595,6 +596,97 @@ func TestPostgreSQL_DirectoryRenameWaitsForActiveRead(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("rename did not continue after read release")
+	}
+}
+
+func TestPostgreSQL_ConcurrentReadsShareNamespaceLease(t *testing.T) {
+	_, qdb := setupNamespacePostgreSQL(t)
+	store := storage.NewLocalStorage(t.TempDir())
+	fm := filemanager.NewFileManager(store, qdb)
+	if _, err := fm.UploadFile("shared/read.bin", []byte("content")); err != nil {
+		t.Fatalf("upload read source: %v", err)
+	}
+
+	const readers = 4
+	releases := make([]func(), 0, readers)
+	for i := 0; i < readers; i++ {
+		_, release, err := fm.BeginRead("shared/read.bin")
+		if err != nil {
+			t.Fatalf("begin read %d: %v", i, err)
+		}
+		releases = append(releases, release)
+	}
+
+	var tokens, holders int
+	if err := qdb.QueryRow(`SELECT COUNT(DISTINCT token), COUNT(*)
+		FROM namespace_lock_holders WHERE token IN (
+			SELECT token FROM namespace_lock_holders WHERE path = ?
+		)`, "shared/read.bin").Scan(&tokens, &holders); err != nil {
+		t.Fatalf("query shared read holders: %v", err)
+	}
+	if tokens != 1 || holders != 2 {
+		t.Fatalf("shared read holders tokens=%d rows=%d, want 1 token and 2 path rows", tokens, holders)
+	}
+
+	for _, release := range releases[:readers-1] {
+		release()
+	}
+	if err := qdb.QueryRow("SELECT COUNT(*) FROM namespace_lock_holders WHERE path = ?", "shared/read.bin").Scan(&holders); err != nil {
+		t.Fatalf("query holder before final release: %v", err)
+	}
+	if holders != 1 {
+		t.Fatalf("holder rows after partial release = %d, want 1", holders)
+	}
+
+	releases[readers-1]()
+	if err := qdb.QueryRow("SELECT COUNT(*) FROM namespace_lock_holders WHERE path = ?", "shared/read.bin").Scan(&holders); err != nil {
+		t.Fatalf("query holder after final release: %v", err)
+	}
+	if holders != 0 {
+		t.Fatalf("holder rows after final release = %d, want 0", holders)
+	}
+}
+
+func TestPostgreSQL_UploadReleasesNamespaceLeaseInMetadataTransaction(t *testing.T) {
+	_, qdb := setupNamespacePostgreSQL(t)
+	store := storage.NewLocalStorage(t.TempDir())
+	fm := filemanager.NewFileManager(store, qdb)
+	if _, err := fm.UploadFileFromReader("atomic/release.bin", strings.NewReader("content")); err != nil {
+		t.Fatalf("stream upload: %v", err)
+	}
+	var holders int
+	if err := qdb.QueryRow("SELECT COUNT(*) FROM namespace_lock_holders").Scan(&holders); err != nil {
+		t.Fatalf("query namespace holders: %v", err)
+	}
+	if holders != 0 {
+		t.Fatalf("namespace holders after committed upload = %d, want 0", holders)
+	}
+}
+
+func TestPostgreSQL_RolledBackTransactionalReleaseCanBeRetried(t *testing.T) {
+	_, qdb := setupNamespacePostgreSQL(t)
+	lease, err := qdb.AcquireNamespaceLease(context.Background(), database.FileNamespaceRequests("rollback/release.bin"), time.Second)
+	if err != nil {
+		t.Fatalf("acquire namespace lease: %v", err)
+	}
+	tx, err := lease.BeginFencedWrite(context.Background(), "rollback/release.bin")
+	if err != nil {
+		t.Fatalf("begin fenced write: %v", err)
+	}
+	if err := lease.ReleaseTx(tx); err != nil {
+		t.Fatalf("release in transaction: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback release transaction: %v", err)
+	}
+	releaseTestNamespaceLease(t, lease)
+
+	var holders int
+	if err := qdb.QueryRow("SELECT COUNT(*) FROM namespace_lock_holders WHERE token = ?", lease.Token()).Scan(&holders); err != nil {
+		t.Fatalf("query namespace holders: %v", err)
+	}
+	if holders != 0 {
+		t.Fatalf("namespace holders after retry release = %d, want 0", holders)
 	}
 }
 

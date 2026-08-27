@@ -769,6 +769,11 @@ func (s *FileTransferService) AbortUpload(sessionID string) error {
 		return err
 	}
 	atomic.StoreInt32(&session.closed, 1)
+	// An aborted session is no longer a resumable upload. Keep the actual
+	// acknowledged size in the terminal ledger, but expose zero progress from
+	// the retained session snapshot so clients cannot mistake it for resumable
+	// state.
+	atomic.StoreInt64(&session.UploadedSize, 0)
 	session.tempFileMu.Lock()
 	if session.tempFile != nil {
 		session.tempFile.Close()

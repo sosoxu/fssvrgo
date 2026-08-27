@@ -91,6 +91,7 @@
 - Redis 存储：会话序列化为 JSON，每个已确认上传块均写入
 - 跨实例恢复：Redis 保存状态，共享 `storage.temp_dir` 保存临时数据；恢复时重新打开文件句柄
 - 进度查询：直接读取共享会话存储，支持跨实例观察
+- 取消上传：终态账本保留已确认字节数用于审计，但共享会话快照将进度归零并标记为 aborted，后续数据块拒绝写入
 - 过期清理：与上传使用同一会话锁，重新读取共享 `updated_at` 后清理，避免旧实例误删活动会话
 
 #### DirectoryManager (`internal/service/directory/`)
@@ -110,6 +111,7 @@
 - 使用 UNION ALL 合并文件和目录查询结果
 - 支持按 name、path、size、created_at、type 排序
 - 防止 SQL 注入：排序字段白名单校验
+- 默认通过 `pageSize+1` 和 `HasMore` 避免大目录 `COUNT`；调用方需要精确总数时显式使用 `include_total=true`
 
 ### 2.3 分布式层
 
@@ -374,6 +376,7 @@ crypto:        # 加密配置（算法、密钥文件）
 - 本地文件创建、覆盖、删除和目录重命名具有运行时失败补偿；没有持久化操作日志，进程崩溃窗口仍需启动恢复机制。
 - 目录操作与子文件读写已有共享/独占层级租约和最终写 fence；递归删除元数据使用单个集合事务，本地目录通过同盘备份补偿。MinIO 清理仍在 DB 提交后执行，且没有对象存储与数据库的全局事务。
 - 上传块逐次 `fsync` 优先保证确认持久性；固定环境性能门禁未完成，优化必须以 WAL/组提交等不削弱确认语义的方案为前提。
+- 服务层文件 I/O 基线可通过 `make perf-file-io` 运行，流式覆盖 1K、1M、100M、1G 的串行/并发读写并记录 p50/p95/p99；同一路径并发读共享 namespace lease，上传在元数据事务内释放 lease，临时网络超时执行有界重试。该测试不经过 HTTP/gRPC，冷读长尾仍不能作为协议发布门禁。
 - 加密下载仍先生成完整明文临时文件，内存有界但首字节延迟和临时空间开销尚未闭环。
 - HTTP 变更类成功操作与失败响应、gRPC 成功/失败请求已纳入审计；正常关闭会先停止接收、排空队列，并用调用方 context 完成最终刷新。HTTP 读取类成功请求尚未完整覆盖，进程崩溃可靠投递仍需要持久化 outbox。
 - 本轮没有 MinIO 环境，MinIO 专属目录能力、覆盖补偿和真实集成行为未验收。
@@ -396,5 +399,6 @@ crypto:        # 加密配置（算法、密钥文件）
 | `redis_lock_consistency_test.go` | Redis 分布式锁一致性 |
 | `postgresql_consistency_test.go` | PostgreSQL 集成测试 |
 | `perf_postgresql_redis_test.go` | PostgreSQL+Redis 性能测试 |
+| `file_io_performance_test.go` | PostgreSQL+LocalStorage 1K/1M/100M/1G 串行与并发读写基线 |
 | `large_file_parallel_test.go` | 大文件并发分段读写 |
 | `segmented_vs_nonsegmented_test.go` | 分段 vs 不分段对比 |

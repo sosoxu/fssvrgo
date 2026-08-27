@@ -502,7 +502,7 @@ func TestListFiles(t *testing.T) {
 			}
 		}
 
-		dlResp, err := http.Get(ts.BaseURL + "/api/v1/files")
+		dlResp, err := http.Get(ts.BaseURL + "/api/v1/files?include_total=true")
 		if err != nil {
 			t.Fatalf("failed to list files: %v", err)
 		}
@@ -552,7 +552,7 @@ func TestListFilesPagination(t *testing.T) {
 			}
 		}
 
-		dlResp, err := http.Get(ts.BaseURL + "/api/v1/files?page=1&page_size=2")
+		dlResp, err := http.Get(ts.BaseURL + "/api/v1/files?page=1&page_size=2&include_total=true")
 		if err != nil {
 			t.Fatalf("failed to list files: %v", err)
 		}

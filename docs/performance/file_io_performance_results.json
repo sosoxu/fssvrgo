@@ -1,0 +1,592 @@
+{
+  "generated_at": "2026-08-27T11:44:54.490411Z",
+  "go_version": "go1.26.4",
+  "os": "darwin",
+  "arch": "amd64",
+  "gomaxprocs": 4,
+  "concurrency": 4,
+  "warmup_runs": 0,
+  "sample_runs": 3,
+  "backend": "PostgreSQL + LocalStorage",
+  "protocol": "in-process FileManager",
+  "redis": "disabled",
+  "encryption": "disabled",
+  "measurements": [
+    {
+      "size": "1K",
+      "size_bytes": 1024,
+      "operation": "sequential_write",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 136.507,
+      "p95_duration_ms": 161.604,
+      "p99_duration_ms": 161.604,
+      "p50_mib_per_sec": 0.007153906659924576,
+      "p95_mib_per_sec": 0.007481355915219545,
+      "p99_mib_per_sec": 0.007481355915219545,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 161.604,
+          "mib_per_sec": 0.0060428994890657905,
+          "transferred_bytes": 1024
+        },
+        {
+          "run": 2,
+          "duration_ms": 130.532,
+          "mib_per_sec": 0.007481355915219545,
+          "transferred_bytes": 1024
+        },
+        {
+          "run": 3,
+          "duration_ms": 136.507,
+          "mib_per_sec": 0.007153906659924576,
+          "transferred_bytes": 1024
+        }
+      ]
+    },
+    {
+      "size": "1K",
+      "size_bytes": 1024,
+      "operation": "sequential_read",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 4.61,
+      "p95_duration_ms": 7.338,
+      "p99_duration_ms": 7.338,
+      "p50_mib_per_sec": 0.2118029709945015,
+      "p95_mib_per_sec": 0.21714238892927082,
+      "p99_mib_per_sec": 0.21714238892927082,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 4.61,
+          "mib_per_sec": 0.2118029709945015,
+          "transferred_bytes": 1024
+        },
+        {
+          "run": 2,
+          "duration_ms": 7.338,
+          "mib_per_sec": 0.13306792761295505,
+          "transferred_bytes": 1024
+        },
+        {
+          "run": 3,
+          "duration_ms": 4.497,
+          "mib_per_sec": 0.21714238892927082,
+          "transferred_bytes": 1024
+        }
+      ]
+    },
+    {
+      "size": "1K",
+      "size_bytes": 1024,
+      "operation": "concurrent_write",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 382.629,
+      "p95_duration_ms": 464.523,
+      "p99_duration_ms": 464.523,
+      "p50_mib_per_sec": 0.010208960118837445,
+      "p95_mib_per_sec": 0.010411306925861234,
+      "p99_mib_per_sec": 0.010411306925861234,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 382.629,
+          "mib_per_sec": 0.010208960118837445,
+          "transferred_bytes": 4096
+        },
+        {
+          "run": 2,
+          "duration_ms": 375.193,
+          "mib_per_sec": 0.010411306925861234,
+          "transferred_bytes": 4096
+        },
+        {
+          "run": 3,
+          "duration_ms": 464.523,
+          "mib_per_sec": 0.008409146756099817,
+          "transferred_bytes": 4096
+        }
+      ]
+    },
+    {
+      "size": "1K",
+      "size_bytes": 1024,
+      "operation": "concurrent_read",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 6.569,
+      "p95_duration_ms": 9.389,
+      "p99_duration_ms": 9.389,
+      "p50_mib_per_sec": 0.5946272940816146,
+      "p95_mib_per_sec": 0.7186087330208278,
+      "p99_mib_per_sec": 0.7186087330208278,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 6.569,
+          "mib_per_sec": 0.5946272940816146,
+          "transferred_bytes": 4096
+        },
+        {
+          "run": 2,
+          "duration_ms": 9.389,
+          "mib_per_sec": 0.4160186095175047,
+          "transferred_bytes": 4096
+        },
+        {
+          "run": 3,
+          "duration_ms": 5.435,
+          "mib_per_sec": 0.7186087330208278,
+          "transferred_bytes": 4096
+        }
+      ]
+    },
+    {
+      "size": "1M",
+      "size_bytes": 1048576,
+      "operation": "sequential_write",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 158.58,
+      "p95_duration_ms": 175.182,
+      "p99_duration_ms": 175.182,
+      "p50_mib_per_sec": 6.305940590157215,
+      "p95_mib_per_sec": 6.510514748249527,
+      "p99_mib_per_sec": 6.510514748249527,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 153.597,
+          "mib_per_sec": 6.510514748249527,
+          "transferred_bytes": 1048576
+        },
+        {
+          "run": 2,
+          "duration_ms": 175.182,
+          "mib_per_sec": 5.708334400554019,
+          "transferred_bytes": 1048576
+        },
+        {
+          "run": 3,
+          "duration_ms": 158.58,
+          "mib_per_sec": 6.305940590157215,
+          "transferred_bytes": 1048576
+        }
+      ]
+    },
+    {
+      "size": "1M",
+      "size_bytes": 1048576,
+      "operation": "sequential_read",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 6.071,
+      "p95_duration_ms": 8.462,
+      "p99_duration_ms": 8.462,
+      "p50_mib_per_sec": 164.69431499928768,
+      "p95_mib_per_sec": 174.242983932009,
+      "p99_mib_per_sec": 174.242983932009,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 5.739,
+          "mib_per_sec": 174.242983932009,
+          "transferred_bytes": 1048576
+        },
+        {
+          "run": 2,
+          "duration_ms": 6.071,
+          "mib_per_sec": 164.69431499928768,
+          "transferred_bytes": 1048576
+        },
+        {
+          "run": 3,
+          "duration_ms": 8.462,
+          "mib_per_sec": 118.17074987967263,
+          "transferred_bytes": 1048576
+        }
+      ]
+    },
+    {
+      "size": "1M",
+      "size_bytes": 1048576,
+      "operation": "concurrent_write",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 341.437,
+      "p95_duration_ms": 391.86,
+      "p99_duration_ms": 391.86,
+      "p50_mib_per_sec": 11.715165342454666,
+      "p95_mib_per_sec": 12.447495026735616,
+      "p99_mib_per_sec": 12.447495026735616,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 321.349,
+          "mib_per_sec": 12.447495026735616,
+          "transferred_bytes": 4194304
+        },
+        {
+          "run": 2,
+          "duration_ms": 391.86,
+          "mib_per_sec": 10.207711802242896,
+          "transferred_bytes": 4194304
+        },
+        {
+          "run": 3,
+          "duration_ms": 341.437,
+          "mib_per_sec": 11.715165342454666,
+          "transferred_bytes": 4194304
+        }
+      ]
+    },
+    {
+      "size": "1M",
+      "size_bytes": 1048576,
+      "operation": "concurrent_read",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 8.082,
+      "p95_duration_ms": 8.662,
+      "p99_duration_ms": 8.662,
+      "p50_mib_per_sec": 494.91444475857764,
+      "p95_mib_per_sec": 667.4656230174186,
+      "p99_mib_per_sec": 667.4656230174186,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 8.662,
+          "mib_per_sec": 461.76131465293327,
+          "transferred_bytes": 4194304
+        },
+        {
+          "run": 2,
+          "duration_ms": 5.992,
+          "mib_per_sec": 667.4656230174186,
+          "transferred_bytes": 4194304
+        },
+        {
+          "run": 3,
+          "duration_ms": 8.082,
+          "mib_per_sec": 494.91444475857764,
+          "transferred_bytes": 4194304
+        }
+      ]
+    },
+    {
+      "size": "100M",
+      "size_bytes": 104857600,
+      "operation": "sequential_write",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 1739.843,
+      "p95_duration_ms": 1970.793,
+      "p99_duration_ms": 1970.793,
+      "p50_mib_per_sec": 57.476440022142775,
+      "p95_mib_per_sec": 69.41502794636183,
+      "p99_mib_per_sec": 69.41502794636183,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 1440.61,
+          "mib_per_sec": 69.41502794636183,
+          "transferred_bytes": 104857600
+        },
+        {
+          "run": 2,
+          "duration_ms": 1739.843,
+          "mib_per_sec": 57.476440022142775,
+          "transferred_bytes": 104857600
+        },
+        {
+          "run": 3,
+          "duration_ms": 1970.793,
+          "mib_per_sec": 50.74097996829935,
+          "transferred_bytes": 104857600
+        }
+      ]
+    },
+    {
+      "size": "100M",
+      "size_bytes": 104857600,
+      "operation": "sequential_read",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 52.585,
+      "p95_duration_ms": 83.641,
+      "p99_duration_ms": 83.641,
+      "p50_mib_per_sec": 1901.6592661694665,
+      "p95_mib_per_sec": 2471.801136479783,
+      "p99_mib_per_sec": 2471.801136479783,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 83.641,
+          "mib_per_sec": 1195.5820660203285,
+          "transferred_bytes": 104857600
+        },
+        {
+          "run": 2,
+          "duration_ms": 52.585,
+          "mib_per_sec": 1901.6592661694665,
+          "transferred_bytes": 104857600
+        },
+        {
+          "run": 3,
+          "duration_ms": 40.456,
+          "mib_per_sec": 2471.801136479783,
+          "transferred_bytes": 104857600
+        }
+      ]
+    },
+    {
+      "size": "100M",
+      "size_bytes": 104857600,
+      "operation": "concurrent_write",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 7578.819,
+      "p95_duration_ms": 7678.435,
+      "p99_duration_ms": 7678.435,
+      "p50_mib_per_sec": 52.778667350120855,
+      "p95_mib_per_sec": 57.15018317585259,
+      "p99_mib_per_sec": 57.15018317585259,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 6999.102,
+          "mib_per_sec": 57.15018317585259,
+          "transferred_bytes": 419430400
+        },
+        {
+          "run": 2,
+          "duration_ms": 7578.819,
+          "mib_per_sec": 52.778667350120855,
+          "transferred_bytes": 419430400
+        },
+        {
+          "run": 3,
+          "duration_ms": 7678.435,
+          "mib_per_sec": 52.093943580858294,
+          "transferred_bytes": 419430400
+        }
+      ]
+    },
+    {
+      "size": "100M",
+      "size_bytes": 104857600,
+      "operation": "concurrent_read",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 98.526,
+      "p95_duration_ms": 151.563,
+      "p99_duration_ms": 151.563,
+      "p50_mib_per_sec": 4059.8299988816184,
+      "p95_mib_per_sec": 4694.9829224691175,
+      "p99_mib_per_sec": 4694.9829224691175,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 151.563,
+          "mib_per_sec": 2639.15552882003,
+          "transferred_bytes": 419430400
+        },
+        {
+          "run": 2,
+          "duration_ms": 98.526,
+          "mib_per_sec": 4059.8299988816184,
+          "transferred_bytes": 419430400
+        },
+        {
+          "run": 3,
+          "duration_ms": 85.197,
+          "mib_per_sec": 4694.9829224691175,
+          "transferred_bytes": 419430400
+        }
+      ]
+    },
+    {
+      "size": "1G",
+      "size_bytes": 1073741824,
+      "operation": "sequential_write",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 19659.98,
+      "p95_duration_ms": 23624.473,
+      "p99_duration_ms": 23624.473,
+      "p50_mib_per_sec": 52.08550461972559,
+      "p95_mib_per_sec": 61.94956896352309,
+      "p99_mib_per_sec": 61.94956896352309,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 23624.473,
+          "mib_per_sec": 43.3448817613991,
+          "transferred_bytes": 1073741824
+        },
+        {
+          "run": 2,
+          "duration_ms": 16529.574,
+          "mib_per_sec": 61.94956896352309,
+          "transferred_bytes": 1073741824
+        },
+        {
+          "run": 3,
+          "duration_ms": 19659.98,
+          "mib_per_sec": 52.08550461972559,
+          "transferred_bytes": 1073741824
+        }
+      ]
+    },
+    {
+      "size": "1G",
+      "size_bytes": 1073741824,
+      "operation": "sequential_read",
+      "concurrency": 1,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 542.901,
+      "p95_duration_ms": 17650.323,
+      "p99_duration_ms": 17650.323,
+      "p50_mib_per_sec": 1886.1618821386105,
+      "p95_mib_per_sec": 2344.9617973663185,
+      "p99_mib_per_sec": 2344.9617973663185,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 17650.323,
+          "mib_per_sec": 58.01593413772623,
+          "transferred_bytes": 1073741824
+        },
+        {
+          "run": 2,
+          "duration_ms": 542.901,
+          "mib_per_sec": 1886.1618821386105,
+          "transferred_bytes": 1073741824
+        },
+        {
+          "run": 3,
+          "duration_ms": 436.68,
+          "mib_per_sec": 2344.9617973663185,
+          "transferred_bytes": 1073741824
+        }
+      ]
+    },
+    {
+      "size": "1G",
+      "size_bytes": 1073741824,
+      "operation": "concurrent_write",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 84902.336,
+      "p95_duration_ms": 89963.684,
+      "p99_duration_ms": 89963.684,
+      "p50_mib_per_sec": 48.24366643365342,
+      "p95_mib_per_sec": 51.24730400140229,
+      "p99_mib_per_sec": 51.24730400140229,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 79926.155,
+          "mib_per_sec": 51.24730400140229,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 2,
+          "duration_ms": 84902.336,
+          "mib_per_sec": 48.24366643365342,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 3,
+          "duration_ms": 89963.684,
+          "mib_per_sec": 45.52948276328924,
+          "transferred_bytes": 4294967296
+        }
+      ]
+    },
+    {
+      "size": "1G",
+      "size_bytes": 1073741824,
+      "operation": "concurrent_read",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 1324.979,
+      "p95_duration_ms": 34478.167,
+      "p99_duration_ms": 34478.167,
+      "p50_mib_per_sec": 3091.3683011280064,
+      "p95_mib_per_sec": 3220.551952283497,
+      "p99_mib_per_sec": 3220.551952283497,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 34478.167,
+          "mib_per_sec": 118.79981755276255,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 2,
+          "duration_ms": 1324.979,
+          "mib_per_sec": 3091.3683011280064,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 3,
+          "duration_ms": 1271.831,
+          "mib_per_sec": 3220.551952283497,
+          "transferred_bytes": 4294967296
+        }
+      ]
+    }
+  ]
+}

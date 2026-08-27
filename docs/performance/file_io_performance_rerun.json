@@ -1,0 +1,52 @@
+{
+  "generated_at": "2026-08-27T11:21:56.462135Z",
+  "go_version": "go1.26.4",
+  "os": "darwin",
+  "arch": "amd64",
+  "gomaxprocs": 4,
+  "concurrency": 4,
+  "warmup_runs": 0,
+  "sample_runs": 3,
+  "backend": "PostgreSQL + LocalStorage",
+  "protocol": "in-process FileManager",
+  "redis": "disabled",
+  "encryption": "disabled",
+  "measurements": [
+    {
+      "size": "1G",
+      "size_bytes": 1073741824,
+      "operation": "concurrent_read",
+      "concurrency": 4,
+      "warmup_runs": 0,
+      "sample_runs": 3,
+      "error_count": 0,
+      "error_rate": 0,
+      "p50_duration_ms": 804.83,
+      "p95_duration_ms": 16977.115,
+      "p99_duration_ms": 16977.115,
+      "p50_mib_per_sec": 5089.271456067464,
+      "p95_mib_per_sec": 5203.117089890107,
+      "p99_mib_per_sec": 5203.117089890107,
+      "samples": [
+        {
+          "run": 1,
+          "duration_ms": 16977.115,
+          "mib_per_sec": 241.26595932404206,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 2,
+          "duration_ms": 804.83,
+          "mib_per_sec": 5089.271456067464,
+          "transferred_bytes": 4294967296
+        },
+        {
+          "run": 3,
+          "duration_ms": 787.22,
+          "mib_per_sec": 5203.117089890107,
+          "transferred_bytes": 4294967296
+        }
+      ]
+    }
+  ]
+}

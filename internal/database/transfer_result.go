@@ -122,9 +122,13 @@ func transferSessionResultUpsert() string {
 }
 
 func transferSessionResultArgs(result *TransferSessionResult) []interface{} {
+	var fileCreatedAt interface{}
+	if result.FileCreatedAt != "" {
+		fileCreatedAt = result.FileCreatedAt
+	}
 	return []interface{}{
 		result.SessionID, result.SessionType, result.Status, result.FileID,
-		result.FilePath, result.FileName, result.FileHash, result.FileCreatedAt,
+		result.FilePath, result.FileName, result.FileHash, fileCreatedAt,
 		result.HashProvided, result.HashVerified, result.UploadedSize,
 		result.StorageType, result.UpdatedAt, result.ExpiresAt,
 	}

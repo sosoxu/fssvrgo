@@ -394,6 +394,9 @@ go test ./tests/ -run TestParallelDownload -v
 # 分段 vs 不分段性能对比
 go test ./tests/ -run TestSegmentedVsNonSegmented -v
 
+# PostgreSQL + LocalStorage 文件读写基线（默认 1K/1M/100M/1G，3 轮，4 并发）
+make perf-file-io
+
 # Benchmark
 go test ./tests/ -bench=BenchmarkMultipartUpload -benchmem
 go test ./tests/ -bench=BenchmarkService_SegmentedDownload -benchmem
