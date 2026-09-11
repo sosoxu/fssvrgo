@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,15 +60,34 @@ func NewSchemaName() string {
 }
 
 // CreateSchema creates the named schema and registers it for removal when the
-// test finishes. It skips (rather than fails) when PostgreSQL is unreachable.
+// test finishes.
+//
+// When PostgreSQL is unreachable the test is skipped — unless
+// FSS_TEST_REQUIRE_INFRA is set (CI does this), in which case it fails: a
+// missing database must not be reported as a green build.
 func CreateSchema(t testing.TB, name string) {
 	t.Helper()
 
 	if err := Create(Config(), name); err != nil {
+		if requireInfra() {
+			t.Fatalf("FSS_TEST_REQUIRE_INFRA is set but PostgreSQL is not available: %v", err)
+		}
 		t.Skipf("PostgreSQL not available: %v", err)
 	}
 
 	t.Cleanup(func() { _ = Drop(Config(), name) })
+}
+
+// requireInfra reports whether reachable test infrastructure is mandatory.
+// Set FSS_TEST_REQUIRE_INFRA=1 in CI so infrastructure outages surface as
+// failures instead of silently skipping the tests that depend on them.
+func requireInfra() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FSS_TEST_REQUIRE_INFRA"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 // NewSchema provisions a fresh PostgreSQL schema and returns a config scoped to

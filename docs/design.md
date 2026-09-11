@@ -380,6 +380,10 @@ crypto:        # 加密配置（算法、密钥文件）
 
 ### 7.2 集成测试
 
+CI（`.github/workflows/ci.yml`）会启动 PostgreSQL 15 与 Redis 7 服务容器，并设置
+`FSS_TEST_REQUIRE_INFRA=1`：数据库不可达时测试**失败**而不是跳过，避免"因为没连上库而全绿"
+掩盖只在 PostgreSQL 上出现的缺陷。本地开发不设置该变量时仍保持跳过语义。
+
 | 测试文件 | 测试内容 |
 |---------|---------|
 | `http_api_test.go` | HTTP API 全流程测试 |

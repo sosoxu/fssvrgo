@@ -2,13 +2,54 @@ name: CI
 
 on:
   push:
-    branches: [main, 'trae/**']
+    branches: [main, 'trae/**', 'review/**']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # The suite talks to a real PostgreSQL (metadata, consistency, list
+    # queries) and a real Redis (distributed locks, sessions). Without these
+    # services the database-backed tests used to skip, which hid defects such
+    # as the filelist COUNT query that only fails on PostgreSQL.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: fsserver
+          POSTGRES_PASSWORD: fsserver123
+          POSTGRES_DB: fsserver
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fsserver"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      FSS_TEST_PG_HOST: localhost
+      FSS_TEST_PG_PORT: "5432"
+      FSS_TEST_PG_NAME: fsserver
+      FSS_TEST_PG_USER: fsserver
+      FSS_TEST_PG_PASS: fsserver123
+      FSS_TEST_PG_SSLMODE: disable
+      # Fail (instead of skip) when the database is unreachable, so a green
+      # build always means the PostgreSQL-backed tests actually ran.
+      FSS_TEST_REQUIRE_INFRA: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -30,4 +71,4 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test -short ./internal/...
+        run: go test ./internal/... -count=1
