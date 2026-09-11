@@ -257,7 +257,7 @@ func benchExists(b *testing.B, store StorageAdapter, size int64) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if !store.Exists(key) {
+		if !mustExist(b, store, key) {
 			b.Fatal("Exists should return true")
 		}
 	}

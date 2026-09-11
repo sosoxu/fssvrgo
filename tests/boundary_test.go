@@ -182,7 +182,7 @@ func testLocalStorage_SpecialCharacters(t *testing.T) {
 			t.Errorf("Write %q failed: %v", p, err)
 			continue
 		}
-		if !env.storage.Exists(p) {
+		if !mustStorageExist(t, env.storage, p) {
 			t.Errorf("Exists %q returned false", p)
 			continue
 		}
@@ -311,10 +311,10 @@ func testLocalStorage_Rename(t *testing.T) {
 		t.Fatalf("Rename failed: %v", err)
 	}
 
-	if env.storage.Exists(oldPath) {
+	if mustStorageExist(t, env.storage, oldPath) {
 		t.Errorf("old path should not exist after rename")
 	}
-	if !env.storage.Exists(newPath) {
+	if !mustStorageExist(t, env.storage, newPath) {
 		t.Errorf("new path should exist after rename")
 	}
 
@@ -542,7 +542,7 @@ func testTransfer_HashMismatch(t *testing.T) {
 	}
 
 	// File should not exist in storage after hash mismatch.
-	if env.storage.Exists(path) {
+	if mustStorageExist(t, env.storage, path) {
 		t.Errorf("file should not exist in storage after hash mismatch")
 	}
 }

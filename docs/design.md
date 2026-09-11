@@ -155,7 +155,7 @@ type StorageAdapter interface {
     ReadAt(string, int, int64) ([]byte, error)
     OpenReader(string) (io.ReadCloser, error)
     Remove(string) error
-    Exists(string) bool
+    Exists(string) (bool, error)
     List(string) ([]string, error)
     GetSize(string) (int64, error)
     Rename(string, string) error
@@ -174,6 +174,9 @@ type StorageAdapter interface {
   （`ListObjects(ctx) ([]string, error)`）获得，而不是把枚举塞进 `StorageAdapter`；
   不支持枚举的后端只是不实现该接口。
 - 存储路径锁表（`CleanPathLocks`）同样不属于接口，它是本地实现细节，只对测试开放。
+- `Exists` 返回 `(bool, error)`：只有确认不存在才返回 `(false, nil)`，后端故障
+  （网络错误、权限问题、路径非法等）必须以 error 形式上抛，避免调用方把基础设施故障
+  误判为"文件不存在"从而走覆盖/新建分支。
 
 #### LocalStorage (`internal/storage/local.go`)
 

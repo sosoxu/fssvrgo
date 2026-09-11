@@ -90,7 +90,7 @@ func TestCrossBackendWriteReadDoubleDotName(t *testing.T) {
 		if string(got) != string(data) {
 			t.Errorf("[%s] Read back = %q, want %q", name, got, data)
 		}
-		if !s.Exists(path) {
+		if !mustExist(t, s, path) {
 			t.Errorf("[%s] Exists(%q) = false, want true", name, path)
 		}
 	})
@@ -106,13 +106,13 @@ func TestMinIOExistsDirectoryWithChildren(t *testing.T) {
 	if err := store.Write("docs/readme.txt", []byte("x")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if !store.Exists("docs/readme.txt") {
+	if !mustExist(t, store, "docs/readme.txt") {
 		t.Error("Exists(\"docs/readme.txt\") = false, want true")
 	}
-	if !store.Exists("docs") {
+	if !mustExist(t, store, "docs") {
 		t.Error("Exists(\"docs\") = false, want true (directory has children)")
 	}
-	if store.Exists("does/not/exist") {
+	if mustExist(t, store, "does/not/exist") {
 		t.Error("Exists(\"does/not/exist\") = true, want false")
 	}
 }
@@ -126,13 +126,13 @@ func TestLocalStorageExistsDirectoryWithChildren(t *testing.T) {
 	if err := s.Write("docs/readme.txt", []byte("x")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if !s.Exists("docs/readme.txt") {
+	if !mustExist(t, s, "docs/readme.txt") {
 		t.Error("Exists(\"docs/readme.txt\") = false, want true")
 	}
-	if !s.Exists("docs") {
+	if !mustExist(t, s, "docs") {
 		t.Error("Exists(\"docs\") = false, want true (directory has children)")
 	}
-	if s.Exists("does/not/exist") {
+	if mustExist(t, s, "does/not/exist") {
 		t.Error("Exists(\"does/not/exist\") = true, want false")
 	}
 }

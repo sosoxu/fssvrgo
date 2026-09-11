@@ -83,7 +83,7 @@ func TestRealMinIOWriteAndRead(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if !store.Exists(key) {
+	if !mustExist(t, store, key) {
 		t.Error("object should exist after write")
 	}
 
@@ -256,7 +256,7 @@ func TestRealMinIORemove(t *testing.T) {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
-	if store.Exists(key) {
+	if mustExist(t, store, key) {
 		t.Error("object still exists after remove")
 	}
 }
@@ -276,10 +276,10 @@ func TestRealMinIORename(t *testing.T) {
 		t.Fatalf("Rename failed: %v", err)
 	}
 
-	if store.Exists(oldKey) {
+	if mustExist(t, store, oldKey) {
 		t.Error("old object still exists after rename")
 	}
-	if !store.Exists(newKey) {
+	if !mustExist(t, store, newKey) {
 		t.Error("new object does not exist after rename")
 	}
 
@@ -304,7 +304,7 @@ func TestRealMinIORenameSameKey(t *testing.T) {
 		t.Fatalf("Rename same key should not fail: %v", err)
 	}
 
-	if !store.Exists(key) {
+	if !mustExist(t, store, key) {
 		t.Error("object should still exist after rename to same key")
 	}
 }
@@ -312,7 +312,7 @@ func TestRealMinIORenameSameKey(t *testing.T) {
 func TestRealMinIOExists(t *testing.T) {
 	store := newRealMinIOStorage(t)
 
-	if store.Exists("test/nonexistent.txt") {
+	if mustExist(t, store, "test/nonexistent.txt") {
 		t.Error("object should not exist")
 	}
 
@@ -321,13 +321,13 @@ func TestRealMinIOExists(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if !store.Exists(key) {
+	if !mustExist(t, store, key) {
 		t.Error("object should exist after write")
 	}
 
 	store.Remove(key)
 
-	if store.Exists(key) {
+	if mustExist(t, store, key) {
 		t.Error("object should not exist after remove")
 	}
 }
@@ -360,7 +360,7 @@ func TestRealMinIOCreateDirectory(t *testing.T) {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 
-	if !store.Exists(prefix + "/") {
+	if !mustExist(t, store, prefix + "/") {
 		t.Error("directory marker should exist after CreateDirectory")
 	}
 }
@@ -377,10 +377,10 @@ func TestRealMinIORemoveDirectory(t *testing.T) {
 		t.Fatalf("RemoveDirectory failed: %v", err)
 	}
 
-	if store.Exists(prefix + "/a.txt") {
+	if mustExist(t, store, prefix + "/a.txt") {
 		t.Error("object should not exist after RemoveDirectory")
 	}
-	if store.Exists(prefix + "/") {
+	if mustExist(t, store, prefix + "/") {
 		t.Error("directory marker should not exist after RemoveDirectory")
 	}
 }

@@ -17,7 +17,7 @@ func TestLocalStorageWrite(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if !ls.Exists("test.txt") {
+	if !mustExist(t, ls, "test.txt") {
 		t.Errorf("file does not exist after write")
 	}
 }
@@ -104,7 +104,7 @@ func TestLocalStorageRemove(t *testing.T) {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
-	if ls.Exists("remove.txt") {
+	if mustExist(t, ls, "remove.txt") {
 		t.Errorf("file still exists after remove")
 	}
 }
@@ -121,10 +121,10 @@ func TestLocalStorageRename(t *testing.T) {
 		t.Fatalf("Rename failed: %v", err)
 	}
 
-	if ls.Exists("old.txt") {
+	if mustExist(t, ls, "old.txt") {
 		t.Errorf("old file still exists after rename")
 	}
-	if !ls.Exists("new.txt") {
+	if !mustExist(t, ls, "new.txt") {
 		t.Errorf("new file does not exist after rename")
 	}
 }
@@ -133,7 +133,7 @@ func TestLocalStorageExists(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
 
-	if ls.Exists("nope.txt") {
+	if mustExist(t, ls, "nope.txt") {
 		t.Errorf("file should not exist")
 	}
 
@@ -141,7 +141,7 @@ func TestLocalStorageExists(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if !ls.Exists("exists.txt") {
+	if !mustExist(t, ls, "exists.txt") {
 		t.Errorf("file should exist after write")
 	}
 
@@ -149,7 +149,7 @@ func TestLocalStorageExists(t *testing.T) {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
-	if ls.Exists("exists.txt") {
+	if mustExist(t, ls, "exists.txt") {
 		t.Errorf("file should not exist after remove")
 	}
 }

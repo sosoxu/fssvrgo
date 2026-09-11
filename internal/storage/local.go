@@ -312,13 +312,21 @@ func (ls *LocalStorage) CleanPathLocks() {
 	})
 }
 
-func (ls *LocalStorage) Exists(path string) bool {
+// Exists reports whether path exists. Errors other than "not found" (for
+// example a permission problem) are returned to the caller instead of being
+// reported as "absent".
+func (ls *LocalStorage) Exists(path string) (bool, error) {
 	if err := ls.validatePath(path); err != nil {
-		return false
+		return false, err
 	}
 	fullPath := ls.getFullPath(path)
-	_, err := os.Stat(fullPath)
-	return err == nil
+	if _, err := os.Stat(fullPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+	return true, nil
 }
 
 func (ls *LocalStorage) List(directory string) ([]string, error) {

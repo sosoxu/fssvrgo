@@ -35,7 +35,11 @@ type StorageAdapter interface {
 	ReadAt(path string, size int, offset int64) ([]byte, error)
 	OpenReader(path string) (io.ReadCloser, error)
 	Remove(path string) error
-	Exists(path string) bool
+	// Exists reports whether path exists. A non-nil error means the backend
+	// could not determine existence (network failure, permission error, ...);
+	// callers must not collapse that into "absent", because doing so turns an
+	// infrastructure fault into a silent overwrite or a bogus "file missing".
+	Exists(path string) (bool, error)
 	List(directory string) ([]string, error)
 	GetSize(path string) (int64, error)
 	Rename(oldPath, newPath string) error

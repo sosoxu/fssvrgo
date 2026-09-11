@@ -289,7 +289,7 @@ func TestDirectoryManagerWithStore_DeleteRemovesStorageObject(t *testing.T) {
 	if err := store.Write("foo/bar.txt", []byte("hello")); err != nil {
 		t.Fatalf("store.Write failed: %v", err)
 	}
-	if !store.Exists("foo/bar.txt") {
+	if !mustExist(t, store, "foo/bar.txt") {
 		t.Fatalf("storage file should exist before deletion")
 	}
 	createFileRecord(t, db, "foo/bar.txt", 5)
@@ -298,7 +298,7 @@ func TestDirectoryManagerWithStore_DeleteRemovesStorageObject(t *testing.T) {
 	if err := dm.DeleteDirectory("foo", true); err != nil {
 		t.Fatalf("DeleteDirectory recursive failed: %v", err)
 	}
-	if store.Exists("foo/bar.txt") {
+	if mustExist(t, store, "foo/bar.txt") {
 		t.Errorf("storage file should be removed after deletion")
 	}
 }
@@ -315,7 +315,7 @@ func TestDirectoryManagerWithStore_RenameMovesStorageObject(t *testing.T) {
 	if err := store.Write("foo/bar.txt", []byte("hello")); err != nil {
 		t.Fatalf("store.Write failed: %v", err)
 	}
-	if !store.Exists("foo/bar.txt") {
+	if !mustExist(t, store, "foo/bar.txt") {
 		t.Fatalf("storage file should exist before rename")
 	}
 	createFileRecord(t, db, "foo/bar.txt", 5)
@@ -324,10 +324,10 @@ func TestDirectoryManagerWithStore_RenameMovesStorageObject(t *testing.T) {
 	if err := dm.RenameDirectory("foo", "baz"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
-	if store.Exists("foo/bar.txt") {
+	if mustExist(t, store, "foo/bar.txt") {
 		t.Errorf("storage file should not exist at old path after rename")
 	}
-	if !store.Exists("baz/bar.txt") {
+	if !mustExist(t, store, "baz/bar.txt") {
 		t.Errorf("storage file should exist at new path after rename")
 	}
 	// DB 元数据也应更新

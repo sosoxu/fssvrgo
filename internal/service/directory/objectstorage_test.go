@@ -114,11 +114,11 @@ func (m *mockObjectStorage) OpenReader(path string) (io.ReadCloser, error) {
 	}
 	return nil, fmt.Errorf("not found")
 }
-func (m *mockObjectStorage) Exists(path string) bool {
+func (m *mockObjectStorage) Exists(path string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.objects[path]
-	return ok
+	return ok, nil
 }
 func (m *mockObjectStorage) List(directory string) ([]string, error) {
 	return nil, nil
@@ -232,7 +232,7 @@ func TestDirectoryManager_LocalStorage_StillCallsDirectoryStorageOps(t *testing.
 	if err := dm.CreateDirectory("foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if !store.Exists("foo") {
+	if !mustExist(t, store, "foo") {
 		// LocalStorage.CreateDirectory makes the physical directory; a marker
 		// file or the directory itself should be observable.
 		t.Errorf("expected local backend to have created the directory marker")

@@ -285,9 +285,12 @@ func (ms *MinIOStorage) Remove(objectKey string) error {
 	return nil
 }
 
-func (ms *MinIOStorage) Exists(objectKey string) bool {
+// Exists reports whether objectKey (an object, or a directory-like prefix that
+// has children) exists. Backend failures such as network errors are returned
+// rather than being collapsed into "absent".
+func (ms *MinIOStorage) Exists(objectKey string) (bool, error) {
 	if err := ms.validatePath(objectKey); err != nil {
-		return false
+		return false, err
 	}
 
 	key := ms.normalizeKey(objectKey)
@@ -300,7 +303,9 @@ func (ms *MinIOStorage) Exists(objectKey string) bool {
 		lookupKey = key + "/"
 	}
 	if _, err := ms.client.StatObject(ctx, ms.bucket, lookupKey, minio.StatObjectOptions{}); err == nil {
-		return true
+		return true, nil
+	} else if !IsNotExist(err) {
+		return false, fmt.Errorf("failed to stat object %s: %w", objectKey, err)
 	}
 
 	// No exact object exists. For a non-marker key (not ending with "/"), fall
@@ -309,22 +314,23 @@ func (ms *MinIOStorage) Exists(objectKey string) bool {
 	// directory is reported as existing whenever it contains children.
 	if !strings.HasSuffix(key, "/") {
 		listCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
 		objectCh := ms.client.ListObjects(listCtx, ms.bucket, minio.ListObjectsOptions{
 			Prefix:    key + "/",
 			Recursive: false,
 		})
-		found := false
 		for obj := range objectCh {
 			if obj.Err != nil {
-				break
+				if IsNotExist(obj.Err) {
+					return false, nil
+				}
+				return false, fmt.Errorf("failed to list objects under %s: %w", objectKey, obj.Err)
 			}
-			found = true
-			break
+			return true, nil
 		}
-		cancel()
-		return found
+		return false, nil
 	}
-	return false
+	return false, nil
 }
 
 func (ms *MinIOStorage) List(prefix string) ([]string, error) {
@@ -515,7 +521,13 @@ func (ms *MinIOStorage) CleanPathLocks() {
 			return true
 		}
 		mu.Unlock()
-		if !ms.Exists(objectKey) {
+		exists, err := ms.Exists(objectKey)
+		if err != nil {
+			// Keep the lock entry when existence cannot be determined; dropping
+			// it here could let a concurrent writer race on the same key.
+			return true
+		}
+		if !exists {
 			ms.pathLocks.Delete(key)
 		}
 		return true
