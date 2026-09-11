@@ -2,6 +2,9 @@
 
 > 代码审查发现的 10 个主要问题 + 4 个细节项，已全部记录到 GitHub Issues 并修复关闭。
 > 提交代码时在 commit message 中引用编号（如 `fix(security): closes #55`）。
+>
+> 第二轮设计评审（2026-09-11）的发现见文末"第二轮评审登记表"，完整报告见
+> [docs/design-review-20260911.md](docs/design-review-20260911.md)。
 
 ## GitHub Issue 编号映射
 
@@ -93,3 +96,46 @@
 - `Content-Disposition` 转义：`server.go` 下载响应头转义双引号并添加 `filename*=UTF-8''` URL 编码
 - 符号链接绕过 `ValidatePath`：`storage/local.go` 添加 `EvalSymlinks` 解析 + `resolveExistingAncestor` 处理新文件路径
 - JWT secret 注释修正：`auth.go` 注释准确描述密钥复用情况并建议域分离改进
+
+---
+
+# 第二轮评审登记表（2026-09-11）
+
+> 基线：`a4abea6`（分支 `review/acceptance-20260911`）
+> 评审报告：[docs/design-review-20260911.md](docs/design-review-20260911.md)
+> 方法：文档-实现对照走查 + 全仓取证 + 真库实测（Go 1.25.14 + PostgreSQL 12.6）
+> GitHub Issue：**待创建**。本机 `gh` CLI 凭据已失效（`HTTP 401: Bad credentials`），
+> 重新登录后可按下表批量创建，编号届时回填到"GitHub Issue"列。
+
+## 登记表
+
+| 编号 | 级别 | 标题 | 证据位置 | GitHub Issue | 状态 |
+|---|---|---|---|---|---|
+| R1 | P0 | filelist 计数查询缺子查询别名，PostgreSQL 上必然失败 | `internal/service/filelist/service.go:150` | 待创建 | 待处理 |
+| R2 | P0 | 一致性与服务发现模块未接线（死代码） | `cmd/fsserver/main.go:235,271` | 待创建 | 待处理 |
+| R3 | P0 | 存储与元数据之间缺少原子性保障与对账补偿 | `internal/service/transfer/service.go:336` | 待创建 | 待处理 |
+| R4 | P1 | `StorageAdapter` 接口层次过低且含死方法 | `internal/storage/local.go:12` | 待创建 | 待处理 |
+| R5 | P1 | `StorageAdapter.Exists` 吞掉错误 | `internal/storage/local.go:21` | 待创建 | 待处理 |
+| R6 | P1 | CI 无真实 PostgreSQL/Redis，跳过而非失败，掩盖缺陷 | `.github/workflows/ci.yml` | 待创建 | 待处理 |
+| R7 | P1 | 需求、设计、README 与实现三方漂移 | `docs/requirements.md` 第 5 节 | 待创建 | 待处理 |
+| R8 | P2 | HTTP 层与持久化耦合，单文件 1717 行 | `internal/api/http/server.go:56,1022,1176` | 待创建 | 待处理 |
+| R9 | P2 | 服务层依赖具体 `*database.DB`，单元测试必须起真库 | `internal/service/filemanager/manager.go:19` | 待创建 | 待处理 |
+| R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） | `internal/service/filemanager/manager.go:63` | 待创建 | 待处理 |
+| R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | `internal/database/dialect.go:40` | 待创建 | 待处理 |
+| R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 | `internal/storage/local.go:33`、`internal/service/directory/manager.go:64` | 待创建 | 待处理 |
+| R13 | P2 | 数据库 schema 定义重复两份 | `cmd/fsserver/main.go:74`、`internal/database/metadata.go:104` | 待创建 | 待处理 |
+| R14 | P3 | 加密路径全量入内存，并发下有内存放大 | `internal/api/http/server.go:487` | 待创建 | 待处理 |
+| R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 | `cmd/fsserver/main.go:183` | 待创建 | 待处理 |
+| R16 | P3 | 预编译语句缓存错误路径泄漏 | `internal/database/db.go:66` | 待创建 | 待处理 |
+| R17 | P3 | 审计日志异步批写的可见性窗口 | `internal/database/audit_writer.go:15` | 待创建 | 待处理 |
+
+## 本轮已实测确认的失败
+
+`go test ./internal/... -count=1`（连 PostgreSQL 12.6，非 `-short`）：
+**12 个包通过，`internal/service/filelist` 失败**，14 个用例报同一条错误：
+
+```
+pq: FROM 中的子查询必须有一个别名 at column 22 (42601)
+```
+
+对应 R1。该缺陷在 CI 的 `-short` 模式下被 `t.Skipf` 掩盖。
