@@ -147,7 +147,7 @@ func (s *FileListService) listFiles(path string, recursive bool, page, pageSize 
 	total := -1 // -1 signals "not computed"
 	if includeTotal {
 		countQuery := fmt.Sprintf(
-			`SELECT COUNT(*) FROM (SELECT id FROM files WHERE %s UNION ALL SELECT id FROM directories WHERE %s)`,
+			`SELECT COUNT(*) FROM (SELECT id FROM files WHERE %s UNION ALL SELECT id FROM directories WHERE %s) AS t`,
 			whereClause, whereClause,
 		)
 		countArgs := make([]interface{}, 0, len(args)*2)
