@@ -107,6 +107,47 @@ func (w *AuditWriter) Close(ctx context.Context) error {
 	return nil
 }
 
+// Flush persists everything submitted so far, waiting until the batch has been
+// written (or ctx expires).
+//
+// Read paths that must observe a write they just made call this before
+// querying — for example the audit-log query API, which otherwise races the
+// asynchronous batched writer and can return results missing the operation the
+// caller just performed.
+func (w *AuditWriter) Flush(ctx context.Context) error {
+	if w == nil || w.svc == nil || w.svc.db == nil {
+		return nil
+	}
+	w.drainChannel()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.pending) == 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	batch := w.pending
+	w.pending = nil
+	return w.writeBatch(ctx, batch)
+}
+
+// drainChannel moves buffered entries into pending so Flush sees them even
+// when the background loop has not picked them up yet.
+func (w *AuditWriter) drainChannel() {
+	for {
+		select {
+		case entry := <-w.ch:
+			w.mu.Lock()
+			w.pending = append(w.pending, entry)
+			w.mu.Unlock()
+		default:
+			return
+		}
+	}
+}
+
 func (w *AuditWriter) loop(ctx context.Context) {
 	defer close(w.done)
 	ticker := time.NewTicker(w.flushInterval)

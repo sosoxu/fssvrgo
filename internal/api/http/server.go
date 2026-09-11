@@ -1019,6 +1019,15 @@ func (s *Server) handleListAuditLogs(c *gin.Context) {
 		page = 1
 	}
 
+	// Audit rows are written asynchronously in batches. Flush first so a caller
+	// that just performed an operation observes it in the query result instead
+	// of racing the writer's flush interval.
+	if s.auditWriter != nil {
+		if err := s.auditWriter.Flush(c.Request.Context()); err != nil {
+			logger.Warn("failed to flush audit buffer before query: %v", err)
+		}
+	}
+
 	auditLogSvc := database.NewAuditLogService(s.db)
 	logs, err := auditLogSvc.List(operation, resourcePath, page, pageSize)
 	if err != nil {
