@@ -78,7 +78,7 @@ func namesFromItems(items []FileListItem) []string {
 
 func TestListFiles_Empty(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	result, err := svc.ListFilesWithTotal("", false, 1, 10, "name", "asc")
 	if err != nil {
@@ -100,7 +100,7 @@ func TestListFiles_Empty(t *testing.T) {
 
 func TestListFiles_WithFiles(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	ts := utils.GetCurrentTimestamp()
 	insertFile(t, db, "alpha.txt", "alpha.txt", 100, ts)
@@ -158,7 +158,7 @@ func TestListFiles_WithFiles(t *testing.T) {
 
 func TestListFiles_Pagination(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	// Insert 5 files + 5 directories = 10 top-level entries.
 	ts := utils.GetCurrentTimestamp()
@@ -249,7 +249,7 @@ func TestListFiles_Pagination(t *testing.T) {
 
 func TestListFiles_SortBy(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	// Use distinct timestamps so created_at ordering is deterministic.
 	insertFile(t, db, "c.txt", "c.txt", 100, "2024-01-03T00:00:00Z")
@@ -296,7 +296,7 @@ func TestListFiles_SortBy(t *testing.T) {
 
 func TestListFiles_Recursive(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	ts := utils.GetCurrentTimestamp()
 	// Top-level file (should NOT appear when querying path "a").
@@ -370,7 +370,7 @@ func TestListFiles_Recursive(t *testing.T) {
 // correct so callers can paginate without an exact total.
 func TestListFiles_DefaultDoesNotComputeTotal(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	// Insert 5 entries so HasMore is exercisable with pageSize=3.
 	ts := utils.GetCurrentTimestamp()
@@ -429,7 +429,7 @@ func TestListFiles_DefaultDoesNotComputeTotal(t *testing.T) {
 // runs the COUNT query and returns the exact total alongside HasMore.
 func TestListFilesWithTotal_ComputesExactCount(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	ts := utils.GetCurrentTimestamp()
 	for i := 0; i < 4; i++ {
@@ -472,7 +472,7 @@ func TestListFilesWithTotal_ComputesExactCount(t *testing.T) {
 // HasMore=false and Total=-1 under the default ListFiles path.
 func TestListFiles_EmptyHasMoreFalse(t *testing.T) {
 	db := setupTestDB(t)
-	svc := NewFileListService(db)
+	svc := NewFileListServiceFromDB(db)
 
 	result, err := svc.ListFiles("", false, 1, 10, "name", "asc")
 	if err != nil {

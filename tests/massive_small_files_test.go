@@ -218,7 +218,7 @@ func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
 
 	fm := filemanager.NewFileManagerWithDistLock(store, qdb, distLock)
 	dirSvc := directory.NewDirectoryManager(qdb)
-	flSvc := filelist.NewFileListService(qdb)
+	flSvc := filelist.NewFileListServiceFromDB(qdb)
 	authSvc := auth.NewAuthService()
 	authSvc.Init(false, "") // auth disabled -> gRPC interceptor passes with no API key
 	cryptoSvc := crypto.NewCryptoService()

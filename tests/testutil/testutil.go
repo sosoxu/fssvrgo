@@ -89,7 +89,7 @@ func NewTestServer() (*TestServer, error) {
 
 	fm := filemanager.NewFileManager(store, qdb)
 	dirSvc := directory.NewDirectoryManager(qdb)
-	flSvc := filelist.NewFileListService(qdb)
+	flSvc := filelist.NewFileListServiceFromDB(qdb)
 	authSvc := auth.NewAuthService()
 	authSvc.Init(false, "")
 	cryptoSvc := crypto.NewCryptoService()

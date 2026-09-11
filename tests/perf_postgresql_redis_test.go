@@ -152,7 +152,7 @@ func createPerfInstance(t *testing.T, id int, db *database.DB, store storage.Sto
 
 	fm := filemanager.NewFileManagerWithDistLock(store, db, distLock)
 	dirSvc := directory.NewDirectoryManager(db)
-	flSvc := filelist.NewFileListService(db)
+	flSvc := filelist.NewFileListServiceFromDB(db)
 	authSvc := auth.NewAuthService()
 	authSvc.Init(false, "")
 	cryptoSvc := crypto.NewCryptoService()

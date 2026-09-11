@@ -67,7 +67,7 @@ func setupPostgreSQLTest(t *testing.T) (*filemanager.FileManager, *directory.Dir
 	store := storage.NewLocalStorage(storageDir)
 	fm := filemanager.NewFileManager(store, qdb)
 	dirSvc := directory.NewDirectoryManager(qdb)
-	flSvc := filelist.NewFileListService(qdb)
+	flSvc := filelist.NewFileListServiceFromDB(qdb)
 	transferSvc := transfer.NewFileTransferService(store, qdb)
 
 	cleanup := func() {

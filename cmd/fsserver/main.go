@@ -253,7 +253,7 @@ func main() {
 	// Services
 	fm := filemanager.NewFileManagerWithDistLock(store, queryDB, distLock)
 	dirSvc := directory.NewDirectoryManagerWithDistLock(queryDB, store, distLock)
-	flSvc := filelist.NewFileListService(queryDB)
+	flSvc := filelist.NewFileListServiceFromDB(queryDB)
 	transferSvc := transfer.NewFileTransferServiceWithRedis(store, queryDB, sessionStore, distLock)
 	transferSvc.SetCryptoService(cryptoSvc)
 

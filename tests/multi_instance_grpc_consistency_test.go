@@ -83,7 +83,7 @@ func NewGRPCCluster(t *testing.T, numInstances int) *GRPCCluster {
 	for i := 0; i < numInstances; i++ {
 		fm := filemanager.NewFileManager(store, qdb)
 		dirSvc := directory.NewDirectoryManager(qdb)
-		flSvc := filelist.NewFileListService(qdb)
+		flSvc := filelist.NewFileListServiceFromDB(qdb)
 		transferSvc := transfer.NewFileTransferService(store, qdb)
 
 		cluster.Instances = append(cluster.Instances, &GRPCInstance{

@@ -203,7 +203,7 @@ func createCompInstance(t *testing.T, id int, db *database.DB, store storage.Sto
 		transferSvc = transfer.NewFileTransferService(store, db)
 	}
 	dirSvc := directory.NewDirectoryManager(db)
-	flSvc := filelist.NewFileListService(db)
+	flSvc := filelist.NewFileListServiceFromDB(db)
 	authSvc := auth.NewAuthService()
 	authSvc.Init(false, "")
 	cryptoSvc := crypto.NewCryptoService()

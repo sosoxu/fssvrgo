@@ -1,7 +1,6 @@
 package filelist
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/sosoxu/fssvrgo/internal/database"
@@ -31,19 +30,27 @@ type FileListResult struct {
 	Items    []FileListItem
 }
 
+// Listing is the data-access seam of this service. The SQL lives behind it
+// (database.FileListStore); the service itself is pagination and validation
+// logic, so unit tests can drive it with an in-memory fake instead of a
+// PostgreSQL instance.
+type Listing interface {
+	List(query database.FileListQuery) ([]database.FileListRow, error)
+	Count(query database.FileListQuery) (int, error)
+}
+
 type FileListService struct {
-	db *database.DB
+	store Listing
 }
 
-func NewFileListService(db *database.DB) *FileListService {
-	return &FileListService{db: db}
+func NewFileListService(store Listing) *FileListService {
+	return &FileListService{store: store}
 }
 
-func escapeLikePattern(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "%", "\\%")
-	s = strings.ReplaceAll(s, "_", "\\_")
-	return s
+// NewFileListServiceFromDB wires the service to the SQL-backed store. Use this
+// in production wiring; tests can pass a fake Listing instead.
+func NewFileListServiceFromDB(db *database.DB) *FileListService {
+	return NewFileListService(database.NewFileListStore(db))
 }
 
 // ListFiles lists files and directories under path with pagination. It does NOT
@@ -83,59 +90,33 @@ func (s *FileListService) listFiles(path string, recursive bool, page, pageSize 
 		order = "DESC"
 	}
 
-	var whereClause string
-	var args []interface{}
-
-	if path == "" {
-		if recursive {
-			whereClause = "is_deleted = FALSE"
-		} else {
-			whereClause = "is_deleted = FALSE AND path NOT LIKE '%/%'"
-		}
-	} else {
-		prefix := path + "/"
-		escapedPrefix := escapeLikePattern(prefix)
-		if recursive {
-			whereClause = "is_deleted = FALSE AND path LIKE ? ESCAPE '\\'"
-			args = append(args, escapedPrefix+"%")
-		} else {
-			whereClause = "is_deleted = FALSE AND path LIKE ? ESCAPE '\\' AND path NOT LIKE ? ESCAPE '\\'"
-			args = append(args, escapedPrefix+"%", escapedPrefix+"%/%")
-		}
-	}
-
 	// Fetch one extra row (pageSize+1) to determine HasMore without a COUNT.
 	// This is O(pageSize) rather than O(N) for the common case where the caller
 	// does not need an exact total.
-	fetchLimit := pageSize + 1
-	offset := (page - 1) * pageSize
-
-	itemsQuery := fmt.Sprintf(
-		`SELECT id, path, name, size, 'file' AS type, created_at FROM files WHERE %s
-		UNION ALL
-		SELECT id, path, name, 0 AS size, 'directory' AS type, created_at FROM directories WHERE %s
-		ORDER BY %s %s LIMIT ? OFFSET ?`,
-		whereClause, whereClause, sortBy, order,
-	)
-
-	itemsArgs := make([]interface{}, 0, len(args)*2+2)
-	itemsArgs = append(itemsArgs, args...)
-	itemsArgs = append(itemsArgs, args...)
-	itemsArgs = append(itemsArgs, fetchLimit, offset)
-
-	rows, err := s.db.Query(itemsQuery, itemsArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list items: %w", err)
+	query := database.FileListQuery{
+		Path:      path,
+		Recursive: recursive,
+		SortBy:    sortBy,
+		SortOrder: order,
+		Limit:     pageSize + 1,
+		Offset:    (page - 1) * pageSize,
 	}
-	defer rows.Close()
 
-	var items []FileListItem
-	for rows.Next() {
-		var item FileListItem
-		if err := rows.Scan(&item.ID, &item.Path, &item.Name, &item.Size, &item.Type, &item.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan item: %w", err)
-		}
-		items = append(items, item)
+	rows, err := s.store.List(query)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]FileListItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, FileListItem{
+			ID:        row.ID,
+			Path:      row.Path,
+			Name:      row.Name,
+			Size:      row.Size,
+			Type:      row.Type,
+			CreatedAt: row.CreatedAt,
+		})
 	}
 
 	hasMore := len(items) > pageSize
@@ -146,16 +127,11 @@ func (s *FileListService) listFiles(path string, recursive bool, page, pageSize 
 
 	total := -1 // -1 signals "not computed"
 	if includeTotal {
-		countQuery := fmt.Sprintf(
-			`SELECT COUNT(*) FROM (SELECT id FROM files WHERE %s UNION ALL SELECT id FROM directories WHERE %s) AS t`,
-			whereClause, whereClause,
-		)
-		countArgs := make([]interface{}, 0, len(args)*2)
-		countArgs = append(countArgs, args...)
-		countArgs = append(countArgs, args...)
-		if err := s.db.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
-			return nil, fmt.Errorf("failed to count items: %w", err)
+		exact, err := s.store.Count(query)
+		if err != nil {
+			return nil, err
 		}
+		total = exact
 	}
 
 	if items == nil {
