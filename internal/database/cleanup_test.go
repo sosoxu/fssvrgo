@@ -3,17 +3,14 @@ package database
 import (
 	"testing"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 )
 
 func TestCleanupService_StartStop(t *testing.T) {
 	db := NewDatabase()
 
-	cfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: ":memory:",
-	}
+	cfg := pgtest.NewSchema(t)
 	if err := db.Connect(cfg); err != nil {
 		t.Skipf("Cannot connect to database: %v", err)
 	}

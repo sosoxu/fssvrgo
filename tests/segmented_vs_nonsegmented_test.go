@@ -24,6 +24,7 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -69,8 +70,7 @@ func setupCompareEnv(t *testing.T) *CompareTestEnv {
 		t.Fatalf("failed to create storage dir: %v", err)
 	}
 
-	dbPath := filepath.Join(tempDir, "test.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
+	dbCfg := pgtest.NewSchema(t)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		os.RemoveAll(tempDir)
@@ -1031,8 +1031,7 @@ func createCompareBenchEnv(b *testing.B) *CompareTestEnv {
 	storageDir := filepath.Join(tempDir, "storage")
 	os.MkdirAll(storageDir, 0755)
 
-	dbPath := filepath.Join(tempDir, "bench.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
+	dbCfg := pgtest.NewSchema(b)
 	dbObj := database.NewDatabase()
 	dbObj.Connect(dbCfg)
 	qdb := dbObj.GetQueryDB()

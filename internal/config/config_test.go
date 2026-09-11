@@ -35,8 +35,11 @@ func validConfig() *Config {
 			},
 		},
 		Database: DatabaseConfig{
-			Type:     "sqlite",
-			Path:     "/data/test.db",
+			Type:     "postgresql",
+			Host:     "localhost",
+			Port:     5432,
+			Name:     "testdb",
+			User:     "testuser",
 			PoolSize: 10,
 		},
 	}
@@ -57,8 +60,11 @@ storage:
   local:
     root_dir: /data/test
 database:
-  type: sqlite
-  path: /data/test.db
+  type: postgresql
+  host: localhost
+  port: 5432
+  name: testdb
+  user: testuser
   pool_size: 10
 logging:
   level: info
@@ -170,10 +176,13 @@ func TestEmptyRootDir(t *testing.T) {
 }
 
 func TestInvalidDatabaseType(t *testing.T) {
-	cfg := validConfig()
-	cfg.Database.Type = "mysql"
-	if err := cfg.Validate(); err == nil {
-		t.Errorf("expected validation error for database type mysql")
+	// PostgreSQL is the only supported database type.
+	for _, dbType := range []string{"mysql", "sqlite"} {
+		cfg := validConfig()
+		cfg.Database.Type = dbType
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected validation error for database type %q", dbType)
+		}
 	}
 }
 
@@ -206,8 +215,8 @@ func TestConfigFieldAccess(t *testing.T) {
 	if cfg.GetStorage().Type != "local" {
 		t.Errorf("GetStorage().Type expected local, got %s", cfg.GetStorage().Type)
 	}
-	if cfg.GetDatabase().Type != "sqlite" {
-		t.Errorf("GetDatabase().Type expected sqlite, got %s", cfg.GetDatabase().Type)
+	if cfg.GetDatabase().Type != "postgresql" {
+		t.Errorf("GetDatabase().Type expected postgresql, got %s", cfg.GetDatabase().Type)
 	}
 	if cfg.GetLogging().Level != "debug" {
 		t.Errorf("GetLogging().Level expected debug, got %s", cfg.GetLogging().Level)

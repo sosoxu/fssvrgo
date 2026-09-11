@@ -5,12 +5,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
@@ -23,11 +22,7 @@ func setupTestEnv(t *testing.T) (*FileTransferService, *storage.LocalStorage, *d
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 
-	dbPath := filepath.Join(storageDir, "test.db")
-	dbCfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: dbPath,
-	}
+	dbCfg := pgtest.NewSchema(t)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		os.RemoveAll(storageDir)

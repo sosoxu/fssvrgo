@@ -16,6 +16,7 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/logger"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -49,13 +50,20 @@ func NewTestServer() (*TestServer, error) {
 
 	_ = logger.Initialize("", "error")
 
-	dbPath := filepath.Join(tempDir, "test.db")
-	dbCfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: dbPath,
+	// Each test server runs in its own PostgreSQL schema so integration tests
+	// stay isolated from one another.
+	dbCfg := pgtest.Config()
+	schema := pgtest.NewSchemaName()
+	if err := pgtest.Create(dbCfg, schema); err != nil {
+		os.RemoveAll(tempDir)
+		return nil, fmt.Errorf("create test schema: %w", err)
 	}
+	dropSchema := func() { _ = pgtest.Drop(pgtest.Config(), schema) }
+	dbCfg.SearchPath = schema
+
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
+		dropSchema()
 		os.RemoveAll(tempDir)
 		return nil, err
 	}
@@ -72,6 +80,7 @@ func NewTestServer() (*TestServer, error) {
 	})
 	if err := migrationMgr.RunMigrations(); err != nil {
 		dbObj.Close()
+		dropSchema()
 		os.RemoveAll(tempDir)
 		return nil, err
 	}
@@ -90,6 +99,7 @@ func NewTestServer() (*TestServer, error) {
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		dbObj.Close()
+		dropSchema()
 		os.RemoveAll(tempDir)
 		return nil, err
 	}
@@ -132,6 +142,7 @@ func NewTestServer() (*TestServer, error) {
 			defer cancel()
 			srv.Shutdown(ctx)
 			dbObj.Close()
+			dropSchema()
 			os.RemoveAll(tempDir)
 		},
 	}

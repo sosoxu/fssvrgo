@@ -20,8 +20,8 @@ import (
 type AuditWriter struct {
 	svc *AuditLogService
 
-	ch       chan *AuditLog
-	batchSize int
+	ch            chan *AuditLog
+	batchSize     int
 	flushInterval time.Duration
 
 	cancel context.CancelFunc
@@ -116,13 +116,17 @@ func (w *AuditWriter) loop(ctx context.Context) {
 		case entry := <-w.ch:
 			w.mu.Lock()
 			w.pending = append(w.pending, entry)
-			if len(w.pending) >= w.batchSize {
+			// Only flush while our own context is still valid. Once Close has
+			// cancelled it, flushing here would run writeBatch under a dead
+			// context, which aborts on the first ctx.Err() check and drops the
+			// whole batch. Leave entries in pending for Close's final flush.
+			if len(w.pending) >= w.batchSize && ctx.Err() == nil {
 				w.flushLocked(ctx)
 			}
 			w.mu.Unlock()
 		case <-ticker.C:
 			w.mu.Lock()
-			if len(w.pending) > 0 {
+			if len(w.pending) > 0 && ctx.Err() == nil {
 				w.flushLocked(ctx)
 			}
 			w.mu.Unlock()
@@ -165,11 +169,14 @@ func (w *AuditWriter) flushLocked(ctx context.Context) {
 // by query string; a multi-row INSERT with a variable placeholder count would
 // defeat that cache. A per-row loop under one logical "batch" still avoids the
 // per-request round-trip and lets the DB batch the writes internally.
-func (w *AuditWriter) writeBatch(ctx context.Context, batch []*AuditLog) error {
+//
+// The context is intentionally not used to abort the loop: AuditLogService.Create
+// takes no context, so it cannot be cancelled mid-write anyway. Aborting here on
+// a cancelled context would silently drop an already-collected batch, and the
+// writer's shutdown path (Close) relies on draining pending rather than
+// discarding it.
+func (w *AuditWriter) writeBatch(_ context.Context, batch []*AuditLog) error {
 	for _, entry := range batch {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		if err := w.svc.Create(entry); err != nil {
 			// Keep going on a single-row failure so one bad row does not drop
 			// the rest of the batch; the per-row error is logged for triage.

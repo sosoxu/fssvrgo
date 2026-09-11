@@ -15,11 +15,11 @@ import (
 )
 
 type Database struct {
-	db       *sql.DB
-	config   config.DatabaseConfig
-	dialect  Dialect
-	queryDB  *DB
-	mu       sync.RWMutex
+	db        *sql.DB
+	config    config.DatabaseConfig
+	dialect   Dialect
+	queryDB   *DB
+	mu        sync.RWMutex
 	lastError string
 }
 
@@ -80,24 +80,19 @@ func (d *Database) connectSQLite(cfg config.DatabaseConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", cfg.Path)
+	// PRAGMAs are connection-scoped: running them once on the pool only affects
+	// that single connection. Under concurrent writes the pool opens additional
+	// connections that lack busy_timeout, so writers fail immediately with
+	// "database is locked (SQLITE_BUSY)". Encoding the pragmas in the DSN makes
+	// the driver apply them to every connection it opens.
+	dsn := cfg.Path +
+		"?_pragma=busy_timeout(5000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)"
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
-	}
-
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
-	}
-
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
-	}
-
-	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set synchronous mode: %w", err)
 	}
 
 	return db, nil
@@ -110,6 +105,12 @@ func (d *Database) connectPostgreSQL(cfg config.DatabaseConfig) (*sql.DB, error)
 	}
 	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Name, sslmode)
+	// lib/pq accepts PostgreSQL run-time parameters directly in the connection
+	// string. search_path is used by the test suite to scope each test to its
+	// own schema; production leaves it empty so the server default applies.
+	if cfg.SearchPath != "" {
+		dsn += " search_path=" + cfg.SearchPath
+	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

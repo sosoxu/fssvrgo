@@ -54,6 +54,10 @@ type DatabaseConfig struct {
 	User               string `yaml:"user"`
 	Password           string `yaml:"password"`
 	SSLMode            string `yaml:"sslmode"`
+	// SearchPath selects the PostgreSQL schema used for the session. It is
+	// empty in production (the default search_path applies) and set by the
+	// test suite so each test runs in its own isolated schema.
+	SearchPath          string `yaml:"search_path"`
 	PoolSize           int    `yaml:"pool_size"`
 	ConnectionTimeoutMs int   `yaml:"connection_timeout_ms"`
 }
@@ -182,7 +186,7 @@ func (c *Config) applyDefaults() {
 		c.Storage.Local.RootDir = "/data/fsserver"
 	}
 	if c.Database.Type == "" {
-		c.Database.Type = "sqlite"
+		c.Database.Type = "postgresql"
 	}
 	if c.Database.PoolSize == 0 {
 		c.Database.PoolSize = 10
@@ -309,25 +313,23 @@ func (c *Config) validateStorage() error {
 }
 
 func (c *Config) validateDatabase() error {
-	if c.Database.Type != "sqlite" && c.Database.Type != "postgresql" {
-		return fmt.Errorf("database.type must be \"sqlite\" or \"postgresql\", got %q", c.Database.Type)
+	// SQLite is retained only for the test suite (unit tests run against an
+	// in-memory SQLite database directly via database.NewDatabase, bypassing
+	// this validation). Runtime deployments must use PostgreSQL.
+	if c.Database.Type != "postgresql" {
+		return fmt.Errorf("database.type must be \"postgresql\", got %q", c.Database.Type)
 	}
-	if c.Database.Type == "sqlite" && c.Database.Path == "" {
-		return fmt.Errorf("database.path is required when database.type is \"sqlite\"")
+	if c.Database.Host == "" {
+		return fmt.Errorf("database.host is required")
 	}
-	if c.Database.Type == "postgresql" {
-		if c.Database.Host == "" {
-			return fmt.Errorf("database.host is required when database.type is \"postgresql\"")
-		}
-		if c.Database.Port < 1 || c.Database.Port > 65535 {
-			return fmt.Errorf("database.port must be between 1 and 65535, got %d", c.Database.Port)
-		}
-		if c.Database.Name == "" {
-			return fmt.Errorf("database.name is required when database.type is \"postgresql\"")
-		}
-		if c.Database.User == "" {
-			return fmt.Errorf("database.user is required when database.type is \"postgresql\"")
-		}
+	if c.Database.Port < 1 || c.Database.Port > 65535 {
+		return fmt.Errorf("database.port must be between 1 and 65535, got %d", c.Database.Port)
+	}
+	if c.Database.Name == "" {
+		return fmt.Errorf("database.name is required")
+	}
+	if c.Database.User == "" {
+		return fmt.Errorf("database.user is required")
 	}
 	if c.Database.PoolSize < 1 {
 		return fmt.Errorf("database.pool_size must be at least 1, got %d", c.Database.PoolSize)

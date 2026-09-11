@@ -4,18 +4,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
 
-// newMetadataTestDB provisions an in-memory SQLite database (single connection
-// so the in-memory store is shared across statements) and initializes all
-// metadata tables via InitTables. The database is closed automatically when
-// the test finishes.
+// newMetadataTestDB provisions an isolated PostgreSQL schema and initializes
+// all metadata tables via InitTables. The schema (and its tables) is dropped
+// automatically when the test finishes.
 func newMetadataTestDB(t *testing.T) *DB {
 	t.Helper()
+	cfg := pgtest.NewSchema(t)
 	dbObj := NewDatabase()
-	cfg := config.DatabaseConfig{Type: "sqlite", Path: ":memory:", PoolSize: 1}
 	if err := dbObj.Connect(cfg); err != nil {
 		t.Fatalf("connect database: %v", err)
 	}

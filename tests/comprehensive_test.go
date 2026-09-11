@@ -27,6 +27,7 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/logger"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -60,6 +61,7 @@ type CompCluster struct {
 	SharedStore  storage.StorageAdapter
 	StorageType  string
 	dbObj        *database.Database
+	dbSchema     string
 	RedisManager *distributed.RedisManager
 }
 
@@ -67,19 +69,7 @@ type CompCluster struct {
 type compClusterConfig struct {
 	storageType string // "local" or "minio"
 	useRedis    bool   // enable Redis distributed lock + session store
-	usePgSQL    bool   // enable PostgreSQL (true) or SQLite (false)
 	numInstance int    // number of fsserver instances
-}
-
-// resetPgDB wipes all tables so each test starts from a clean PostgreSQL state.
-func resetPgDB(t *testing.T, qdb *database.DB) {
-	t.Helper()
-	for _, tbl := range []string{"transfer_tasks", "audit_log", "api_keys", "files", "directories", "schema_migrations"} {
-		if _, err := qdb.Exec("DELETE FROM " + tbl); err != nil {
-			// Table may not exist yet on first run; ignore.
-			_ = err
-		}
-	}
 }
 
 // NewCompCluster builds a cluster with the requested backends.
@@ -99,32 +89,24 @@ func NewCompCluster(t *testing.T, cfg compClusterConfig) *CompCluster {
 	_ = logger.Initialize("", "error")
 
 	// --- Database ---
-	var dbCfg config.DatabaseConfig
-	if cfg.usePgSQL {
-		dbCfg = config.DatabaseConfig{
-			Type:     "postgresql",
-			Host:     "localhost",
-			Port:     5432,
-			Name:     "fsserver",
-			User:     "fsserver",
-			Password: "fsserver123",
-			SSLMode:  "disable",
-		}
-	} else {
-		dbCfg = config.DatabaseConfig{Type: "sqlite", Path: filepath.Join(tempDir, "test.db")}
+	// The suite runs exclusively against PostgreSQL. Each cluster gets its own
+	// isolated schema (selected via search_path) so clusters stay independent.
+	schema := pgtest.NewSchemaName()
+	if err := pgtest.Create(pgtest.Config(), schema); err != nil {
+		os.RemoveAll(tempDir)
+		t.Skipf("PostgreSQL not available: %v", err)
 	}
+	dropSchema := func() { _ = pgtest.Drop(pgtest.Config(), schema) }
+	dbCfg := pgtest.Config()
+	dbCfg.SearchPath = schema
+
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
+		dropSchema()
 		os.RemoveAll(tempDir)
-		if cfg.usePgSQL {
-			t.Skipf("PostgreSQL not available: %v", err)
-		}
-		t.Fatalf("connect database: %v", err)
+		t.Skipf("PostgreSQL not available: %v", err)
 	}
 	qdb := dbObj.GetQueryDB()
-	if cfg.usePgSQL {
-		resetPgDB(t, qdb)
-	}
 	migrationMgr := database.NewMigrationManager(qdb)
 	migrationMgr.Register(database.Migration{
 		Version: 1, Name: "initial_schema",
@@ -132,6 +114,7 @@ func NewCompCluster(t *testing.T, cfg compClusterConfig) *CompCluster {
 	})
 	if err := migrationMgr.RunMigrations(); err != nil {
 		dbObj.Close()
+		dropSchema()
 		os.RemoveAll(tempDir)
 		t.Fatalf("run migrations: %v", err)
 	}
@@ -149,6 +132,7 @@ func NewCompCluster(t *testing.T, cfg compClusterConfig) *CompCluster {
 		})
 		if err != nil {
 			dbObj.Close()
+			dropSchema()
 			os.RemoveAll(tempDir)
 			t.Skipf("MinIO not available: %v", err)
 		}
@@ -164,9 +148,10 @@ func NewCompCluster(t *testing.T, cfg compClusterConfig) *CompCluster {
 	var distLock distributed.DistributedLock
 	var sessionStore distributed.SessionStore
 	if cfg.useRedis {
-		redisMgr, err = distributed.NewRedisManager("localhost:6379", "", 0, 10)
+		redisMgr, err = distributed.NewRedisManager("localhost:6379", testRedisPassword(), 0, 10)
 		if err != nil {
 			dbObj.Close()
+			dropSchema()
 			os.RemoveAll(tempDir)
 			t.Skipf("Redis not available: %v", err)
 		}
@@ -190,6 +175,7 @@ func NewCompCluster(t *testing.T, cfg compClusterConfig) *CompCluster {
 		SharedStore:  store,
 		StorageType:  cfg.storageType,
 		dbObj:        dbObj,
+		dbSchema:     schema,
 		RedisManager: redisMgr,
 	}
 
@@ -263,6 +249,9 @@ func (c *CompCluster) Cleanup() {
 		cancel()
 	}
 	c.dbObj.Close()
+	if c.dbSchema != "" {
+		_ = pgtest.Drop(pgtest.Config(), c.dbSchema)
+	}
 	os.RemoveAll(c.TempDir)
 }
 
@@ -402,7 +391,7 @@ func formatBytes(b int64) string {
 // storage using the HTTP API and the service layer (gRPC-equivalent path).
 func TestComprehensive_MinIO_Basic(t *testing.T) {
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "minio", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "minio", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -504,7 +493,7 @@ func TestComprehensive_MinIO_Basic(t *testing.T) {
 // MinIO object storage with Redis session store.
 func TestComprehensive_MinIO_Streaming(t *testing.T) {
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "minio", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "minio", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -537,7 +526,7 @@ func TestComprehensive_GB_HttpStreaming(t *testing.T) {
 		t.Skip("skipping GB-level test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "local", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -655,7 +644,7 @@ func TestComprehensive_GB_Multipart(t *testing.T) {
 		t.Skip("skipping GB-level test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "local", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -809,7 +798,7 @@ func TestComprehensive_GB_ServiceLayer(t *testing.T) {
 		t.Skip("skipping GB-level test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 1,
+		storageType: "local", useRedis: true, numInstance: 1,
 	})
 	defer cluster.Cleanup()
 	inst := cluster.Instances[0]
@@ -919,7 +908,7 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 	for _, st := range storageTypes {
 		t.Run("storage_"+st, func(t *testing.T) {
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: 1,
+				storageType: st, useRedis: true, numInstance: 1,
 			})
 			defer cluster.Cleanup()
 			inst := cluster.Instances[0]
@@ -1044,7 +1033,7 @@ func TestComprehensive_Stress_ConcurrentUploads(t *testing.T) {
 				numInst = 1
 			}
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: numInst,
+				storageType: st, useRedis: true, numInstance: numInst,
 			})
 			defer cluster.Cleanup()
 
@@ -1120,7 +1109,7 @@ func TestComprehensive_Stress_MixedWorkload(t *testing.T) {
 				numInst = 1
 			}
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: numInst,
+				storageType: st, useRedis: true, numInstance: numInst,
 			})
 			defer cluster.Cleanup()
 
@@ -1219,7 +1208,7 @@ func TestComprehensive_Stress_RedisLock_Mutex(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 	cluster := NewCompCluster(t, compClusterConfig{
-		storageType: "local", useRedis: true, usePgSQL: true, numInstance: 3,
+		storageType: "local", useRedis: true, numInstance: 3,
 	})
 	defer cluster.Cleanup()
 
@@ -1273,7 +1262,7 @@ func TestComprehensive_MultiInstance_Consistency(t *testing.T) {
 	for _, st := range storageTypes {
 		t.Run("storage_"+st, func(t *testing.T) {
 			cluster := NewCompCluster(t, compClusterConfig{
-				storageType: st, useRedis: true, usePgSQL: true, numInstance: 3,
+				storageType: st, useRedis: true, numInstance: 3,
 			})
 			defer cluster.Cleanup()
 

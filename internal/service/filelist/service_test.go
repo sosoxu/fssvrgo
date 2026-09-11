@@ -3,17 +3,17 @@ package filelist
 import (
 	"testing"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
 
-// setupTestDB creates an in-memory SQLite database with all required tables
-// initialized, returning the query DB handle. The database is automatically
-// closed when the test finishes.
+// setupTestDB creates an isolated PostgreSQL schema with all required tables
+// initialized, returning the query DB handle. The schema is automatically
+// dropped when the test finishes.
 func setupTestDB(t *testing.T) *database.DB {
 	t.Helper()
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: ":memory:", PoolSize: 1}
+	dbCfg := pgtest.NewSchema(t)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		t.Fatalf("failed to connect database: %v", err)

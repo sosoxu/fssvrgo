@@ -4,13 +4,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
@@ -32,11 +31,7 @@ func setupParallelTestEnv(t *testing.T) *ParallelTestEnv {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 
-	dbPath := filepath.Join(storageDir, "test.db")
-	dbCfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: dbPath,
-	}
+	dbCfg := pgtest.NewSchema(t)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		os.RemoveAll(storageDir)
@@ -809,8 +804,7 @@ func benchmarkMultipartUpload(b *testing.B, fileSize int64, concurrency int) {
 	}
 	defer os.RemoveAll(storageDir)
 
-	dbPath := filepath.Join(storageDir, "bench.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
+	dbCfg := pgtest.NewSchema(b)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		b.Fatalf("failed to connect database: %v", err)
@@ -884,8 +878,7 @@ func benchmarkParallelDownload(b *testing.B, fileSize int64, concurrency int) {
 	}
 	defer os.RemoveAll(storageDir)
 
-	dbPath := filepath.Join(storageDir, "bench.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
+	dbCfg := pgtest.NewSchema(b)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		b.Fatalf("failed to connect database: %v", err)

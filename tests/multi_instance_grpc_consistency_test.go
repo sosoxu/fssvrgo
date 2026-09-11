@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -31,7 +29,6 @@ type GRPCInstance struct {
 type GRPCCluster struct {
 	Instances   []*GRPCInstance
 	StorageDir  string
-	DBPath      string
 	TempDir     string
 	SharedDB    *database.DB
 	SharedStore storage.StorageAdapter
@@ -52,8 +49,8 @@ func NewGRPCCluster(t *testing.T, numInstances int) *GRPCCluster {
 		t.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	dbPath := filepath.Join(tempDir, "shared.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
+	// All instances share one isolated PostgreSQL schema.
+	dbCfg := pgtest.NewSchema(t)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		os.RemoveAll(tempDir)
@@ -77,7 +74,6 @@ func NewGRPCCluster(t *testing.T, numInstances int) *GRPCCluster {
 
 	cluster := &GRPCCluster{
 		StorageDir:  storageDir,
-		DBPath:      dbPath,
 		TempDir:     tempDir,
 		SharedDB:    qdb,
 		SharedStore: store,
@@ -312,19 +308,9 @@ func TestMultiInstance_GRPCConcurrentWriteConsistency(t *testing.T) {
 				defer wg.Done()
 				data := generateGRPCData(1024 * (10 + fileIdx))
 				filePath := fmt.Sprintf("/grpc_concurrent_%d_%d.dat", instIdx, fileIdx)
-				var lastErr error
-				for retry := 0; retry < 10; retry++ {
-					_, lastErr = fm.UploadFile(filePath, data)
-					if lastErr == nil {
-						return
-					}
-					if strings.Contains(lastErr.Error(), "SQLITE_BUSY") || strings.Contains(lastErr.Error(), "database is locked") {
-						time.Sleep(time.Duration(100*(retry+1)) * time.Millisecond)
-						continue
-					}
-					break
+				if _, err := fm.UploadFile(filePath, data); err != nil {
+					errors <- fmt.Errorf("upload instance %d file %d: %v", instIdx, fileIdx, err)
 				}
-				errors <- fmt.Errorf("upload instance %d file %d: %v", instIdx, fileIdx, lastErr)
 			}(i, j, inst.FM)
 		}
 	}

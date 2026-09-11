@@ -70,6 +70,12 @@ func envStr(name, def string) string {
 	return def
 }
 
+// testRedisPassword returns the Redis password used by integration tests.
+// Override with FSS_TEST_REDIS_PASS; defaults to empty (no auth).
+func testRedisPassword() string {
+	return envStr("FSS_TEST_REDIS_PASS", "")
+}
+
 // ---- result structures -----------------------------------------------------------
 
 type latencyStats struct {
@@ -199,7 +205,7 @@ func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
 
 	// Redis distributed lock + session store (consistency lock)
 	redisAddr := envStr("FSS_BENCH_REDIS_ADDR", "localhost:6379")
-	redisMgr, err := distributed.NewRedisManager(redisAddr, "", 0, concurrency+32)
+	redisMgr, err := distributed.NewRedisManager(redisAddr, testRedisPassword(), 0, concurrency+32)
 	if err != nil {
 		dbObj.Close()
 		os.RemoveAll(tempDir)

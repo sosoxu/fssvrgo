@@ -10,6 +10,7 @@ import (
 
 	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -558,73 +559,31 @@ func TestPostgreSQL_DatabaseSwitch(t *testing.T) {
 	}
 	defer os.RemoveAll(storageDir)
 
-	sqlitePath := filepath.Join(storageDir, "sqlite_test.db")
-	sqliteCfg := config.DatabaseConfig{Type: "sqlite", Path: sqlitePath}
-	sqliteDbObj := database.NewDatabase()
-	if err := sqliteDbObj.Connect(sqliteCfg); err != nil {
-		t.Fatalf("SQLite connect failed: %v", err)
-	}
-	sqliteQdb := sqliteDbObj.GetQueryDB()
-
-	mgr := database.NewMigrationManager(sqliteQdb)
-	mgr.Register(database.Migration{Version: 1, Name: "init", Up: func() error { return database.InitTables(sqliteQdb) }})
-	if err := mgr.RunMigrations(); err != nil {
-		t.Fatalf("SQLite migration failed: %v", err)
-	}
-
-	store := storage.NewLocalStorage(filepath.Join(storageDir, "files"))
-	fm := filemanager.NewFileManager(store, sqliteQdb)
-
-	data := []byte("sqlite data")
-	_, err = fm.UploadFile("/switch_test.txt", data)
-	if err != nil {
-		t.Fatalf("SQLite UploadFile failed: %v", err)
-	}
-
-	sqliteDialect := sqliteQdb.GetDialect()
-	if sqliteDialect != database.DialectSQLite {
-		t.Errorf("expected SQLite dialect, got %v", sqliteDialect)
-	}
-
-	sqliteDbObj.Close()
-
-	pgCfg := config.DatabaseConfig{
-		Type:     "postgresql",
-		Host:     "localhost",
-		Port:     5432,
-		Name:     "fsserver",
-		User:     "fsserver",
-		Password: "fsserver123",
-		SSLMode:  "disable",
-	}
-	pgDbObj := database.NewDatabase()
-	if err := pgDbObj.Connect(pgCfg); err != nil {
+	dbCfg := pgtest.NewSchema(t)
+	dbObj := database.NewDatabase()
+	if err := dbObj.Connect(dbCfg); err != nil {
 		t.Skipf("PostgreSQL not available: %v", err)
 	}
-	pgQdb := pgDbObj.GetQueryDB()
+	qdb := dbObj.GetQueryDB()
 
-	_, _ = pgQdb.Exec("DELETE FROM files")
-	_, _ = pgQdb.Exec("DELETE FROM directories")
-	_, _ = pgQdb.Exec("DELETE FROM schema_migrations")
-
-	pgMgr := database.NewMigrationManager(pgQdb)
-	pgMgr.Register(database.Migration{Version: 1, Name: "init", Up: func() error { return database.InitTables(pgQdb) }})
-	if err := pgMgr.RunMigrations(); err != nil {
+	mgr := database.NewMigrationManager(qdb)
+	mgr.Register(database.Migration{Version: 1, Name: "init", Up: func() error { return database.InitTables(qdb) }})
+	if err := mgr.RunMigrations(); err != nil {
 		t.Fatalf("PostgreSQL migration failed: %v", err)
 	}
 
-	pgFm := filemanager.NewFileManager(store, pgQdb)
-	_, err = pgFm.UploadFile("/pg_switch_test.txt", data)
+	store := storage.NewLocalStorage(filepath.Join(storageDir, "files"))
+	fm := filemanager.NewFileManager(store, qdb)
+
+	data := []byte("postgresql data")
+	_, err = fm.UploadFile("/switch_test.txt", data)
 	if err != nil {
 		t.Fatalf("PostgreSQL UploadFile failed: %v", err)
 	}
 
-	pgDialect := pgQdb.GetDialect()
-	if pgDialect != database.DialectPostgreSQL {
-		t.Errorf("expected PostgreSQL dialect, got %v", pgDialect)
+	if dialect := qdb.GetDialect(); dialect != database.DialectPostgreSQL {
+		t.Errorf("expected PostgreSQL dialect, got %v", dialect)
 	}
 
-	_, _ = pgQdb.Exec("DELETE FROM files")
-	_, _ = pgQdb.Exec("DELETE FROM schema_migrations")
-	pgDbObj.Close()
+	dbObj.Close()
 }

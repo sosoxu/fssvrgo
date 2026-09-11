@@ -7,14 +7,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 )
 
 func setupFileManager(t *testing.T) (*FileManager, func()) {
 	t.Helper()
-	cfg := config.DatabaseConfig{Type: "sqlite", Path: ":memory:", PoolSize: 1}
+	cfg := pgtest.NewSchema(t)
 	db := database.NewDatabase()
 	if err := db.Connect(cfg); err != nil {
 		t.Fatalf("failed to connect database: %v", err)

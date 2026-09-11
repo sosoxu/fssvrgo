@@ -4,19 +4,21 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 )
 
 func newTestDB(t *testing.T) *DB {
 	t.Helper()
-	raw, err := sql.Open("sqlite", ":memory:")
+	// Each test runs in its own PostgreSQL schema so tests stay isolated.
+	cfg := pgtest.NewSchema(t)
+	raw, err := sql.Open("postgres", pgtest.DSN(cfg))
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open postgres: %v", err)
 	}
-	// single connection so the in-memory DB is shared across statements/tx
-	raw.SetMaxOpenConns(1)
 	t.Cleanup(func() { raw.Close() })
 
-	db := NewDB(raw, DialectSQLite)
+	db := NewDB(raw, DialectPostgreSQL)
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
@@ -25,7 +27,7 @@ func newTestDB(t *testing.T) *DB {
 
 func createKVTable(t *testing.T, db *DB) {
 	t.Helper()
-	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS kv (id INTEGER PRIMARY KEY AUTOINCREMENT, k TEXT, v TEXT)"); err != nil {
+	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS kv (id SERIAL PRIMARY KEY, k TEXT, v TEXT)"); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 }
@@ -64,20 +66,17 @@ func TestDB_PreparedStatements(t *testing.T) {
 }
 
 func TestDB_DialectTranslation(t *testing.T) {
-	raw, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-
+	// Translate is a pure function on Dialect, so no database connection is
+	// required to exercise placeholder translation.
+	//
 	// SQLite dialect leaves "?" placeholders untouched
-	sqliteDB := NewDB(raw, DialectSQLite)
+	sqliteDB := NewDB(nil, DialectSQLite)
 	if got := sqliteDB.GetDialect().Translate("SELECT * FROM t WHERE a = ? AND b = ?"); got != "SELECT * FROM t WHERE a = ? AND b = ?" {
 		t.Fatalf("sqlite translate: got %q", got)
 	}
 
 	// PostgreSQL dialect translates "?" into $1, $2, ...
-	pgDB := NewDB(raw, DialectPostgreSQL)
+	pgDB := NewDB(nil, DialectPostgreSQL)
 	if got := pgDB.GetDialect().Translate("SELECT * FROM t WHERE a = ? AND b = ?"); got != "SELECT * FROM t WHERE a = $1 AND b = $2" {
 		t.Fatalf("pg translate: got %q", got)
 	}
@@ -152,7 +151,7 @@ func TestDB_Transaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := tx.Exec("INSERT INTO kv (k, v) VALUES (?, ?)", "tx1", "tv1"); err != nil {
+	if _, err := tx.Exec("INSERT INTO kv (k, v) VALUES ($1, $2)", "tx1", "tv1"); err != nil {
 		tx.Rollback()
 		t.Fatalf("tx insert: %v", err)
 	}
@@ -173,7 +172,7 @@ func TestDB_Transaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin2: %v", err)
 	}
-	if _, err := tx2.Exec("INSERT INTO kv (k, v) VALUES (?, ?)", "tx2", "tv2"); err != nil {
+	if _, err := tx2.Exec("INSERT INTO kv (k, v) VALUES ($1, $2)", "tx2", "tv2"); err != nil {
 		tx2.Rollback()
 		t.Fatalf("tx2 insert: %v", err)
 	}

@@ -127,8 +127,12 @@ storage:
     root_dir: /data/fsserver
 
 database:
-  type: sqlite          # 或 postgresql
-  path: /data/fsserver/fsserver.db
+  type: postgresql
+  host: localhost
+  port: 5432
+  name: fsserver
+  user: fsserver
+  password: your_password
 
 redis:
   enabled: false        # 多实例部署时启用

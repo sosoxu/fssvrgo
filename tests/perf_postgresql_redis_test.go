@@ -113,7 +113,7 @@ func NewPerfCluster(t *testing.T) *PerfCluster {
 
 	store := storage.NewLocalStorage(storageDir)
 
-	redisMgr, err := distributed.NewRedisManager("localhost:6379", "", 0, 10)
+	redisMgr, err := distributed.NewRedisManager("localhost:6379", testRedisPassword(), 0, 10)
 	if err != nil {
 		dbObj.Close()
 		os.RemoveAll(tempDir)

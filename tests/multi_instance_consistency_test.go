@@ -26,6 +26,7 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/logger"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -36,7 +37,6 @@ import (
 type MultiInstanceCluster struct {
 	Instances   []*Instance
 	StorageDir  string
-	DBPath      string
 	TempDir     string
 	SharedDB    *database.DB
 	SharedStore storage.StorageAdapter
@@ -69,8 +69,8 @@ func NewMultiInstanceCluster(t *testing.T, numInstances int) *MultiInstanceClust
 		t.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	dbPath := filepath.Join(tempDir, "shared.db")
-	dbCfg := config.DatabaseConfig{Type: "sqlite", Path: dbPath}
+	// All instances share one isolated PostgreSQL schema.
+	dbCfg := pgtest.NewSchema(t)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		os.RemoveAll(tempDir)
@@ -96,7 +96,6 @@ func NewMultiInstanceCluster(t *testing.T, numInstances int) *MultiInstanceClust
 
 	cluster := &MultiInstanceCluster{
 		StorageDir:  storageDir,
-		DBPath:      dbPath,
 		TempDir:     tempDir,
 		SharedDB:    qdb,
 		SharedStore: store,
@@ -220,7 +219,7 @@ func getMetadataHTTP(baseURL, filePath string) (map[string]interface{}, int, err
 }
 
 func listFilesHTTP(baseURL string) (map[string]interface{}, int, error) {
-	resp, err := http.Get(baseURL + "/api/v1/files")
+	resp, err := http.Get(baseURL + "/api/v1/files?include_total=true")
 	if err != nil {
 		return nil, 0, err
 	}

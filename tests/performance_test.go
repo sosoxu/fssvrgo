@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
 	"github.com/sosoxu/fssvrgo/internal/storage"
@@ -21,8 +20,8 @@ import (
 // It mirrors the setupBoundaryEnv pattern but accepts testing.TB so it can
 // serve both *testing.T (stress tests) and *testing.B (benchmarks).
 //
-// The environment uses LocalStorage backed by a t.TempDir() directory, a
-// file-based SQLite database stored in the same temp directory, and the
+// The environment uses LocalStorage backed by a t.TempDir() directory, an
+// isolated PostgreSQL schema (created via search_path), and the
 // default in-process distributed lock that NewFileManager / NewFileTransferService
 // install via distributed.NewLocalDistributedLock(). No Redis or MinIO
 // dependencies are required.
@@ -31,11 +30,7 @@ func setupPerfEnv(tb testing.TB) *boundaryEnv {
 
 	storageDir := tb.TempDir()
 
-	dbPath := filepath.Join(storageDir, "perf.db")
-	dbCfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: dbPath,
-	}
+	dbCfg := pgtest.NewSchema(tb)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		tb.Fatalf("failed to connect database: %v", err)
@@ -53,14 +48,6 @@ func setupPerfEnv(tb testing.TB) *boundaryEnv {
 		dbObj.Close()
 		tb.Fatalf("failed to run migrations: %v", err)
 	}
-
-	// SQLite allows only one writer at a time, and the per-connection
-	// busy_timeout PRAGMA set in connectSQLite does not propagate to every
-	// connection in the pool. Pin the pool to a single connection so the
-	// Go database/sql layer serializes access and we avoid SQLITE_BUSY
-	// errors under concurrent stress workloads.
-	dbObj.GetDB().SetMaxOpenConns(1)
-	dbObj.GetDB().SetMaxIdleConns(1)
 
 	ls := storage.NewLocalStorage(storageDir)
 	fm := filemanager.NewFileManager(ls, qdb)

@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/sosoxu/fssvrgo/internal/config"
 	"github.com/sosoxu/fssvrgo/internal/database"
+	"github.com/sosoxu/fssvrgo/internal/pgtest"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
 	"github.com/sosoxu/fssvrgo/internal/service/transfer"
 	"github.com/sosoxu/fssvrgo/internal/storage"
@@ -31,11 +30,7 @@ func setupBoundaryEnv(t *testing.T) *boundaryEnv {
 
 	storageDir := t.TempDir()
 
-	dbPath := filepath.Join(storageDir, "test.db")
-	dbCfg := config.DatabaseConfig{
-		Type: "sqlite",
-		Path: dbPath,
-	}
+	dbCfg := pgtest.NewSchema(t)
 	dbObj := database.NewDatabase()
 	if err := dbObj.Connect(dbCfg); err != nil {
 		t.Fatalf("failed to connect database: %v", err)

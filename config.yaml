@@ -29,12 +29,11 @@ storage:
   temp_dir: ""
 
 database:
-  type: sqlite
-  path: /data/fsserver/fsserver.db
-  host: ""
+  type: postgresql
+  host: localhost
   port: 5432
-  name: ""
-  user: ""
+  name: fsserver
+  user: fsserver
   password: ""
   sslmode: disable
   pool_size: 10
