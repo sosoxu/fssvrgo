@@ -67,7 +67,10 @@ func (d *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	}
 	rows, err := stmt.Query(args...)
 	if err != nil {
-		d.stmts.Delete(d.dialect.Translate(query))
+		// Drop the cached statement and close it: leaving it registered would
+		// leak a server-side prepared statement every time a query fails (for
+		// example when a table is missing or a parameter type is rejected).
+		d.discardStmt(d.dialect.Translate(query))
 		return d.db.Query(d.dialect.Translate(query), args...)
 	}
 	return rows, nil
@@ -100,6 +103,19 @@ func (d *DB) prepareStmt(query string) (*sql.Stmt, error) {
 		return actual.(*sql.Stmt), nil
 	}
 	return stmt, nil
+}
+
+// discardStmt removes a statement from the cache and closes it. Closing is
+// best-effort: a statement that is already broken must not mask the original
+// error the caller is about to see.
+func (d *DB) discardStmt(translated string) {
+	val, ok := d.stmts.LoadAndDelete(translated)
+	if !ok {
+		return
+	}
+	if stmt, ok := val.(*sql.Stmt); ok {
+		_ = stmt.Close()
+	}
 }
 
 func (d *DB) Underlying() *sql.DB {
