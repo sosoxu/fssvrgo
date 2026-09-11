@@ -259,6 +259,9 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("Service discovery enabled (type=%s)", cfg.Discovery.Type)
+		// Registration is one-way today: nothing in the process consumes
+		// Discover/Watch, so peers are not resolved from etcd yet.
+		logger.Warn("service discovery registration succeeded but no component consumes Discover/Watch yet; instances are not yet resolved from etcd")
 	}
 
 	// AuthConsistency
@@ -276,6 +279,11 @@ func main() {
 			cfg.Consistency.SyncIntervalMs,
 		)
 		defer consistencyMgr.Stop()
+		// The consistency manager is constructed so that quorum configuration is
+		// validated and the future wiring point is explicit, but no read/write
+		// path consults it yet. Say so loudly rather than letting operators
+		// believe a consistency level is being enforced.
+		logger.Warn("consistency level %q is configured but the module is not wired into any read/write path yet; the setting currently has no runtime effect", cfg.Consistency.Level)
 	}
 
 	// Auth

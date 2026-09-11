@@ -128,6 +128,19 @@
 - `RedisSessionStore`：基于 Redis，支持 TTL
 - `MemorySessionStore`：基于 `sync.RWMutex` + `map`，支持 TTL
 
+#### 实现状态说明（2026-09-11 评审）
+
+以下模块已有代码骨架，但**尚未接入请求路径**，启用配置不会改变运行时行为：
+
+| 模块 | 现状 |
+|---|---|
+| `internal/etcd` | 仅提供客户端封装，启动时按配置连接，无业务消费 |
+| `internal/discovery` | 支持 `Register`；无组件消费 `Discover`/`Watch`，实例间尚不互相发现 |
+| `internal/consistency` | 启动时校验仲裁参数并构造管理器；读写路径从不调用，一致性级别设置不生效 |
+
+启动日志会对"启用但未接线"的模块输出 `WARN`，避免运维误判。详见
+`docs/design-review-20260911.md` 中的 R2。
+
 ### 2.4 存储层
 
 #### StorageAdapter 接口
