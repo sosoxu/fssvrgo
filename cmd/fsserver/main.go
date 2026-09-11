@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -178,15 +176,16 @@ func main() {
 		logger.Info("Storage: Local (%s)", cfg.Storage.Local.RootDir)
 	}
 
-	// Clean up orphaned temp directories from previous runs
-	tempDir := os.TempDir()
-	entries, _ := os.ReadDir(tempDir)
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "fsserver-uploads-") {
-			oldPath := filepath.Join(tempDir, entry.Name())
-			if err := os.RemoveAll(oldPath); err != nil {
-				logger.Warn("Failed to clean up orphaned temp directory %s: %v", oldPath, err)
-			}
+	// Clean up orphaned upload temp directories from previous runs. Only
+	// directories older than orphanTempDirMinAge are removed, because other
+	// fsserver instances on the same host share os.TempDir() and may still be
+	// uploading into theirs. A configured (shared) storage.temp_dir is managed
+	// by the operator and is never touched here.
+	if cfg.Storage.TempDir == "" {
+		if removed, err := cleanupOrphanedUploadDirs(os.TempDir(), orphanTempDirMinAge, time.Now()); err != nil {
+			logger.Warn("Failed to clean up orphaned upload temp directories: %v", err)
+		} else if removed > 0 {
+			logger.Info("Removed %d orphaned upload temp director(ies) from %s", removed, os.TempDir())
 		}
 	}
 

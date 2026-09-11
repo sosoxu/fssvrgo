@@ -1,6 +1,8 @@
 perfbench
 tests.test
-fsserver
+# 仓库根目录下的构建产物可执行文件（注意用前导斜杠，否则会连
+# cmd/fsserver/ 这样的源码目录一起忽略掉）
+/fsserver
 
 # 性能测试产物（日志、Redis 转储）
 *.log

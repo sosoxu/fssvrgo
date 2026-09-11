@@ -85,6 +85,9 @@
 - 内存存储：`sync.Map`
 - Redis 存储：会话序列化为 JSON，每 8 个 chunk 批量更新
 - 过期清理：后台协程定期清理超时会话
+- 临时目录清理：启动时只清理**超过 24 小时**的 `fsserver-uploads-*` 遗留目录。同一主机可能
+  运行多个实例并共享 `os.TempDir()`，因此不按"全部清理"处理，避免删掉其它实例在传的临时目录；
+  若配置了共享 `storage.temp_dir`，该目录由运维管理，启动清理不会触碰
 
 #### DirectoryManager (`internal/service/directory/`)
 
