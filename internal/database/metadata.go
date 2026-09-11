@@ -69,11 +69,10 @@ type ApiKey struct {
 
 // InitTables creates all the database tables and indexes directly.
 //
-// Deprecated: This function is retained for backward compatibility. New code
-// (including the production entrypoint in cmd/fsserver) should use the
-// MigrationManager (see internal/database/migration.go) and register a v1
-// migration with the same CREATE TABLE statements instead of calling this
-// function directly. This keeps schema changes versioned and idempotent.
+// It is the single source of truth for the schema: cmd/fsserver reaches it
+// through the registered v1 migration (see RegisterBaseMigration) and the test
+// suite calls it to provision a fresh schema. Keeping one definition is what
+// prevents the production entrypoint and the tests from drifting apart.
 func escapeLikePattern(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "%", "\\%")
