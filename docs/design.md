@@ -193,7 +193,7 @@ type StorageAdapter interface {
 MinIO/S3 兼容对象存储实现。
 
 **设计要点**：
-- `WriteAt` 限制 512MB 以内（需读取全量数据再回写）
+- `WriteAt` 直接返回 `ErrWriteAtUnsupported`：对象存储不支持原地随机写，需要拼装大文件时先写本地临时文件再 `WriteFromTempFile`（见 2.4 节接口边界说明）
 - `WriteFromTempFile` 使用 `FPutObject` 从本地文件上传
 - `WriteFromReader` 支持 `io.Seeker` 自动检测内容长度
 - `Rename` 实现：复制源对象 → 删除源对象
