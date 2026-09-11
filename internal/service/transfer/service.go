@@ -60,9 +60,18 @@ type DownloadSession struct {
 	decryptedFile     *os.File
 }
 
+// metadataStore is the data-access seam of the transfer service: the only
+// thing it needs from persistence is file metadata, expressed in domain terms.
+// database.FileMetadataService satisfies it; tests can pass an in-memory fake.
+type metadataStore interface {
+	GetByPath(path string) (*database.FileMetadata, error)
+	Create(meta *database.FileMetadata) error
+	Update(meta *database.FileMetadata) error
+}
+
 type FileTransferService struct {
 	storage           storage.StorageAdapter
-	db                *database.DB
+	meta              metadataStore
 	uploadSessions    sync.Map
 	downloadSessions  sync.Map
 	multipartSessions sync.Map
@@ -78,6 +87,12 @@ type FileTransferService struct {
 }
 
 func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.DB) *FileTransferService {
+	return NewFileTransferServiceWithStore(storageAdapter, database.NewFileMetadataService(db))
+}
+
+// NewFileTransferServiceWithStore builds the service from the narrow metadata
+// store. Unit tests use it to run without a database.
+func NewFileTransferServiceWithStore(storageAdapter storage.StorageAdapter, meta metadataStore) *FileTransferService {
 	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("fsserver-uploads-%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		logger.Error("failed to create temp directory: %v", err)
@@ -85,7 +100,7 @@ func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.
 
 	return &FileTransferService{
 		storage:      storageAdapter,
-		db:           db,
+		meta:         meta,
 		tempDir:      tempDir,
 		sessionStore: distributed.NewMemorySessionStore(),
 		distLock:     distributed.NewLocalDistributedLock(),
@@ -94,6 +109,10 @@ func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.
 }
 
 func NewFileTransferServiceWithRedis(storageAdapter storage.StorageAdapter, db *database.DB, sessionStore distributed.SessionStore, distLock distributed.DistributedLock) *FileTransferService {
+	return newFileTransferServiceWithRedis(storageAdapter, database.NewFileMetadataService(db), sessionStore, distLock)
+}
+
+func newFileTransferServiceWithRedis(storageAdapter storage.StorageAdapter, meta metadataStore, sessionStore distributed.SessionStore, distLock distributed.DistributedLock) *FileTransferService {
 	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("fsserver-uploads-%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		logger.Error("failed to create temp directory: %v", err)
@@ -101,7 +120,7 @@ func NewFileTransferServiceWithRedis(storageAdapter storage.StorageAdapter, db *
 
 	return &FileTransferService{
 		storage:      storageAdapter,
-		db:           db,
+		meta:         meta,
 		tempDir:      tempDir,
 		sessionStore: sessionStore,
 		distLock:     distLock,
@@ -467,7 +486,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 
 	now := utils.GetCurrentTimestamp()
 
-	existingMeta, err := database.NewFileMetadataService(s.db).GetByPath(session.FilePath)
+	existingMeta, err := s.meta.GetByPath(session.FilePath)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		// Log the error but continue - treat as new file
 		logger.Error("Failed to query existing metadata: %v", err)
@@ -479,7 +498,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		existingMeta.Hash = storageHash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
+		if err := s.meta.Update(existingMeta); err != nil {
 			s.uploadSessions.Delete(sessionID)
 			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to update file metadata: %w", err)
@@ -499,7 +518,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 			IsDeleted:       false,
 		}
 
-		if err := database.NewFileMetadataService(s.db).Create(meta); err != nil {
+		if err := s.meta.Create(meta); err != nil {
 			s.storage.Remove(session.FilePath)
 			s.uploadSessions.Delete(sessionID)
 			s.releaseSessionSlot()
@@ -579,7 +598,7 @@ func (s *FileTransferService) GetUploadSession(sessionID string) (*UploadSession
 
 func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (string, error) {
 	filePath = utils.NormalizePath(filePath)
-	meta, err := database.NewFileMetadataService(s.db).GetByPath(filePath)
+	meta, err := s.meta.GetByPath(filePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to get file metadata: %w", err)
 	}

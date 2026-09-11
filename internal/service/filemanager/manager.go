@@ -18,30 +18,43 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
 
+// metadataStore is the data-access seam of FileManager: everything the service
+// needs to know about persisted file metadata, expressed in domain terms.
+// database.FileMetadataService satisfies it, and tests can supply an in-memory
+// fake instead of a PostgreSQL instance.
+type metadataStore interface {
+	GetByPath(path string) (*database.FileMetadata, error)
+	Create(meta *database.FileMetadata) error
+	Update(meta *database.FileMetadata) error
+	Remove(id string) error
+	Exists(path string) (bool, error)
+}
+
 type FileManager struct {
 	storage     storage.StorageAdapter
-	db          *database.DB
+	meta        metadataStore
 	initialized bool
 	fileLocks   sync.Map
 	distLock    distributed.DistributedLock
 }
 
 func NewFileManager(storage storage.StorageAdapter, db *database.DB) *FileManager {
+	return NewFileManagerWithStore(storage, database.NewFileMetadataService(db), distributed.NewLocalDistributedLock())
+}
+
+// NewFileManagerWithStore builds a FileManager from the narrow metadata store,
+// which is what unit tests use to run without a database.
+func NewFileManagerWithStore(storage storage.StorageAdapter, meta metadataStore, distLock distributed.DistributedLock) *FileManager {
 	return &FileManager{
 		storage:     storage,
-		db:          db,
+		meta:        meta,
 		initialized: true,
-		distLock:    distributed.NewLocalDistributedLock(),
+		distLock:    distLock,
 	}
 }
 
 func NewFileManagerWithDistLock(storage storage.StorageAdapter, db *database.DB, distLock distributed.DistributedLock) *FileManager {
-	return &FileManager{
-		storage:     storage,
-		db:          db,
-		initialized: true,
-		distLock:    distLock,
-	}
+	return NewFileManagerWithStore(storage, database.NewFileMetadataService(db), distLock)
 }
 
 func (fm *FileManager) lockFile(path string) {
@@ -104,7 +117,7 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 	defer cancelRenew()
 
 	if fm.Exists(path) {
-		existingMeta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
+		existingMeta, err := fm.meta.GetByPath(path)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			// Log the error but continue - treat as new file
 			logger.Error("Failed to query existing metadata: %v", err)
@@ -119,7 +132,7 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 			existingMeta.Hash = hash
 			existingMeta.UpdatedAt = now
 			existingMeta.IsDeleted = false
-			if err := database.NewFileMetadataService(fm.db).Update(existingMeta); err != nil {
+			if err := fm.meta.Update(existingMeta); err != nil {
 				return nil, fmt.Errorf("failed to update file metadata: %w", err)
 			}
 			return existingMeta, nil
@@ -147,7 +160,7 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 		IsDeleted:       false,
 	}
 
-	if err := database.NewFileMetadataService(fm.db).Create(meta); err != nil {
+	if err := fm.meta.Create(meta); err != nil {
 		fm.storage.Remove(path)
 		return nil, fmt.Errorf("failed to create file metadata: %w", err)
 	}
@@ -201,7 +214,7 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 
 	// Overwrite existing metadata if present (same overwrite semantics as
 	// UploadFile), otherwise create a new record.
-	existingMeta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
+	existingMeta, err := fm.meta.GetByPath(path)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		logger.Error("Failed to query existing metadata: %v", err)
 	}
@@ -212,7 +225,7 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 		existingMeta.Hash = hash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := database.NewFileMetadataService(fm.db).Update(existingMeta); err != nil {
+		if err := fm.meta.Update(existingMeta); err != nil {
 			return nil, fmt.Errorf("failed to update file metadata: %w", err)
 		}
 		meta = existingMeta
@@ -229,7 +242,7 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 			UpdatedAt:       now,
 			IsDeleted:       false,
 		}
-		if err := database.NewFileMetadataService(fm.db).Create(meta); err != nil {
+		if err := fm.meta.Create(meta); err != nil {
 			fm.storage.Remove(path)
 			return nil, fmt.Errorf("failed to create file metadata: %w", err)
 		}
@@ -318,7 +331,7 @@ func (fm *FileManager) DeleteFile(path string) error {
 		return fmt.Errorf("failed to delete file from storage: %w", err)
 	}
 
-	if err := database.NewFileMetadataService(fm.db).Remove(meta.ID); err != nil {
+	if err := fm.meta.Remove(meta.ID); err != nil {
 		return fmt.Errorf("failed to delete file metadata: %w", err)
 	}
 
@@ -355,7 +368,7 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	meta.Name = newName
 	meta.UpdatedAt = utils.GetCurrentTimestamp()
 
-	if err := database.NewFileMetadataService(fm.db).Update(meta); err != nil {
+	if err := fm.meta.Update(meta); err != nil {
 		// 回滚存储层重命名：若回滚也失败则记录日志，避免静默丢失文件。
 		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
 			logger.Error("failed to rollback storage rename %s -> %s: %v", newPath, oldPath, rbErr)
@@ -368,7 +381,7 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 
 func (fm *FileManager) GetFileMetadata(path string) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
-	meta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
+	meta, err := fm.meta.GetByPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("file metadata not found: %w", err)
 	}
@@ -380,7 +393,7 @@ func (fm *FileManager) GetFileMetadata(path string) (*database.FileMetadata, err
 
 func (fm *FileManager) Exists(path string) bool {
 	path = utils.NormalizePath(path)
-	exists, err := database.NewFileMetadataService(fm.db).Exists(path)
+	exists, err := fm.meta.Exists(path)
 	if err != nil {
 		return false
 	}
@@ -389,7 +402,7 @@ func (fm *FileManager) Exists(path string) bool {
 
 func (fm *FileManager) GetFileSize(path string) int64 {
 	path = utils.NormalizePath(path)
-	meta, err := database.NewFileMetadataService(fm.db).GetByPath(path)
+	meta, err := fm.meta.GetByPath(path)
 	if err != nil || meta == nil {
 		return 0
 	}

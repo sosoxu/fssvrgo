@@ -369,7 +369,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 
 	now := utils.GetCurrentTimestamp()
 
-	existingMeta, err := database.NewFileMetadataService(s.db).GetByPath(session.FilePath)
+	existingMeta, err := s.meta.GetByPath(session.FilePath)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		// Log the error but continue - treat as new file
 		logger.Error("Failed to query existing metadata: %v", err)
@@ -380,7 +380,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		existingMeta.Hash = storageHash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := database.NewFileMetadataService(s.db).Update(existingMeta); err != nil {
+		if err := s.meta.Update(existingMeta); err != nil {
 			os.Remove(storageTempPath)
 			s.multipartSessions.Delete(sessionID)
 			s.releaseSessionSlot()
@@ -400,7 +400,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 			IsDeleted:       false,
 		}
 
-		if err := database.NewFileMetadataService(s.db).Create(meta); err != nil {
+		if err := s.meta.Create(meta); err != nil {
 			s.storage.Remove(session.FilePath)
 			os.Remove(storageTempPath)
 			s.multipartSessions.Delete(sessionID)
