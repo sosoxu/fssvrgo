@@ -26,12 +26,16 @@ func runOnBothBackends(t *testing.T, fn func(t *testing.T, name string, s Storag
 	})
 }
 
-// TestCrossBackendValidatePathLegalDoubleDot verifies that a legitimate file
+// TestCrossBackendAcceptsLegalDoubleDotName verifies that a legitimate file
 // name containing ".." as a substring (e.g. "file..txt") is accepted by BOTH
 // backends. Previously MinIOStorage used strings.Contains(key, "..") which
 // falsely rejected such names while LocalStorage accepted them — a clear case
 // of inconsistent path handling between the two backends.
-func TestCrossBackendValidatePathLegalDoubleDot(t *testing.T) {
+//
+// The assertion goes through Write/Read rather than a validate helper: path
+// acceptance is an observable behaviour of the adapter contract, not a method
+// callers are expected to make.
+func TestCrossBackendAcceptsLegalDoubleDotName(t *testing.T) {
 	legalNames := []string{
 		"file..txt",
 		"ver..1.0.txt",
@@ -40,26 +44,29 @@ func TestCrossBackendValidatePathLegalDoubleDot(t *testing.T) {
 	}
 	runOnBothBackends(t, func(t *testing.T, name string, s StorageAdapter) {
 		for _, p := range legalNames {
-			if err := s.ValidatePath(p); err != nil {
-				t.Errorf("[%s] ValidatePath(%q) = %v, want nil (legitimate name)", name, p, err)
+			if err := s.Write(p, []byte("x")); err != nil {
+				t.Errorf("[%s] Write(%q) = %v, want nil (legitimate name)", name, p, err)
+			}
+			if _, err := s.Read(p); err != nil {
+				t.Errorf("[%s] Read(%q) = %v, want nil (legitimate name)", name, p, err)
 			}
 		}
 	})
 }
 
-// TestCrossBackendValidatePathRejectsRootEscape verifies both backends reject a
+// TestCrossBackendRejectsRootEscape verifies both backends reject a
 // traversal that escapes the storage root. Note: LocalStorage.ValidatePath
 // resolves the final absolute path and only rejects paths that land OUTSIDE
 // rootDir, so "a/../b" (which resolves to "b" inside rootDir) is accepted by
 // LocalStorage by design. We only assert agreement on truly escaping paths.
 // The upper-layer guard (utils.IsValidFilePath) rejects any ".." segment
 // regardless of resolution, so end-to-end safety is preserved.
-func TestCrossBackendValidatePathRejectsRootEscape(t *testing.T) {
+func TestCrossBackendRejectsRootEscape(t *testing.T) {
 	escaping := []string{"../etc/passwd", "foo/../../bar"}
 	runOnBothBackends(t, func(t *testing.T, name string, s StorageAdapter) {
 		for _, p := range escaping {
-			if err := s.ValidatePath(p); err == nil {
-				t.Errorf("[%s] ValidatePath(%q) = nil, want error (escapes root)", name, p)
+			if err := s.Write(p, []byte("x")); err == nil {
+				t.Errorf("[%s] Write(%q) = nil, want error (escapes root)", name, p)
 			}
 		}
 	})

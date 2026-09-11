@@ -148,9 +148,7 @@
 ```go
 type StorageAdapter interface {
     StorageType() string
-    ValidatePath(string) error
     Write(string, []byte) error
-    WriteAt(string, []byte, int64) error
     WriteFromTempFile(string, string) error
     WriteFromReader(string, io.Reader) error
     Read(string) ([]byte, error)
@@ -163,9 +161,19 @@ type StorageAdapter interface {
     Rename(string, string) error
     CreateDirectory(string) error
     RemoveDirectory(string) error
-    CleanPathLocks()
 }
 ```
+
+**接口边界说明**：
+
+- `WriteAt`（原地随机写）与 `ValidatePath`（路径校验）**不在接口内**。前者是本地文件系统能力，
+  对象存储无法提供（MinIO 实现直接返回 `ErrWriteAtUnsupported`），需要拼装大文件的调用方走
+  "写本地临时文件 → `WriteFromTempFile`"；后者是接口的**不变量**而非调用方要主动调用的方法，
+  每个操作都必须自行拒绝越出根目录的路径。两者仍保留在具体类型上，供后端测试使用。
+- 需要枚举全部对象的场景（如元数据/存储对账）通过**可选能力接口** `ObjectLister`
+  （`ListObjects(ctx) ([]string, error)`）获得，而不是把枚举塞进 `StorageAdapter`；
+  不支持枚举的后端只是不实现该接口。
+- 存储路径锁表（`CleanPathLocks`）同样不属于接口，它是本地实现细节，只对测试开放。
 
 #### LocalStorage (`internal/storage/local.go`)
 

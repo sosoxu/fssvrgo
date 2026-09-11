@@ -11,25 +11,6 @@ import (
 	"sync"
 )
 
-type StorageAdapter interface {
-	Write(path string, data []byte) error
-	WriteAt(path string, data []byte, offset int64) error
-	WriteFromTempFile(path string, tempFilePath string) error
-	WriteFromReader(path string, reader io.Reader) error
-	Read(path string) ([]byte, error)
-	ReadAt(path string, size int, offset int64) ([]byte, error)
-	OpenReader(path string) (io.ReadCloser, error)
-	Remove(path string) error
-	Exists(path string) bool
-	List(directory string) ([]string, error)
-	GetSize(path string) (int64, error)
-	Rename(oldPath, newPath string) error
-	CreateDirectory(path string) error
-	RemoveDirectory(path string) error
-	StorageType() string
-	ValidatePath(path string) error
-}
-
 type LocalStorage struct {
 	rootDir   string
 	pathLocks sync.Map
@@ -53,6 +34,10 @@ func (ls *LocalStorage) getFullPath(path string) string {
 	return filepath.Join(ls.rootDir, path)
 }
 
+// ValidatePath reports whether path stays inside the storage root, resolving
+// symlinks. It is an implementation detail: StorageAdapter does not expose it,
+// because every operation rejects escaping paths on its own. Exported only for
+// backend-specific tests.
 func (ls *LocalStorage) ValidatePath(path string) error {
 	fullPath := ls.getFullPath(path)
 	absRoot, err := filepath.Abs(ls.rootDir)
@@ -140,6 +125,10 @@ func (ls *LocalStorage) Write(path string, data []byte) error {
 	return nil
 }
 
+// WriteAt performs an in-place random write. It is a local-filesystem
+// capability and deliberately not part of StorageAdapter (object storage
+// cannot provide it without a full read-modify-write). Used by tests that
+// exercise local storage semantics.
 func (ls *LocalStorage) WriteAt(path string, data []byte, offset int64) error {
 	if err := ls.validatePath(path); err != nil {
 		return err

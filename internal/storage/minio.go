@@ -58,6 +58,9 @@ func (ms *MinIOStorage) StorageType() string {
 	return "minio"
 }
 
+// ValidatePath reports whether objectKey stays inside the bucket namespace.
+// Implementation detail: StorageAdapter does not expose it, because every
+// operation rejects escaping keys on its own. Exported for backend tests.
 func (ms *MinIOStorage) ValidatePath(objectKey string) error {
 	if objectKey == "" {
 		return fmt.Errorf("object key cannot be empty")
@@ -117,6 +120,9 @@ func (ms *MinIOStorage) Write(objectKey string, data []byte) error {
 // 调用方应使用 multipart upload 或整体 Write 覆盖。
 var ErrWriteAtUnsupported = errors.New("storage: WriteAt is not supported on object storage; use multipart upload or Write instead")
 
+// WriteAt always fails with ErrWriteAtUnsupported: object storage cannot do
+// in-place random writes. The method is kept as an explicit, tested statement
+// of that limitation even though StorageAdapter no longer carries it.
 func (ms *MinIOStorage) WriteAt(objectKey string, data []byte, offset int64) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
