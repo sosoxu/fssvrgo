@@ -10,6 +10,7 @@
 | 评审范围 | `docs/requirements.md`、`docs/design.md`、`README.md`、`internal/` 与 `cmd/` 全部非测试代码（11,068 行） |
 | 评审方法 | 文档-实现对照走查 + 全仓 grep 取证 + 真库实测（`go test ./internal/...` 连 PostgreSQL 12.6） |
 | 结论 | 架构方向正确，但存在 3 个结构性缺陷和 14 项具体问题；需求文档目前**不能作为验收基线** |
+| 问题跟踪 | 17 项缺陷已登记为 GitHub Issue #106 - #122，登记表见 `ISSUES.md` 第二轮评审登记表 |
 
 本报告的每条结论都附有代码位置或实测输出，问题编号与 `ISSUES.md` 的"第二轮评审"登记表一一对应。
 
@@ -48,25 +49,25 @@
 
 ## 3. 缺陷清单
 
-| 编号 | 级别 | 标题 |
-|---|---|---|
-| R1 | P0 | filelist 计数查询缺子查询别名，PostgreSQL 上必然失败 |
-| R2 | P0 | 一致性与服务发现模块未接线（死代码） |
-| R3 | P0 | 存储与元数据之间缺少原子性保障与对账补偿 |
-| R4 | P1 | `StorageAdapter` 接口层次过低且含死方法 |
-| R5 | P1 | `StorageAdapter.Exists` 吞掉错误 |
-| R6 | P1 | CI 无真实 PostgreSQL/Redis，跳过而非失败，掩盖缺陷 |
-| R7 | P1 | 需求、设计、README 与实现三方漂移 |
-| R8 | P2 | HTTP 层与持久化耦合，单文件 1717 行 |
-| R9 | P2 | 服务层依赖具体 `*database.DB`，单元测试必须起真库 |
-| R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） |
-| R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 |
-| R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 |
-| R13 | P2 | 数据库 schema 定义重复两份 |
-| R14 | P3 | 加密路径全量入内存，并发下有内存放大 |
-| R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 |
-| R16 | P3 | 预编译语句缓存错误路径泄漏 |
-| R17 | P3 | 审计日志异步批写的可见性窗口 |
+| 编号 | 级别 | 标题 | GitHub Issue |
+|---|---|---|---|
+| R1 | P0 | filelist 计数查询缺子查询别名，PostgreSQL 上必然失败 | [#106](https://github.com/sosoxu/fssvrgo/issues/106) |
+| R2 | P0 | 一致性与服务发现模块未接线（死代码） | [#107](https://github.com/sosoxu/fssvrgo/issues/107) |
+| R3 | P0 | 存储与元数据之间缺少原子性保障与对账补偿 | [#108](https://github.com/sosoxu/fssvrgo/issues/108) |
+| R4 | P1 | `StorageAdapter` 接口层次过低且含死方法 | [#109](https://github.com/sosoxu/fssvrgo/issues/109) |
+| R5 | P1 | `StorageAdapter.Exists` 吞掉错误 | [#110](https://github.com/sosoxu/fssvrgo/issues/110) |
+| R6 | P1 | CI 无真实 PostgreSQL/Redis，跳过而非失败，掩盖缺陷 | [#111](https://github.com/sosoxu/fssvrgo/issues/111) |
+| R7 | P1 | 需求、设计、README 与实现三方漂移 | [#112](https://github.com/sosoxu/fssvrgo/issues/112) |
+| R8 | P2 | HTTP 层与持久化耦合，单文件 1717 行 | [#113](https://github.com/sosoxu/fssvrgo/issues/113) |
+| R9 | P2 | 服务层依赖具体 `*database.DB`，单元测试必须起真库 | [#114](https://github.com/sosoxu/fssvrgo/issues/114) |
+| R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） | [#115](https://github.com/sosoxu/fssvrgo/issues/115) |
+| R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | [#116](https://github.com/sosoxu/fssvrgo/issues/116) |
+| R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 | [#117](https://github.com/sosoxu/fssvrgo/issues/117) |
+| R13 | P2 | 数据库 schema 定义重复两份 | [#118](https://github.com/sosoxu/fssvrgo/issues/118) |
+| R14 | P3 | 加密路径全量入内存，并发下有内存放大 | [#119](https://github.com/sosoxu/fssvrgo/issues/119) |
+| R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 | [#120](https://github.com/sosoxu/fssvrgo/issues/120) |
+| R16 | P3 | 预编译语句缓存错误路径泄漏 | [#121](https://github.com/sosoxu/fssvrgo/issues/121) |
+| R17 | P3 | 审计日志异步批写的可见性窗口 | [#122](https://github.com/sosoxu/fssvrgo/issues/122) |
 
 ### R1 [P0] filelist 计数查询缺子查询别名
 
