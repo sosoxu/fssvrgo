@@ -82,6 +82,14 @@ auth:
   token_expiry: 3600
   refresh_expiry: 86400
 
+# 元数据与存储的对账（reconciliation）。
+# 启动时总会执行一次只读扫描并记录报告；以下开关用于周期性对账与自动修复。
+# 开启 reconcile_repair 后，对账会删除"有对象无元数据"的孤儿对象，
+# 并把"有元数据无对象"的记录软删除（is_deleted=TRUE，不物理删除）。
+maintenance:
+  reconcile_enabled: false
+  reconcile_repair: false
+
 crypto:
   enabled: false
   algorithm: aes-256-gcm

@@ -208,6 +208,18 @@ MinIO/S3 兼容对象存储实现。
 
 **软删除设计**：文件和目录使用 `is_deleted` 标记，删除操作不物理删除记录。
 
+**元数据/存储对账（reconciliation）**：
+
+- 启动时执行一次**只读**扫描：比较 `files` 表中 `is_deleted = FALSE` 的路径集合与存储后端枚举出的对象集合，
+  分别报告 `missing_in_storage`（有元数据无对象）与 `orphan_in_storage`（有对象无元数据）的数量与样本
+- `maintenance.reconcile_enabled` 打开周期性对账（与清理服务同周期）
+- `maintenance.reconcile_repair` 打开自动修复：删除孤儿对象、把悬空元数据软删除（不物理删除记录）
+- 枚举能力由存储后端以可选接口 `ListObjects(ctx)` 实现（local 与 MinIO 均已实现）；
+  不支持枚举的后端会跳过对象侧比较并在报告中说明原因
+
+该机制针对的是"对象已写入存储但元数据写入前进程崩溃"以及反向的残留场景——
+存储与元数据之间没有分布式事务，对账是当前选择的补偿手段。
+
 ### 2.6 认证模块 (`internal/auth/`)
 
 **AuthService** 设计：

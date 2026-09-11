@@ -357,6 +357,27 @@ func (ms *MinIOStorage) List(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// ListObjects returns every object in the bucket as a slash-separated key
+// relative to the bucket root. Directory markers (keys ending in "/") are
+// skipped so the result matches the path space used by the metadata tables.
+//
+// Like LocalStorage.ListObjects it is an optional capability used by the
+// reconciler, not part of StorageAdapter.
+func (ms *MinIOStorage) ListObjects(ctx context.Context) ([]string, error) {
+	var objects []string
+	objectCh := ms.client.ListObjects(ctx, ms.bucket, minio.ListObjectsOptions{Recursive: true})
+	for obj := range objectCh {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("failed to list objects: %w", obj.Err)
+		}
+		if strings.HasSuffix(obj.Key, "/") {
+			continue
+		}
+		objects = append(objects, strings.TrimPrefix(obj.Key, "/"))
+	}
+	return objects, nil
+}
+
 func (ms *MinIOStorage) GetSize(objectKey string) (int64, error) {
 	if err := ms.validatePath(objectKey); err != nil {
 		return 0, err

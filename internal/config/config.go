@@ -118,6 +118,14 @@ type CryptoConfig struct {
 	Passphrase string `yaml:"passphrase"`
 }
 
+// MaintenanceConfig controls background metadata/storage reconciliation. A
+// read-only scan always runs once at startup; periodic reconciliation and
+// automatic repair are opt-in because repair mutates storage and metadata.
+type MaintenanceConfig struct {
+	ReconcileEnabled bool `yaml:"reconcile_enabled"`
+	ReconcileRepair  bool `yaml:"reconcile_repair"`
+}
+
 type Config struct {
 	Server      ServerConfig      `yaml:"server"`
 	TLS         TLSConfig         `yaml:"tls"`
@@ -131,6 +139,7 @@ type Config struct {
 	Discovery   DiscoveryConfig   `yaml:"discovery"`
 	Auth        AuthConfig        `yaml:"auth"`
 	Crypto      CryptoConfig      `yaml:"crypto"`
+	Maintenance MaintenanceConfig `yaml:"maintenance"`
 }
 
 func (c *Config) Load(path string) error {

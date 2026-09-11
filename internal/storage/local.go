@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -345,6 +347,41 @@ func (ls *LocalStorage) List(directory string) ([]string, error) {
 		names = append(names, entry.Name())
 	}
 	return names, nil
+}
+
+// ListObjects walks the storage root and returns every stored object as a
+// slash-separated path relative to the root (for example "dir/file.txt").
+//
+// It is the enumeration primitive used by the metadata/storage reconciler. It
+// is deliberately not part of StorageAdapter: the adapter stays byte-oriented,
+// and backends that cannot enumerate simply do not implement this method.
+func (ls *LocalStorage) ListObjects(ctx context.Context) ([]string, error) {
+	var objects []string
+	err := filepath.WalkDir(ls.rootDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(ls.rootDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		objects = append(objects, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			// An empty or not-yet-created storage root enumerates to nothing.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to enumerate storage root: %w", err)
+	}
+	return objects, nil
 }
 
 func (ls *LocalStorage) GetSize(path string) (int64, error) {

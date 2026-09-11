@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/logger"
@@ -8,11 +9,14 @@ import (
 )
 
 type CleanupService struct {
-	db        *DB
-	store     storage.StorageAdapter
-	interval  time.Duration
-	retention time.Duration
-	stopCh    chan struct{}
+	db               *DB
+	store            storage.StorageAdapter
+	interval         time.Duration
+	retention        time.Duration
+	stopCh           chan struct{}
+	reconciler       *Reconciler
+	reconcileEnabled bool
+	reconcileRepair  bool
 }
 
 func NewCleanupService(db *DB, store storage.StorageAdapter, intervalMinutes, retentionDays int) *CleanupService {
@@ -28,6 +32,44 @@ func NewCleanupService(db *DB, store storage.StorageAdapter, intervalMinutes, re
 func (s *CleanupService) Start() {
 	go s.run()
 	logger.Info("Cleanup service started (interval=%v, retention=%v)", s.interval, s.retention)
+}
+
+// EnableReconcile turns on periodic metadata/storage reconciliation. Repair is
+// opt-in because it removes objects and soft-deletes metadata rows.
+func (s *CleanupService) EnableReconcile(repair bool) {
+	s.reconciler = NewReconciler(s.db, s.store)
+	s.reconcileEnabled = true
+	s.reconcileRepair = repair
+	logger.Info("Reconciliation enabled (repair=%t, interval=%v)", repair, s.interval)
+}
+
+// ReconcileNow runs one reconciliation pass. It always reports; it only repairs
+// when reconciliation was enabled together with repair, so a startup scan is
+// read-only unless the operator explicitly asked otherwise.
+func (s *CleanupService) ReconcileNow(ctx context.Context) (*ReconcileReport, error) {
+	if s.reconciler == nil {
+		s.reconciler = NewReconciler(s.db, s.store)
+	}
+	report, err := s.reconciler.Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.reconciler.LogReport(report)
+
+	if s.reconcileEnabled && s.reconcileRepair && !report.Consistent() {
+		result, repairErr := s.reconciler.Repair(ctx, report)
+		if result != nil {
+			logger.Info("Reconciliation repair: orphans_removed=%d dangling_marked=%d errors=%d",
+				result.OrphansRemoved, result.DanglingMarked, len(result.Errors))
+			for _, repairMsg := range result.Errors {
+				logger.Error("Reconciliation repair failed: %s", repairMsg)
+			}
+		}
+		if repairErr != nil {
+			return report, repairErr
+		}
+	}
+	return report, nil
 }
 
 func (s *CleanupService) Stop() {
@@ -50,6 +92,12 @@ func (s *CleanupService) run() {
 }
 
 func (s *CleanupService) cleanup() {
+	if s.reconcileEnabled {
+		if _, err := s.ReconcileNow(context.Background()); err != nil {
+			logger.Error("Reconciliation failed: %v", err)
+		}
+	}
+
 	cutoff := time.Now().Add(-s.retention)
 
 	// Clean up soft-deleted files

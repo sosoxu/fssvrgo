@@ -357,6 +357,15 @@ func main() {
 
 	// Cleanup service
 	cleanupSvc := database.NewCleanupService(queryDB, store, 60, 30) // every 60 min, 30 day retention
+	// Metadata/storage reconciliation: always report once at startup (read-only
+	// unless repair is explicitly enabled), then optionally keep running
+	// alongside the cleanup cycle.
+	if cfg.Maintenance.ReconcileEnabled {
+		cleanupSvc.EnableReconcile(cfg.Maintenance.ReconcileRepair)
+	}
+	if _, err := cleanupSvc.ReconcileNow(context.Background()); err != nil {
+		logger.Warn("startup reconciliation failed: %v", err)
+	}
 	cleanupSvc.Start()
 	defer cleanupSvc.Stop()
 
