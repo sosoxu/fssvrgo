@@ -207,7 +207,10 @@ MinIO/S3 兼容对象存储实现。
 #### DB 封装 (`internal/database/db.go`)
 
 - Prepared Statement 缓存：`sync.Map` + `sql.Stmt`
-- SQL 方言翻译：`?` → `$1, $2, ...`（PostgreSQL）
+- SQL 方言翻译：`?` → `$1, $2, ...`（PostgreSQL）。翻译是**占位符感知**的：字符串字面量、
+  双引号标识符、`$$...$$`/`$tag$...$tag$` 与行/块注释中的 `?` 一律按原样保留，
+  避免把数据里的问号误当成参数占位符。注意 PostgreSQL 的 jsonb `?` 操作符与占位符语法
+  冲突，需要时请改用对应函数（如 `jsonb_exists`）
 
 #### 数据模型
 
