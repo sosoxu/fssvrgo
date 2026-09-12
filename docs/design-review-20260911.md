@@ -69,6 +69,10 @@
 | R16 | P3 | 预编译语句缓存错误路径泄漏 | [#121](https://github.com/sosoxu/fssvrgo/issues/121) |
 | R17 | P3 | 审计日志异步批写的可见性窗口 | [#122](https://github.com/sosoxu/fssvrgo/issues/122) |
 
+> 修复进度（2026-09-12）：R1–R7、R9、R11、R13、R15–R17 已修复并推送到
+> `origin/review/acceptance-20260911`；R8、R10、R12、R14 待处理。逐条状态与提交号见
+> [../ISSUES.md](../ISSUES.md) 第二轮登记表。
+
 ### R1 [P0] filelist 计数查询缺子查询别名
 
 **位置**：`internal/service/filelist/service.go:150`

@@ -108,25 +108,30 @@
 
 ## 登记表
 
+> **状态更新（2026-09-12）**：17 条中 13 条已修复并推送到 `origin/review/acceptance-20260911`；
+> 剩余 R8、R10、R12、R14 仍待处理。
+> 验证口径：`go build ./...`、`go vet ./...` 通过；`go test -count=1 ./internal/...`
+> 连 PostgreSQL 12.6 全绿且 `internal/service/*` 无 SKIP。
+
 | 编号 | 级别 | 标题 | 证据位置 | GitHub Issue | 状态 |
 |---|---|---|---|---|---|
-| R1 | P0 | filelist 计数查询缺子查询别名，PostgreSQL 上必然失败 | `internal/service/filelist/service.go:150` | [#106](https://github.com/sosoxu/fssvrgo/issues/106) | 待处理 |
-| R2 | P0 | 一致性与服务发现模块未接线（死代码） | `cmd/fsserver/main.go:235,271` | [#107](https://github.com/sosoxu/fssvrgo/issues/107) | 待处理 |
-| R3 | P0 | 存储与元数据之间缺少原子性保障与对账补偿 | `internal/service/transfer/service.go:336` | [#108](https://github.com/sosoxu/fssvrgo/issues/108) | 待处理 |
-| R4 | P1 | `StorageAdapter` 接口层次过低且含死方法 | `internal/storage/local.go:12` | [#109](https://github.com/sosoxu/fssvrgo/issues/109) | 待处理 |
-| R5 | P1 | `StorageAdapter.Exists` 吞掉错误 | `internal/storage/local.go:21` | [#110](https://github.com/sosoxu/fssvrgo/issues/110) | 待处理 |
-| R6 | P1 | CI 无真实 PostgreSQL/Redis，跳过而非失败，掩盖缺陷 | `.github/workflows/ci.yml` | [#111](https://github.com/sosoxu/fssvrgo/issues/111) | 待处理 |
-| R7 | P1 | 需求、设计、README 与实现三方漂移 | `docs/requirements.md` 第 5 节 | [#112](https://github.com/sosoxu/fssvrgo/issues/112) | 待处理 |
+| R1 | P0 | filelist 计数查询缺子查询别名，PostgreSQL 上必然失败 | `internal/database/filelist_store.go:90`（SQL 已下沉） | [#106](https://github.com/sosoxu/fssvrgo/issues/106) | 已修复 `1b28ff4` |
+| R2 | P0 | 一致性与服务发现模块未接线（死代码） | `cmd/fsserver/main.go:235,271` | [#107](https://github.com/sosoxu/fssvrgo/issues/107) | 已修复 `d8fc23a` |
+| R3 | P0 | 存储与元数据之间缺少原子性保障与对账补偿 | `internal/service/transfer/service.go:336` | [#108](https://github.com/sosoxu/fssvrgo/issues/108) | 已修复 `8d4d880` |
+| R4 | P1 | `StorageAdapter` 接口层次过低且含死方法 | `internal/storage/local.go:12` | [#109](https://github.com/sosoxu/fssvrgo/issues/109) | 已修复 `8ba90cf` |
+| R5 | P1 | `StorageAdapter.Exists` 吞掉错误 | `internal/storage/local.go:21` | [#110](https://github.com/sosoxu/fssvrgo/issues/110) | 已修复 `326f816` |
+| R6 | P1 | CI 无真实 PostgreSQL/Redis，跳过而非失败，掩盖缺陷 | `.github/workflows/ci.yml` | [#111](https://github.com/sosoxu/fssvrgo/issues/111) | 已修复 `8886c00` |
+| R7 | P1 | 需求、设计、README 与实现三方漂移 | `docs/requirements.md` 第 5 节 | [#112](https://github.com/sosoxu/fssvrgo/issues/112) | 已修复 `e6d2d56` |
 | R8 | P2 | HTTP 层与持久化耦合，单文件 1717 行 | `internal/api/http/server.go:56,1022,1176` | [#113](https://github.com/sosoxu/fssvrgo/issues/113) | 待处理 |
-| R9 | P2 | 服务层依赖具体 `*database.DB`，单元测试必须起真库 | `internal/service/filemanager/manager.go:19` | [#114](https://github.com/sosoxu/fssvrgo/issues/114) | 待处理 |
+| R9 | P2 | 服务层依赖具体 `*database.DB`，单元测试必须起真库 | `internal/service/filemanager/manager.go:41`（构造注入） | [#114](https://github.com/sosoxu/fssvrgo/issues/114) | 已修复 `194538c`、`f5cc5dc`、`fd6f580`、`b393887` |
 | R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） | `internal/service/filemanager/manager.go:63` | [#115](https://github.com/sosoxu/fssvrgo/issues/115) | 待处理 |
-| R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | `internal/database/dialect.go:40` | [#116](https://github.com/sosoxu/fssvrgo/issues/116) | 待处理 |
+| R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | `internal/database/dialect.go:40` | [#116](https://github.com/sosoxu/fssvrgo/issues/116) | 已修复 `762e3e3` |
 | R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 | `internal/storage/local.go:33`、`internal/service/directory/manager.go:64` | [#117](https://github.com/sosoxu/fssvrgo/issues/117) | 待处理 |
-| R13 | P2 | 数据库 schema 定义重复两份 | `cmd/fsserver/main.go:74`、`internal/database/metadata.go:104` | [#118](https://github.com/sosoxu/fssvrgo/issues/118) | 待处理 |
+| R13 | P2 | 数据库 schema 定义重复两份 | `cmd/fsserver/main.go:74`、`internal/database/metadata.go:104` | [#118](https://github.com/sosoxu/fssvrgo/issues/118) | 已修复 `b298f18` |
 | R14 | P3 | 加密路径全量入内存，并发下有内存放大 | `internal/api/http/server.go:487` | [#119](https://github.com/sosoxu/fssvrgo/issues/119) | 待处理 |
-| R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 | `cmd/fsserver/main.go:183` | [#120](https://github.com/sosoxu/fssvrgo/issues/120) | 待处理 |
-| R16 | P3 | 预编译语句缓存错误路径泄漏 | `internal/database/db.go:66` | [#121](https://github.com/sosoxu/fssvrgo/issues/121) | 待处理 |
-| R17 | P3 | 审计日志异步批写的可见性窗口 | `internal/database/audit_writer.go:15` | [#122](https://github.com/sosoxu/fssvrgo/issues/122) | 待处理 |
+| R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 | `cmd/fsserver/main.go:183` | [#120](https://github.com/sosoxu/fssvrgo/issues/120) | 已修复 `adb88cf` |
+| R16 | P3 | 预编译语句缓存错误路径泄漏 | `internal/database/db.go:66` | [#121](https://github.com/sosoxu/fssvrgo/issues/121) | 已修复 `f59f017` |
+| R17 | P3 | 审计日志异步批写的可见性窗口 | `internal/database/audit_writer.go:15` | [#122](https://github.com/sosoxu/fssvrgo/issues/122) | 已修复 `8ba910c` |
 
 ## 本轮已实测确认的失败
 
@@ -138,3 +143,7 @@ pq: FROM 中的子查询必须有一个别名 at column 22 (42601)
 ```
 
 对应 R1（[#106](https://github.com/sosoxu/fssvrgo/issues/106)）。该缺陷在 CI 的 `-short` 模式下被 `t.Skipf` 掩盖。
+
+**已修复**（`1b28ff4`）：COUNT 子查询补上 `AS t` 别名；随后 filelist 的 SQL 整体下沉到
+`internal/database/filelist_store.go`（`194538c`）。2026-09-12 复测 `go test -count=1
+./internal/...`（PostgreSQL 12.6）全部通过，`internal/service/*` 无 SKIP。
