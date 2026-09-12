@@ -13,19 +13,9 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
 
-// escapeLikePattern 转义 SQL LIKE 模式中的通配符（%、_、\），防止目录名含这些
-// 字符时导致跨目录误匹配。转义后的模式需配合 ESCAPE '\\' 子句使用。
-func escapeLikePattern(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "%", "\\%")
-	s = strings.ReplaceAll(s, "_", "\\_")
-	return s
-}
-
-// metadataStore is the data-access seam for directory metadata. The service
-// still needs *database.DB for the cascade queries and transactions that move
-// to internal/database next; this interface covers the single-row operations
-// so they can be faked in tests.
+// metadataStore is the data-access seam for single-row directory metadata.
+// database.DirectoryMetadataService satisfies it, and tests can supply an
+// in-memory fake instead of a PostgreSQL instance.
 type metadataStore interface {
 	Create(meta *database.DirectoryMetadata) error
 	GetByPath(path string) (*database.DirectoryMetadata, error)
@@ -33,21 +23,34 @@ type metadataStore interface {
 	Exists(path string) (bool, error)
 }
 
+// treeStore is the data-access seam for the cascade operations that walk or
+// rewrite a whole directory subtree. database.DirectoryTreeStore satisfies it;
+// tests supply an in-memory fake so the service can be covered without a
+// database.
+type treeStore interface {
+	CountChildren(path string) (fileCount, dirCount int, err error)
+	ListChildFiles(path string, limit int) ([]database.PathEntry, error)
+	ListChildDirectories(path string, limit int) ([]database.PathEntry, error)
+	SoftDeleteFiles(updatedAt string, entries []database.PathEntry) error
+	SoftDeleteDirectories(updatedAt string, entries []database.PathEntry) error
+	RenameTree(updatedAt string, files, dirs []database.PathUpdate, target database.PathUpdate) error
+}
+
 type DirectoryManager struct {
-	db       *database.DB
 	meta     metadataStore
+	tree     treeStore
 	store    storage.StorageAdapter
 	distLock distributed.DistributedLock
 }
 
 func NewDirectoryManager(db *database.DB) *DirectoryManager {
-	return &DirectoryManager{db: db, meta: database.NewDirectoryMetadataService(db)}
+	return NewDirectoryManagerWithStores(database.NewDirectoryMetadataService(db), database.NewDirectoryTreeStore(db), nil, nil)
 }
 
 // NewDirectoryManagerWithStore creates a DirectoryManager that also synchronizes
 // storage objects when deleting or renaming directories.
 func NewDirectoryManagerWithStore(db *database.DB, store storage.StorageAdapter) *DirectoryManager {
-	return &DirectoryManager{db: db, meta: database.NewDirectoryMetadataService(db), store: store}
+	return NewDirectoryManagerWithStores(database.NewDirectoryMetadataService(db), database.NewDirectoryTreeStore(db), store, nil)
 }
 
 // NewDirectoryManagerWithDistLock creates a DirectoryManager with a distributed
@@ -55,13 +58,13 @@ func NewDirectoryManagerWithStore(db *database.DB, store storage.StorageAdapter)
 // (including across instances) are serialized. Pass nil to disable locking
 // (e.g. in single-process tests).
 func NewDirectoryManagerWithDistLock(db *database.DB, store storage.StorageAdapter, distLock distributed.DistributedLock) *DirectoryManager {
-	return &DirectoryManager{db: db, meta: database.NewDirectoryMetadataService(db), store: store, distLock: distLock}
+	return NewDirectoryManagerWithStores(database.NewDirectoryMetadataService(db), database.NewDirectoryTreeStore(db), store, distLock)
 }
 
-// NewDirectoryManagerWithMetadata is the constructor used by tests that supply
-// their own metadata store.
-func NewDirectoryManagerWithMetadata(db *database.DB, store storage.StorageAdapter, meta metadataStore, distLock distributed.DistributedLock) *DirectoryManager {
-	return &DirectoryManager{db: db, meta: meta, store: store, distLock: distLock}
+// NewDirectoryManagerWithStores wires explicit metadata and tree stores. Unit
+// tests use it to run without a database.
+func NewDirectoryManagerWithStores(meta metadataStore, tree treeStore, store storage.StorageAdapter, distLock distributed.DistributedLock) *DirectoryManager {
+	return &DirectoryManager{meta: meta, tree: tree, store: store, distLock: distLock}
 }
 
 // lockDirectory acquires a distributed lock for directory-level operations.
@@ -163,19 +166,12 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	}
 
 	if !recursive {
-		escapedPrefix := escapeLikePattern(path + "/")
-		var fileCount int
-		err := dm.db.QueryRow("SELECT COUNT(*) FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapedPrefix+"%").Scan(&fileCount)
+		fileCount, dirCount, err := dm.tree.CountChildren(path)
 		if err != nil {
 			return fmt.Errorf("failed to check directory contents: %w", err)
 		}
 		if fileCount > 0 {
 			return fmt.Errorf("directory is not empty: %s", path)
-		}
-		var dirCount int
-		err = dm.db.QueryRow("SELECT COUNT(*) FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapedPrefix+"%").Scan(&dirCount)
-		if err != nil {
-			return fmt.Errorf("failed to check directory contents: %w", err)
 		}
 		if dirCount > 0 {
 			return fmt.Errorf("directory is not empty: %s", path)
@@ -199,107 +195,48 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	// transaction commits and is best-effort (a leaked object is recoverable via
 	// the periodic cleanup service; a missing DB record after commit is not).
 	const batchSize = 500
-	prefix := escapeLikePattern(path + "/")
 
 	for {
-		// Query the next batch outside the transaction — we only need the IDs
+		// Fetch the next batch outside the transaction — we only need the IDs
 		// to soft-delete, and holding a long read transaction for large dirs
 		// would hurt concurrency on SQLite.
-		rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
+		entries, err := dm.tree.ListChildFiles(path, batchSize)
 		if err != nil {
-			return fmt.Errorf("failed to query files: %w", err)
+			return fmt.Errorf("failed to list child files: %w", err)
 		}
-
-		type fileEntry struct {
-			id   string
-			path string
-		}
-		var entries []fileEntry
-		for rows.Next() {
-			var e fileEntry
-			if err := rows.Scan(&e.id, &e.path); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan file id: %w", err)
-			}
-			entries = append(entries, e)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate file rows: %w", err)
-		}
-		rows.Close()
 
 		if len(entries) == 0 {
 			break
 		}
 
 		// Soft-delete the whole batch atomically.
-		tx, txErr := dm.db.BeginTx(context.Background(), nil)
-		if txErr != nil {
-			return fmt.Errorf("failed to begin delete transaction: %w", txErr)
-		}
-		for _, e := range entries {
-			if _, err := tx.Exec("UPDATE files SET is_deleted = TRUE, updated_at = ? WHERE id = ?", utils.GetCurrentTimestamp(), e.id); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("failed to delete file metadata: %w", err)
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit file deletion batch: %w", err)
+		if err := dm.tree.SoftDeleteFiles(utils.GetCurrentTimestamp(), entries); err != nil {
+			return fmt.Errorf("failed to delete file metadata: %w", err)
 		}
 
 		// Storage cleanup after the DB commit. Best-effort: a failure leaves an
 		// orphan object that the cleanup service can reap later.
 		for _, e := range entries {
 			if dm.store != nil {
-				if err := dm.store.Remove(e.path); err != nil {
-					logger.Warn("failed to remove storage object %s during directory delete: %v", e.path, err)
+				if err := dm.store.Remove(e.Path); err != nil {
+					logger.Warn("failed to remove storage object %s during directory delete: %v", e.Path, err)
 				}
 			}
 		}
 	}
 
 	for {
-		rows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE LIMIT ?", prefix+"%", batchSize)
+		entries, err := dm.tree.ListChildDirectories(path, batchSize)
 		if err != nil {
-			return fmt.Errorf("failed to query directories: %w", err)
+			return fmt.Errorf("failed to list child directories: %w", err)
 		}
-
-		type dirEntry struct {
-			id   string
-			path string
-		}
-		var entries []dirEntry
-		for rows.Next() {
-			var e dirEntry
-			if err := rows.Scan(&e.id, &e.path); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan directory id: %w", err)
-			}
-			entries = append(entries, e)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate directory rows: %w", err)
-		}
-		rows.Close()
 
 		if len(entries) == 0 {
 			break
 		}
 
-		tx, txErr := dm.db.BeginTx(context.Background(), nil)
-		if txErr != nil {
-			return fmt.Errorf("failed to begin delete directory transaction: %w", txErr)
-		}
-		for _, e := range entries {
-			if _, err := tx.Exec("UPDATE directories SET is_deleted = TRUE, updated_at = ? WHERE id = ?", utils.GetCurrentTimestamp(), e.id); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("failed to delete directory metadata: %w", err)
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit directory deletion batch: %w", err)
+		if err := dm.tree.SoftDeleteDirectories(utils.GetCurrentTimestamp(), entries); err != nil {
+			return fmt.Errorf("failed to delete directory metadata: %w", err)
 		}
 
 		// Storage directory-marker removal is only meaningful for the local
@@ -309,8 +246,8 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 		// (now empty) prefix. Skip it.
 		for _, e := range entries {
 			if dm.supportsDirectoryStorageOps() {
-				if err := dm.store.RemoveDirectory(e.path); err != nil {
-					logger.Warn("failed to remove storage directory %s during delete: %v", e.path, err)
+				if err := dm.store.RemoveDirectory(e.Path); err != nil {
+					logger.Warn("failed to remove storage directory %s during delete: %v", e.Path, err)
 				}
 			}
 		}
@@ -363,49 +300,15 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	// Snapshot the children to rename. The distributed lock serializes this
 	// against concurrent rename/delete on the same directory, so the snapshot
 	// is stable for the duration of the operation.
-	rows, err := dm.db.Query("SELECT id, path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
+	fileEntries, err := dm.tree.ListChildFiles(oldPath, 0)
 	if err != nil {
-		return fmt.Errorf("failed to query child files: %w", err)
+		return fmt.Errorf("failed to list child files: %w", err)
 	}
 
-	type pathEntry struct {
-		id   string
-		path string
-	}
-	var fileEntries []pathEntry
-	for rows.Next() {
-		var e pathEntry
-		if err := rows.Scan(&e.id, &e.path); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to scan file path: %w", err)
-		}
-		fileEntries = append(fileEntries, e)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("failed to iterate file rows: %w", err)
-	}
-	rows.Close()
-
-	dirRows, err := dm.db.Query("SELECT id, path FROM directories WHERE path LIKE ? ESCAPE '\\' AND is_deleted = FALSE", escapeLikePattern(oldPath+"/")+"%")
+	dirEntries, err := dm.tree.ListChildDirectories(oldPath, 0)
 	if err != nil {
-		return fmt.Errorf("failed to query child directories: %w", err)
+		return fmt.Errorf("failed to list child directories: %w", err)
 	}
-
-	var dirEntries []pathEntry
-	for dirRows.Next() {
-		var e pathEntry
-		if err := dirRows.Scan(&e.id, &e.path); err != nil {
-			dirRows.Close()
-			return fmt.Errorf("failed to scan directory path: %w", err)
-		}
-		dirEntries = append(dirEntries, e)
-	}
-	if err := dirRows.Err(); err != nil {
-		dirRows.Close()
-		return fmt.Errorf("failed to iterate directory rows: %w", err)
-	}
-	dirRows.Close()
 
 	now := utils.GetCurrentTimestamp()
 
@@ -415,44 +318,27 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	// best-effort; a failed storage rename leaves the DB pointing at the new
 	// path while the object lingers at the old path — a recoverable mismatch
 	// that the cleanup service can reconcile.
-	tx, err := dm.db.BeginTx(context.Background(), nil)
+	fileUpdates, err := rewritePaths(fileEntries, oldPath, newPath)
 	if err != nil {
-		return fmt.Errorf("failed to begin rename transaction: %w", err)
+		return err
+	}
+	dirUpdates, err := rewritePaths(dirEntries, oldPath, newPath)
+	if err != nil {
+		return err
 	}
 
-	for _, e := range fileEntries {
-		newItemPath := newPath + e.path[len(oldPath):]
-		newItemName := utils.GetFileName(newItemPath)
-		if _, err := tx.Exec("UPDATE files SET path = ?, name = ?, updated_at = ? WHERE id = ?", newItemPath, newItemName, now, e.id); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed to update file path: %w", err)
-		}
-	}
-
-	for _, e := range dirEntries {
-		newItemPath := newPath + e.path[len(oldPath):]
-		newItemName := utils.GetFileName(newItemPath)
-		if _, err := tx.Exec("UPDATE directories SET path = ?, name = ?, updated_at = ? WHERE id = ?", newItemPath, newItemName, now, e.id); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed to update directory path: %w", err)
-		}
-	}
-
-	if _, err := tx.Exec("UPDATE directories SET path = ?, name = ?, updated_at = ? WHERE id = ?", newPath, newName, now, meta.ID); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to update directory metadata: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit rename: %w", err)
+	if err := dm.tree.RenameTree(now, fileUpdates, dirUpdates, database.PathUpdate{ID: meta.ID, Path: newPath, Name: newName}); err != nil {
+		return fmt.Errorf("failed to rename directory: %w", err)
 	}
 
 	// DB is now durably at the new paths. Move storage objects to match.
+	// rewritePaths validated every child's old prefix above, so the slicing
+	// here cannot go out of range.
 	for _, e := range fileEntries {
-		newItemPath := newPath + e.path[len(oldPath):]
+		newItemPath := newPath + e.Path[len(oldPath):]
 		if dm.store != nil {
-			if err := dm.store.Rename(e.path, newItemPath); err != nil {
-				logger.Warn("failed to rename storage object %s -> %s: %v", e.path, newItemPath, err)
+			if err := dm.store.Rename(e.Path, newItemPath); err != nil {
+				logger.Warn("failed to rename storage object %s -> %s: %v", e.Path, newItemPath, err)
 			}
 		}
 	}
@@ -469,6 +355,27 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	meta.UpdatedAt = now
 
 	return nil
+}
+
+// rewritePaths maps the children of a renamed directory to their new paths.
+// Every entry came from a query for oldPath's subtree, so a path that does not
+// carry the old prefix means the store returned something unexpected — fail
+// loudly instead of slicing out of range.
+func rewritePaths(entries []database.PathEntry, oldPath, newPath string) ([]database.PathUpdate, error) {
+	updates := make([]database.PathUpdate, 0, len(entries))
+	for _, e := range entries {
+		suffix, ok := strings.CutPrefix(e.Path, oldPath)
+		if !ok {
+			return nil, fmt.Errorf("child path %q is not under %q", e.Path, oldPath)
+		}
+		newItemPath := newPath + suffix
+		updates = append(updates, database.PathUpdate{
+			ID:   e.ID,
+			Path: newItemPath,
+			Name: utils.GetFileName(newItemPath),
+		})
+	}
+	return updates, nil
 }
 
 func (dm *DirectoryManager) GetDirectoryMetadata(path string) (*database.DirectoryMetadata, error) {
