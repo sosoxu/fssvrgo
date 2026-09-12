@@ -22,20 +22,32 @@ func escapeLikePattern(s string) string {
 	return s
 }
 
+// metadataStore is the data-access seam for directory metadata. The service
+// still needs *database.DB for the cascade queries and transactions that move
+// to internal/database next; this interface covers the single-row operations
+// so they can be faked in tests.
+type metadataStore interface {
+	Create(meta *database.DirectoryMetadata) error
+	GetByPath(path string) (*database.DirectoryMetadata, error)
+	Remove(id string) error
+	Exists(path string) (bool, error)
+}
+
 type DirectoryManager struct {
 	db       *database.DB
+	meta     metadataStore
 	store    storage.StorageAdapter
 	distLock distributed.DistributedLock
 }
 
 func NewDirectoryManager(db *database.DB) *DirectoryManager {
-	return &DirectoryManager{db: db}
+	return &DirectoryManager{db: db, meta: database.NewDirectoryMetadataService(db)}
 }
 
 // NewDirectoryManagerWithStore creates a DirectoryManager that also synchronizes
 // storage objects when deleting or renaming directories.
 func NewDirectoryManagerWithStore(db *database.DB, store storage.StorageAdapter) *DirectoryManager {
-	return &DirectoryManager{db: db, store: store}
+	return &DirectoryManager{db: db, meta: database.NewDirectoryMetadataService(db), store: store}
 }
 
 // NewDirectoryManagerWithDistLock creates a DirectoryManager with a distributed
@@ -43,7 +55,13 @@ func NewDirectoryManagerWithStore(db *database.DB, store storage.StorageAdapter)
 // (including across instances) are serialized. Pass nil to disable locking
 // (e.g. in single-process tests).
 func NewDirectoryManagerWithDistLock(db *database.DB, store storage.StorageAdapter, distLock distributed.DistributedLock) *DirectoryManager {
-	return &DirectoryManager{db: db, store: store, distLock: distLock}
+	return &DirectoryManager{db: db, meta: database.NewDirectoryMetadataService(db), store: store, distLock: distLock}
+}
+
+// NewDirectoryManagerWithMetadata is the constructor used by tests that supply
+// their own metadata store.
+func NewDirectoryManagerWithMetadata(db *database.DB, store storage.StorageAdapter, meta metadataStore, distLock distributed.DistributedLock) *DirectoryManager {
+	return &DirectoryManager{db: db, meta: meta, store: store, distLock: distLock}
 }
 
 // lockDirectory acquires a distributed lock for directory-level operations.
@@ -112,7 +130,7 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 		IsDeleted: false,
 	}
 
-	if err := database.NewDirectoryMetadataService(dm.db).Create(meta); err != nil {
+	if err := dm.meta.Create(meta); err != nil {
 		return err
 	}
 
@@ -163,14 +181,14 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 			return fmt.Errorf("directory is not empty: %s", path)
 		}
 
-		meta, err := database.NewDirectoryMetadataService(dm.db).GetByPath(path)
+		meta, err := dm.meta.GetByPath(path)
 		if err != nil {
 			return fmt.Errorf("failed to get directory metadata: %w", err)
 		}
 		if meta == nil {
 			return fmt.Errorf("directory not found: %s", path)
 		}
-		return database.NewDirectoryMetadataService(dm.db).Remove(meta.ID)
+		return dm.meta.Remove(meta.ID)
 	}
 
 	// Recursive deletion. The distributed lock held above serializes concurrent
@@ -298,14 +316,14 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 		}
 	}
 
-	meta, err := database.NewDirectoryMetadataService(dm.db).GetByPath(path)
+	meta, err := dm.meta.GetByPath(path)
 	if err != nil {
 		return fmt.Errorf("failed to get directory metadata: %w", err)
 	}
 	if meta == nil {
 		return fmt.Errorf("directory not found: %s", path)
 	}
-	return database.NewDirectoryMetadataService(dm.db).Remove(meta.ID)
+	return dm.meta.Remove(meta.ID)
 }
 
 func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
@@ -455,7 +473,7 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 
 func (dm *DirectoryManager) GetDirectoryMetadata(path string) (*database.DirectoryMetadata, error) {
 	path = utils.NormalizePath(path)
-	meta, err := database.NewDirectoryMetadataService(dm.db).GetByPath(path)
+	meta, err := dm.meta.GetByPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("directory metadata not found: %w", err)
 	}
@@ -467,7 +485,7 @@ func (dm *DirectoryManager) GetDirectoryMetadata(path string) (*database.Directo
 
 func (dm *DirectoryManager) Exists(path string) bool {
 	path = utils.NormalizePath(path)
-	exists, err := database.NewDirectoryMetadataService(dm.db).Exists(path)
+	exists, err := dm.meta.Exists(path)
 	if err != nil {
 		return false
 	}
