@@ -124,7 +124,7 @@
 | R7 | P1 | 需求、设计、README 与实现三方漂移 | `docs/requirements.md` 第 5 节 | [#112](https://github.com/sosoxu/fssvrgo/issues/112) | 已修复 `e6d2d56` |
 | R8 | P2 | HTTP 层与持久化耦合，单文件 1717 行 | `internal/api/http/server.go:56,1022,1176` | [#113](https://github.com/sosoxu/fssvrgo/issues/113) | 待处理 |
 | R9 | P2 | 服务层依赖具体 `*database.DB`，单元测试必须起真库 | `internal/service/filemanager/manager.go:41`（构造注入） | [#114](https://github.com/sosoxu/fssvrgo/issues/114) | 已修复 `194538c`、`f5cc5dc`、`fd6f580`、`b393887` |
-| R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） | `internal/service/filemanager/manager.go:63` | [#115](https://github.com/sosoxu/fssvrgo/issues/115) | 待处理 |
+| R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） | `internal/service/filemanager/manager.go:63` | [#115](https://github.com/sosoxu/fssvrgo/issues/115) | 待处理（issue 已关闭，见下方注记） |
 | R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | `internal/database/dialect.go:40` | [#116](https://github.com/sosoxu/fssvrgo/issues/116) | 已修复 `762e3e3` |
 | R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 | `internal/storage/local.go:33`、`internal/service/directory/manager.go:64` | [#117](https://github.com/sosoxu/fssvrgo/issues/117) | 待处理 |
 | R13 | P2 | 数据库 schema 定义重复两份 | `cmd/fsserver/main.go:74`、`internal/database/metadata.go:104` | [#118](https://github.com/sosoxu/fssvrgo/issues/118) | 已修复 `b298f18` |
@@ -132,6 +132,11 @@
 | R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 | `cmd/fsserver/main.go:183` | [#120](https://github.com/sosoxu/fssvrgo/issues/120) | 已修复 `adb88cf` |
 | R16 | P3 | 预编译语句缓存错误路径泄漏 | `internal/database/db.go:66` | [#121](https://github.com/sosoxu/fssvrgo/issues/121) | 已修复 `f59f017` |
 | R17 | P3 | 审计日志异步批写的可见性窗口 | `internal/database/audit_writer.go:15` | [#122](https://github.com/sosoxu/fssvrgo/issues/122) | 已修复 `8ba910c` |
+
+> 注：R10（[#115](https://github.com/sosoxu/fssvrgo/issues/115)）在 GitHub 上已于
+> 2026-09-11 按 `completed` 关闭，但仓库内没有提到 #115 的提交，非测试代码中
+> `context.Background()` 仍有 111 处（`internal/service` 29 处），因此上表按实际代码状态
+> 记为待处理。若结案理由是"暂不修复"，建议在 issue 里补一条说明，避免表格与 issue 再次漂移。
 
 ## 本轮已实测确认的失败
 
