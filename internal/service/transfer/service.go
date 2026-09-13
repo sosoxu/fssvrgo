@@ -169,6 +169,46 @@ func releaseNamespaceLease(lease *database.NamespaceLease) {
 	}
 }
 
+// fenceRetryAttempts bounds how many times a completing upload re-acquires its
+// lease after a newer writer advanced the same path's fence.
+const fenceRetryAttempts = 5
+
+// beginFencedWrite starts the fenced metadata transaction for path. A stale
+// fence means another writer already advanced the path's fence head while this
+// call was waiting for the distributed lock; no storage or metadata change has
+// happened yet, so the failed request should take a fresh lease (higher fence
+// token) and retry instead of returning 500 to a caller whose upload is
+// otherwise complete. See database.IsStaleFence.
+func (s *FileTransferService) beginFencedWrite(ctx context.Context, lease *database.NamespaceLease, path string) (*database.Tx, *database.NamespaceLease, error) {
+	tx, err := s.db.BeginNamespaceWrite(ctx, lease, path)
+	if err == nil || !database.IsStaleFence(err) {
+		return tx, lease, err
+	}
+
+	for attempt := 1; attempt <= fenceRetryAttempts; attempt++ {
+		releaseNamespaceLease(lease)
+
+		select {
+		case <-ctx.Done():
+			return nil, lease, ctx.Err()
+		case <-time.After(time.Duration(attempt) * 20 * time.Millisecond):
+		}
+
+		fresh, acquireErr := s.acquireFileNamespace(path)
+		if acquireErr != nil {
+			return nil, lease, acquireErr
+		}
+		lease = fresh
+
+		tx, err = s.db.BeginNamespaceWrite(ctx, lease, path)
+		if err == nil || !database.IsStaleFence(err) {
+			return tx, lease, err
+		}
+	}
+
+	return nil, lease, fmt.Errorf("fenced write kept losing to a newer writer after %d attempts: %w", fenceRetryAttempts, err)
+}
+
 func NewFileTransferService(storageAdapter storage.StorageAdapter, db *database.DB) *FileTransferService {
 	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("fsserver-uploads-%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
@@ -603,7 +643,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		s.releaseSessionSlot()
 		return nil, err
 	}
-	defer releaseNamespaceLease(namespaceLease)
+	defer func() { releaseNamespaceLease(namespaceLease) }()
 
 	fileLease, err := distributed.AcquireLockLease(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
@@ -616,7 +656,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 	defer fileLease.Stop()
 
 	fileMetadataSvc := database.NewFileMetadataService(s.db)
-	tx, err := s.db.BeginNamespaceWrite(context.Background(), namespaceLease, session.FilePath)
+	tx, namespaceLease, err := s.beginFencedWrite(context.Background(), namespaceLease, session.FilePath)
 	if err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)

@@ -288,6 +288,16 @@ var (
 	ErrNamespaceLeaseGone = errors.New("namespace lease holder is expired or missing")
 )
 
+// IsStaleFence reports whether err is the "a newer writer already advanced this
+// path's fence" rejection returned by BeginFencedWrite. File writes request
+// their path in shared mode and are ordered at write time, so several writers
+// can hold leases at once and the loser of that ordering sees this error *before*
+// any storage or metadata change. Callers can therefore safely drop the stale
+// lease, take a fresh one (which carries a higher fence token) and retry.
+func IsStaleFence(err error) bool {
+	return errors.Is(err, ErrNamespaceLeaseGone)
+}
+
 func (d *DB) AcquireNamespaceLease(ctx context.Context, requests []NamespaceLockRequest, ttl time.Duration) (*NamespaceLease, error) {
 	requests = normalizeNamespaceRequests(requests)
 	if len(requests) == 0 || d == nil || d.dialect != DialectPostgreSQL {

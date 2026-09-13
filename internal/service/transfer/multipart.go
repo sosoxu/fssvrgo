@@ -517,7 +517,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		s.releaseSessionSlot()
 		return err
 	}
-	defer releaseNamespaceLease(namespaceLease)
+	defer func() { releaseNamespaceLease(namespaceLease) }()
 
 	fileLease, err := distributed.AcquireLockLease(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
@@ -531,7 +531,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 
 	var backup storage.ReplaceBackup
 	fileMetadataSvc := database.NewFileMetadataService(s.db)
-	tx, err := s.db.BeginNamespaceWrite(context.Background(), namespaceLease, session.FilePath)
+	tx, namespaceLease, err := s.beginFencedWrite(context.Background(), namespaceLease, session.FilePath)
 	if err != nil {
 		os.Remove(storageTempPath)
 		s.multipartSessions.Delete(sessionID)

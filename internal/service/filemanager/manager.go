@@ -144,6 +144,50 @@ func releaseNamespaceLease(lease *database.NamespaceLease) {
 	}
 }
 
+// fenceRetryAttempts bounds how many times a writer re-acquires its lease after
+// a newer writer advanced the same path's fence.
+const fenceRetryAttempts = 5
+
+// beginFencedWrite starts the fenced metadata transaction for paths.
+//
+// File writes record their lease in shared mode and are ordered only when the
+// final write starts, so concurrent writers legitimately hold leases at the same
+// time; whoever loses that ordering is rejected with a stale fence. Because the
+// rejection happens before any storage or metadata mutation, the right reaction
+// is to drop the stale lease, take a fresh one (higher fence token) and try
+// again — otherwise "concurrent writes to one path are serialized by the lock"
+// degrades into "most concurrent writes fail". Genuine failures (conflicts that
+// outlive the retry budget, validation errors, DB errors) still surface.
+func (fm *FileManager) beginFencedWrite(ctx context.Context, lease *database.NamespaceLease, paths ...string) (*database.Tx, *database.NamespaceLease, error) {
+	tx, err := fm.db.BeginNamespaceWrite(ctx, lease, paths...)
+	if err == nil || !database.IsStaleFence(err) {
+		return tx, lease, err
+	}
+
+	for attempt := 1; attempt <= fenceRetryAttempts; attempt++ {
+		releaseNamespaceLease(lease)
+
+		select {
+		case <-ctx.Done():
+			return nil, lease, ctx.Err()
+		case <-time.After(time.Duration(attempt) * 20 * time.Millisecond):
+		}
+
+		fresh, acquireErr := fm.acquireFileNamespace(paths...)
+		if acquireErr != nil {
+			return nil, lease, acquireErr
+		}
+		lease = fresh
+
+		tx, err = fm.db.BeginNamespaceWrite(ctx, lease, paths...)
+		if err == nil || !database.IsStaleFence(err) {
+			return tx, lease, err
+		}
+	}
+
+	return nil, lease, fmt.Errorf("fenced write kept losing to a newer writer after %d attempts: %w", fenceRetryAttempts, err)
+}
+
 func (fm *FileManager) acquireSharedReadNamespace(path string) (*database.NamespaceLease, func(), error) {
 	fm.readLeaseMu.Lock()
 	if fm.readLeases == nil {
@@ -203,7 +247,9 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 	if err != nil {
 		return nil, err
 	}
-	defer releaseNamespaceLease(namespaceLease)
+	// The closure reads the variable, so a lease replaced by beginFencedWrite's
+	// retry is the one that gets released.
+	defer func() { releaseNamespaceLease(namespaceLease) }()
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
@@ -215,7 +261,7 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 	defer lease.Stop()
 
 	fileMetadataSvc := database.NewFileMetadataService(fm.db)
-	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
+	tx, namespaceLease, err := fm.beginFencedWrite(context.Background(), namespaceLease, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin fenced upload transaction: %w", err)
 	}
@@ -314,7 +360,7 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 	if err != nil {
 		return nil, err
 	}
-	defer releaseNamespaceLease(namespaceLease)
+	defer func() { releaseNamespaceLease(namespaceLease) }()
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
@@ -326,7 +372,7 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 	defer lease.Stop()
 
 	fileMetadataSvc := database.NewFileMetadataService(fm.db)
-	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
+	tx, namespaceLease, err := fm.beginFencedWrite(context.Background(), namespaceLease, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin fenced streaming upload transaction: %w", err)
 	}
@@ -507,7 +553,7 @@ func (fm *FileManager) DeleteFile(path string) error {
 	if err != nil {
 		return err
 	}
-	defer releaseNamespaceLease(namespaceLease)
+	defer func() { releaseNamespaceLease(namespaceLease) }()
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
@@ -519,7 +565,7 @@ func (fm *FileManager) DeleteFile(path string) error {
 	defer lease.Stop()
 
 	fileMetadataSvc := database.NewFileMetadataService(fm.db)
-	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, path)
+	tx, namespaceLease, err := fm.beginFencedWrite(context.Background(), namespaceLease, path)
 	if err != nil {
 		return fmt.Errorf("failed to begin fenced delete transaction: %w", err)
 	}
@@ -582,7 +628,7 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	if err != nil {
 		return err
 	}
-	defer releaseNamespaceLease(namespaceLease)
+	defer func() { releaseNamespaceLease(namespaceLease) }()
 
 	paths := []string{oldPath, newPath}
 	sort.Strings(paths)
@@ -615,7 +661,7 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	}()
 
 	fileMetadataSvc := database.NewFileMetadataService(fm.db)
-	tx, err := fm.db.BeginNamespaceWrite(context.Background(), namespaceLease, oldPath, newPath)
+	tx, namespaceLease, err := fm.beginFencedWrite(context.Background(), namespaceLease, oldPath, newPath)
 	if err != nil {
 		return fmt.Errorf("failed to begin fenced rename transaction: %w", err)
 	}
