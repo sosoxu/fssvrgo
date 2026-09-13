@@ -108,10 +108,11 @@
 
 ## 登记表
 
-> **状态更新（2026-09-12）**：17 条中 13 条已修复并推送到 `origin/review/acceptance-20260911`；
-> 剩余 R8、R10、R12、R14 仍待处理。
+> **状态更新（2026-09-13）**：17 条中 15 条已修复并推送到 `origin/review/acceptance-20260911`；
+> 剩余 R12、R14 仍待处理。
 > 验证口径：`go build ./...`、`go vet ./...` 通过；`go test -count=1 ./internal/...`
-> 连 PostgreSQL 12.6 全绿且 `internal/service/*` 无 SKIP。
+> 连 PostgreSQL 12.6 全绿且 `internal/service/*` 无 SKIP；`go test -count=1 ./tests/...`
+> 集成套件通过。
 
 | 编号 | 级别 | 标题 | 证据位置 | GitHub Issue | 状态 |
 |---|---|---|---|---|---|
@@ -122,9 +123,9 @@
 | R5 | P1 | `StorageAdapter.Exists` 吞掉错误 | `internal/storage/local.go:21` | [#110](https://github.com/sosoxu/fssvrgo/issues/110) | 已修复 `326f816` |
 | R6 | P1 | CI 无真实 PostgreSQL/Redis，跳过而非失败，掩盖缺陷 | `.github/workflows/ci.yml` | [#111](https://github.com/sosoxu/fssvrgo/issues/111) | 已修复 `8886c00` |
 | R7 | P1 | 需求、设计、README 与实现三方漂移 | `docs/requirements.md` 第 5 节 | [#112](https://github.com/sosoxu/fssvrgo/issues/112) | 已修复 `e6d2d56` |
-| R8 | P2 | HTTP 层与持久化耦合，单文件 1717 行 | `internal/api/http/server.go:56,1022,1176` | [#113](https://github.com/sosoxu/fssvrgo/issues/113) | 待处理 |
+| R8 | P2 | HTTP 层与持久化耦合，单文件 1717 行 | `internal/api/http/server.go`（已拆分） | [#113](https://github.com/sosoxu/fssvrgo/issues/113) | 已修复 `293d678` |
 | R9 | P2 | 服务层依赖具体 `*database.DB`，单元测试必须起真库 | `internal/service/filemanager/manager.go:41`（构造注入） | [#114](https://github.com/sosoxu/fssvrgo/issues/114) | 已修复 `194538c`、`f5cc5dc`、`fd6f580`、`b393887` |
-| R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） | `internal/service/filemanager/manager.go:63` | [#115](https://github.com/sosoxu/fssvrgo/issues/115) | 待处理（issue 已关闭，见下方注记） |
+| R10 | P2 | 请求上下文未贯穿（53 处 `context.Background()`） | `internal/storage/adapter.go:38`（全层 ctx 优先） | [#115](https://github.com/sosoxu/fssvrgo/issues/115) | 已修复 `293d678` |
 | R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | `internal/database/dialect.go:40` | [#116](https://github.com/sosoxu/fssvrgo/issues/116) | 已修复 `762e3e3` |
 | R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 | `internal/storage/local.go:33`、`internal/service/directory/manager.go:64` | [#117](https://github.com/sosoxu/fssvrgo/issues/117) | 待处理 |
 | R13 | P2 | 数据库 schema 定义重复两份 | `cmd/fsserver/main.go:74`、`internal/database/metadata.go:104` | [#118](https://github.com/sosoxu/fssvrgo/issues/118) | 已修复 `b298f18` |
@@ -133,10 +134,12 @@
 | R16 | P3 | 预编译语句缓存错误路径泄漏 | `internal/database/db.go:66` | [#121](https://github.com/sosoxu/fssvrgo/issues/121) | 已修复 `f59f017` |
 | R17 | P3 | 审计日志异步批写的可见性窗口 | `internal/database/audit_writer.go:15` | [#122](https://github.com/sosoxu/fssvrgo/issues/122) | 已修复 `8ba910c` |
 
-> 注：R10（[#115](https://github.com/sosoxu/fssvrgo/issues/115)）在 GitHub 上已于
-> 2026-09-11 按 `completed` 关闭，但仓库内没有提到 #115 的提交，非测试代码中
-> `context.Background()` 仍有 111 处（`internal/service` 29 处），因此上表按实际代码状态
-> 记为待处理。若结案理由是"暂不修复"，建议在 issue 里补一条说明，避免表格与 issue 再次漂移。
+> 注：R10（[#115](https://github.com/sosoxu/fssvrgo/issues/115)）在 GitHub 上曾于
+> 2026-09-11 被提前按 `completed` 关闭，而当时仓库里并没有对应提交；实际修复在
+> `293d678` 完成。现在 HTTP/gRPC 入口的请求 ctx 会一路传到分布式锁、事务、DB 查询与
+> 存储后端，非测试代码中的 `context.Background()` 只剩 10 处，且都是进程/服务级根
+> context（audit writer 与 cleanup 服务的生命周期、etcd/redis 客户端构造、启动/关闭
+> 与 schema 迁移），不再有请求路径上的逃逸。
 
 ## 本轮已实测确认的失败
 

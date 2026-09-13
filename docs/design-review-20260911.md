@@ -69,9 +69,15 @@
 | R16 | P3 | 预编译语句缓存错误路径泄漏 | [#121](https://github.com/sosoxu/fssvrgo/issues/121) |
 | R17 | P3 | 审计日志异步批写的可见性窗口 | [#122](https://github.com/sosoxu/fssvrgo/issues/122) |
 
-> 修复进度（2026-09-12）：R1–R7、R9、R11、R13、R15–R17 已修复并推送到
-> `origin/review/acceptance-20260911`；R8、R10、R12、R14 待处理。逐条状态与提交号见
+> 修复进度（2026-09-13）：R1–R11、R13、R15–R17 已修复并推送到
+> `origin/review/acceptance-20260911`；R12、R14 待处理。逐条状态与提交号见
 > [../ISSUES.md](../ISSUES.md) 第二轮登记表。
+>
+> R8 的落地方式：`internal/api/http/server.go` 拆成 11 个按职责划分的文件，审计查询与
+> API Key 管理下沉到 `internal/service/auditlog`、`internal/service/apikey`，
+> `NewServer` 改为 `Deps` 结构。R10 的落地方式：`StorageAdapter`/`CacheAdapter` 与各
+> service 方法统一 ctx 优先，请求取消可以中止 MinIO 上传/下载、分布式锁获取、事务与
+> DB 查询；释放锁用 `context.WithoutCancel` + 超时，保证请求取消不会让锁滞留到 TTL。
 
 ### R1 [P0] filelist 计数查询缺子查询别名
 
