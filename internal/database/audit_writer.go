@@ -8,6 +8,11 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/logger"
 )
 
+// writeBatchTimeout bounds a single batch's row writes. Rows are dropped rather
+// than retried, so this only exists to stop one pathologically slow batch from
+// holding the writer.
+const writeBatchTimeout = 5 * time.Second
+
 // AuditWriter asynchronously batches audit-log INSERTs so that request handlers
 // never block on the audit write. Entries are pushed onto a buffered channel; a
 // background goroutine flushes them in batches (either when a batch reaches
@@ -211,13 +216,20 @@ func (w *AuditWriter) flushLocked(ctx context.Context) {
 // defeat that cache. A per-row loop under one logical "batch" still avoids the
 // per-request round-trip and lets the DB batch the writes internally.
 //
-// Callers only invoke this with a live context (the loop checks ctx.Err()
-// before flushing, and Close passes the caller's bounded shutdown context),
-// so a batch is never started under an already-cancelled context. Once a batch
-// is in flight the per-row context does bound the individual writes.
+// The rows are written under a context detached from the caller's cancellation
+// (WithoutCancel) but bounded by writeBatchTimeout. The background loop only
+// flushes while its own context is alive, but Close cancels that context
+// concurrently, and a batch that is already in flight must still be written:
+// aborting it would silently drop rows the caller was told were accepted.
+// Detaching keeps the graceful-shutdown path from converting a cancellation
+// race into data loss, while the timeout still stops one slow batch from
+// wedging the writer.
 func (w *AuditWriter) writeBatch(ctx context.Context, batch []*AuditLog) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBatchTimeout)
+	defer cancel()
+
 	for _, entry := range batch {
-		if err := w.svc.Create(ctx, entry); err != nil {
+		if err := w.svc.Create(writeCtx, entry); err != nil {
 			// Keep going on a single-row failure so one bad row does not drop
 			// the rest of the batch; the per-row error is logged for triage.
 			logger.Warn("audit row write failed (op=%s resource=%s): %v", entry.Operation, entry.ResourcePath, err)
