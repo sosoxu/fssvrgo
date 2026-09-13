@@ -64,9 +64,9 @@ type DownloadSession struct {
 // thing it needs from persistence is file metadata, expressed in domain terms.
 // database.FileMetadataService satisfies it; tests can pass an in-memory fake.
 type metadataStore interface {
-	GetByPath(path string) (*database.FileMetadata, error)
-	Create(meta *database.FileMetadata) error
-	Update(meta *database.FileMetadata) error
+	GetByPath(ctx context.Context, path string) (*database.FileMetadata, error)
+	Create(ctx context.Context, meta *database.FileMetadata) error
+	Update(ctx context.Context, meta *database.FileMetadata) error
 }
 
 type FileTransferService struct {
@@ -144,6 +144,18 @@ func (s *FileTransferService) releaseSessionSlot() {
 	atomic.AddInt64(&s.sessionCount, -1)
 }
 
+// unlockLock releases a distributed lock on a context that survives the
+// caller's cancellation (WithoutCancel) and is bounded anyway. Releasing must
+// not be skipped just because the client went away — a leaked lock would block
+// other writers until its TTL expires.
+func (s *FileTransferService) unlockLock(ctx context.Context, key, token string) {
+	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.distLock.Unlock(unlockCtx, key, token); err != nil {
+		logger.Warn("failed to release distributed lock %s: %v", key, err)
+	}
+}
+
 func (s *FileTransferService) SetCryptoService(cryptoSvc *crypto.CryptoService) {
 	s.cryptoSvc = cryptoSvc
 }
@@ -176,7 +188,7 @@ func (s *FileTransferService) TempDir() string {
 	return s.tempDir
 }
 
-func (s *FileTransferService) CreateUploadSession(filePath, fileName string, totalSize int64, clientID, hash string) (string, error) {
+func (s *FileTransferService) CreateUploadSession(ctx context.Context, filePath, fileName string, totalSize int64, clientID, hash string) (string, error) {
 	if !s.acquireSessionSlot() {
 		return "", fmt.Errorf("maximum number of concurrent upload sessions reached")
 	}
@@ -222,7 +234,6 @@ func (s *FileTransferService) CreateUploadSession(filePath, fileName string, tot
 
 	s.uploadSessions.Store(sessionID, session)
 
-	ctx := context.Background()
 	if err := s.sessionStore.Set(ctx, "upload", sessionID, session, 2*time.Hour); err != nil {
 		logger.Warn("failed to store upload session in Redis: %v", err)
 	}
@@ -230,12 +241,11 @@ func (s *FileTransferService) CreateUploadSession(filePath, fileName string, tot
 	return sessionID, nil
 }
 
-func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset int64) error {
+func (s *FileTransferService) UploadChunk(ctx context.Context, sessionID string, data []byte, offset int64) error {
 	// Use LoadOrStore to avoid a race where two goroutines both miss the cache
 	// and each creates an independent restored copy with its own mutex.
 	val, ok := s.uploadSessions.Load(sessionID)
 	if !ok {
-		ctx := context.Background()
 		var redisSession UploadSession
 		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
 			restored := &redisSession
@@ -269,11 +279,11 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 	// Acquire a distributed lock so concurrent writes from different instances
 	// are serialized on the same session.
 	if s.distLock != nil {
-		token, err := distributed.AcquireLock(context.Background(), s.distLock, "upload:"+sessionID, 10*time.Second, 10, 100*time.Millisecond)
+		token, err := distributed.AcquireLock(ctx, s.distLock, "upload:"+sessionID, 10*time.Second, 10, 100*time.Millisecond)
 		if err != nil {
 			return fmt.Errorf("failed to acquire session lock: %w", err)
 		}
-		defer s.distLock.Unlock(context.Background(), "upload:"+sessionID, token)
+		defer s.unlockLock(ctx, "upload:"+sessionID, token)
 	}
 
 	if atomic.LoadInt32(&session.closed) == 1 {
@@ -329,7 +339,6 @@ func (s *FileTransferService) UploadChunk(sessionID string, data []byte, offset 
 	chunkNum := atomic.LoadInt64(&session.chunkCount)
 	if chunkNum%8 == 0 {
 		session.UpdatedAt = utils.GetCurrentTimestamp()
-		ctx := context.Background()
 		if err := s.sessionStore.Set(ctx, "upload", sessionID, session, 2*time.Hour); err != nil {
 			logger.Warn("failed to update upload session in Redis: %v", err)
 		}
@@ -352,10 +361,9 @@ type CompleteUploadResult struct {
 	StorageType  string
 }
 
-func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadResult, error) {
+func (s *FileTransferService) CompleteUpload(ctx context.Context, sessionID string) (*CompleteUploadResult, error) {
 	val, ok := s.uploadSessions.Load(sessionID)
 	if !ok {
-		ctx := context.Background()
 		var redisSession UploadSession
 		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
 			restored := &redisSession
@@ -467,17 +475,17 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		storageTempPath = encTempPath
 	}
 
-	token, cancelRenew, err := distributed.AcquireLockWithRenewal(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
+	token, cancelRenew, err := distributed.AcquireLockWithRenewal(ctx, s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
 		s.releaseSessionSlot()
 		return nil, fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
-	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
+	defer s.unlockLock(ctx, "file:"+session.FilePath, token)
 	defer cancelRenew()
 
-	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
+	if err := s.storage.WriteFromTempFile(ctx, session.FilePath, storageTempPath); err != nil {
 		os.Remove(storageTempPath)
 		s.uploadSessions.Delete(sessionID)
 		s.releaseSessionSlot()
@@ -486,7 +494,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 
 	now := utils.GetCurrentTimestamp()
 
-	existingMeta, err := s.meta.GetByPath(session.FilePath)
+	existingMeta, err := s.meta.GetByPath(ctx, session.FilePath)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		// Log the error but continue - treat as new file
 		logger.Error("Failed to query existing metadata: %v", err)
@@ -498,7 +506,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 		existingMeta.Hash = storageHash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := s.meta.Update(existingMeta); err != nil {
+		if err := s.meta.Update(ctx, existingMeta); err != nil {
 			s.uploadSessions.Delete(sessionID)
 			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to update file metadata: %w", err)
@@ -518,8 +526,8 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 			IsDeleted:       false,
 		}
 
-		if err := s.meta.Create(meta); err != nil {
-			s.storage.Remove(session.FilePath)
+		if err := s.meta.Create(ctx, meta); err != nil {
+			s.storage.Remove(ctx, session.FilePath)
 			s.uploadSessions.Delete(sessionID)
 			s.releaseSessionSlot()
 			return nil, fmt.Errorf("failed to create file metadata: %w", err)
@@ -535,7 +543,6 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 
 	os.Remove(storageTempPath)
 
-	ctx := context.Background()
 	if err := s.sessionStore.Delete(ctx, "upload", sessionID); err != nil {
 		logger.Warn("Failed to delete session from store: %v", err)
 	}
@@ -549,7 +556,7 @@ func (s *FileTransferService) CompleteUpload(sessionID string) (*CompleteUploadR
 	}, nil
 }
 
-func (s *FileTransferService) AbortUpload(sessionID string) error {
+func (s *FileTransferService) AbortUpload(ctx context.Context, sessionID string) error {
 	val, ok := s.uploadSessions.Load(sessionID)
 	if !ok {
 		return fmt.Errorf("upload session not found: %s", sessionID)
@@ -571,7 +578,6 @@ func (s *FileTransferService) AbortUpload(sessionID string) error {
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 	os.Remove(tempPath)
 
-	ctx := context.Background()
 	if err := s.sessionStore.Delete(ctx, "upload", sessionID); err != nil {
 		logger.Warn("Failed to delete session from store: %v", err)
 	}
@@ -579,10 +585,9 @@ func (s *FileTransferService) AbortUpload(sessionID string) error {
 	return nil
 }
 
-func (s *FileTransferService) GetUploadSession(sessionID string) (*UploadSession, error) {
+func (s *FileTransferService) GetUploadSession(ctx context.Context, sessionID string) (*UploadSession, error) {
 	val, ok := s.uploadSessions.Load(sessionID)
 	if !ok {
-		ctx := context.Background()
 		var redisSession UploadSession
 		if err := s.sessionStore.Get(ctx, "upload", sessionID, &redisSession); err == nil {
 			return &redisSession, nil
@@ -596,9 +601,9 @@ func (s *FileTransferService) GetUploadSession(sessionID string) (*UploadSession
 	return val.(*UploadSession), nil
 }
 
-func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (string, error) {
+func (s *FileTransferService) CreateDownloadSession(ctx context.Context, filePath, clientID string) (string, error) {
 	filePath = utils.NormalizePath(filePath)
-	meta, err := s.meta.GetByPath(filePath)
+	meta, err := s.meta.GetByPath(ctx, filePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to get file metadata: %w", err)
 	}
@@ -631,7 +636,7 @@ func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (
 		}
 
 		// Stream the encrypted file from storage to the local temp file.
-		reader, err := s.storage.OpenReader(filePath)
+		reader, err := s.storage.OpenReader(ctx, filePath)
 		if err != nil {
 			encFile.Close()
 			os.Remove(encTempPath)
@@ -670,7 +675,6 @@ func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (
 
 	s.downloadSessions.Store(sessionID, session)
 
-	ctx := context.Background()
 	if err := s.sessionStore.Set(ctx, "download", sessionID, session, 2*time.Hour); err != nil {
 		logger.Warn("failed to store download session in Redis: %v", err)
 	}
@@ -678,10 +682,9 @@ func (s *FileTransferService) CreateDownloadSession(filePath, clientID string) (
 	return sessionID, nil
 }
 
-func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset int64) ([]byte, error) {
+func (s *FileTransferService) DownloadChunk(ctx context.Context, sessionID string, size int, offset int64) ([]byte, error) {
 	val, ok := s.downloadSessions.Load(sessionID)
 	if !ok {
-		ctx := context.Background()
 		var redisSession DownloadSession
 		if err := s.sessionStore.Get(ctx, "download", sessionID, &redisSession); err == nil {
 			val = &redisSession
@@ -716,7 +719,7 @@ func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset i
 		}
 		data = buf[:n]
 	} else {
-		data, err = s.storage.ReadAt(session.FilePath, size, offset)
+		data, err = s.storage.ReadAt(ctx, session.FilePath, size, offset)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read file chunk: %w", err)
 		}
@@ -728,7 +731,6 @@ func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset i
 	chunkNum := atomic.LoadInt64(&session.chunkCount)
 	if chunkNum%8 == 0 {
 		session.UpdatedAt = utils.GetCurrentTimestamp()
-		ctx := context.Background()
 		if err := s.sessionStore.Set(ctx, "download", sessionID, session, 2*time.Hour); err != nil {
 			logger.Warn("failed to update download session in Redis: %v", err)
 		}
@@ -737,7 +739,7 @@ func (s *FileTransferService) DownloadChunk(sessionID string, size int, offset i
 	return data, nil
 }
 
-func (s *FileTransferService) CompleteDownload(sessionID string) error {
+func (s *FileTransferService) CompleteDownload(ctx context.Context, sessionID string) error {
 	val, ok := s.downloadSessions.Load(sessionID)
 	if !ok {
 		return fmt.Errorf("download session not found: %s", sessionID)
@@ -757,13 +759,12 @@ func (s *FileTransferService) CompleteDownload(sessionID string) error {
 
 	s.downloadSessions.Delete(sessionID)
 
-	ctx := context.Background()
 	s.sessionStore.Delete(ctx, "download", sessionID)
 
 	return nil
 }
 
-func (s *FileTransferService) AbortDownload(sessionID string) error {
+func (s *FileTransferService) AbortDownload(ctx context.Context, sessionID string) error {
 	val, ok := s.downloadSessions.Load(sessionID)
 	if !ok {
 		return fmt.Errorf("download session not found: %s", sessionID)
@@ -783,7 +784,6 @@ func (s *FileTransferService) AbortDownload(sessionID string) error {
 
 	s.downloadSessions.Delete(sessionID)
 
-	ctx := context.Background()
 	s.sessionStore.Delete(ctx, "download", sessionID)
 
 	return nil
@@ -798,9 +798,8 @@ func (s *FileTransferService) GetUploadProgress(sessionID string) int64 {
 	return atomic.LoadInt64(&session.UploadedSize)
 }
 
-func (s *FileTransferService) CleanupExpiredSessions(maxAgeSeconds int) {
+func (s *FileTransferService) CleanupExpiredSessions(ctx context.Context, maxAgeSeconds int) {
 	expiryTime := time.Now().Add(-time.Duration(maxAgeSeconds) * time.Second)
-	ctx := context.Background()
 
 	s.uploadSessions.Range(func(key, value interface{}) bool {
 		session := value.(*UploadSession)
@@ -889,7 +888,7 @@ func (s *FileTransferService) StartCleanupThread(intervalSeconds, maxAgeSeconds 
 		for {
 			select {
 			case <-ticker.C:
-				s.CleanupExpiredSessions(maxAgeSeconds)
+				s.CleanupExpiredSessions(ctx, maxAgeSeconds)
 			case <-ctx.Done():
 				return
 			}

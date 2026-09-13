@@ -12,7 +12,7 @@ func TestLocalStorageWrite(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
 
-	err := ls.Write("test.txt", []byte("hello"))
+	err := ls.Write(t.Context(), "test.txt", []byte("hello"))
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -27,11 +27,11 @@ func TestLocalStorageRead(t *testing.T) {
 	ls := NewLocalStorage(dir)
 
 	data := []byte("read me")
-	if err := ls.Write("read.txt", data); err != nil {
+	if err := ls.Write(t.Context(), "read.txt", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	result, err := ls.Read("read.txt")
+	result, err := ls.Read(t.Context(), "read.txt")
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -46,11 +46,11 @@ func TestLocalStorageReadAt(t *testing.T) {
 	ls := NewLocalStorage(dir)
 
 	data := []byte("0123456789abcdef")
-	if err := ls.Write("readat.bin", data); err != nil {
+	if err := ls.Write(t.Context(), "readat.bin", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	result, err := ls.ReadAt("readat.bin", 4, 8)
+	result, err := ls.ReadAt(t.Context(), "readat.bin", 4, 8)
 	if err != nil {
 		t.Fatalf("ReadAt failed: %v", err)
 	}
@@ -78,11 +78,11 @@ func TestLocalStorageWriteFromTempFile(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	if err := ls.WriteFromTempFile("fromtemp.txt", tmpFile.Name()); err != nil {
+	if err := ls.WriteFromTempFile(t.Context(), "fromtemp.txt", tmpFile.Name()); err != nil {
 		t.Fatalf("WriteFromTempFile failed: %v", err)
 	}
 
-	result, err := ls.Read("fromtemp.txt")
+	result, err := ls.Read(t.Context(), "fromtemp.txt")
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -96,11 +96,11 @@ func TestLocalStorageRemove(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
 
-	if err := ls.Write("remove.txt", []byte("bye")); err != nil {
+	if err := ls.Write(t.Context(), "remove.txt", []byte("bye")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if err := ls.Remove("remove.txt"); err != nil {
+	if err := ls.Remove(t.Context(), "remove.txt"); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -113,11 +113,11 @@ func TestLocalStorageRename(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
 
-	if err := ls.Write("old.txt", []byte("rename")); err != nil {
+	if err := ls.Write(t.Context(), "old.txt", []byte("rename")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if err := ls.Rename("old.txt", "new.txt"); err != nil {
+	if err := ls.Rename(t.Context(), "old.txt", "new.txt"); err != nil {
 		t.Fatalf("Rename failed: %v", err)
 	}
 
@@ -137,7 +137,7 @@ func TestLocalStorageExists(t *testing.T) {
 		t.Errorf("file should not exist")
 	}
 
-	if err := ls.Write("exists.txt", []byte("yes")); err != nil {
+	if err := ls.Write(t.Context(), "exists.txt", []byte("yes")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestLocalStorageExists(t *testing.T) {
 		t.Errorf("file should exist after write")
 	}
 
-	if err := ls.Remove("exists.txt"); err != nil {
+	if err := ls.Remove(t.Context(), "exists.txt"); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -159,11 +159,11 @@ func TestLocalStorageGetSize(t *testing.T) {
 	ls := NewLocalStorage(dir)
 
 	data := []byte("exactly 13 chars")
-	if err := ls.Write("size.txt", data); err != nil {
+	if err := ls.Write(t.Context(), "size.txt", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	size, err := ls.GetSize("size.txt")
+	size, err := ls.GetSize(t.Context(), "size.txt")
 	if err != nil {
 		t.Fatalf("GetSize failed: %v", err)
 	}
@@ -177,11 +177,11 @@ func TestLocalStorageList(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
 
-	ls.Write("list/a.txt", []byte("a"))
-	ls.Write("list/b.txt", []byte("b"))
-	ls.Write("list/c.txt", []byte("c"))
+	ls.Write(t.Context(), "list/a.txt", []byte("a"))
+	ls.Write(t.Context(), "list/b.txt", []byte("b"))
+	ls.Write(t.Context(), "list/c.txt", []byte("c"))
 
-	names, err := ls.List("list")
+	names, err := ls.List(t.Context(), "list")
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestLocalStorageCreateDirectory(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
 
-	if err := ls.CreateDirectory("newdir"); err != nil {
+	if err := ls.CreateDirectory(t.Context(), "newdir"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 
@@ -223,11 +223,11 @@ func TestLocalStorageRemoveDirectory(t *testing.T) {
 	dir := t.TempDir()
 	ls := NewLocalStorage(dir)
 
-	ls.CreateDirectory("rmdir")
-	ls.Write("rmdir/a.txt", []byte("a"))
-	ls.Write("rmdir/b.txt", []byte("b"))
+	ls.CreateDirectory(t.Context(), "rmdir")
+	ls.Write(t.Context(), "rmdir/a.txt", []byte("a"))
+	ls.Write(t.Context(), "rmdir/b.txt", []byte("b"))
 
-	if err := ls.RemoveDirectory("rmdir"); err != nil {
+	if err := ls.RemoveDirectory(t.Context(), "rmdir"); err != nil {
 		t.Fatalf("RemoveDirectory failed: %v", err)
 	}
 
@@ -251,11 +251,11 @@ func TestLocalStorageConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			name := filepath.Join("concurrent", fmt.Sprintf("file_%d.txt", idx))
 			data := []byte(fmt.Sprintf("data_%d", idx))
-			if err := ls.Write(name, data); err != nil {
+			if err := ls.Write(t.Context(), name, data); err != nil {
 				errCh <- err
 				return
 			}
-			result, err := ls.Read(name)
+			result, err := ls.Read(t.Context(), name)
 			if err != nil {
 				errCh <- err
 				return

@@ -1,6 +1,7 @@
 package filelist
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -16,7 +17,7 @@ type fakeStore struct {
 	countCalls int
 }
 
-func (f *fakeStore) List(query database.FileListQuery) ([]database.FileListRow, error) {
+func (f *fakeStore) List(_ context.Context, query database.FileListQuery) ([]database.FileListRow, error) {
 	f.queries = append(f.queries, query)
 	if query.Offset >= len(f.rows) {
 		return nil, nil
@@ -28,7 +29,7 @@ func (f *fakeStore) List(query database.FileListQuery) ([]database.FileListRow, 
 	return f.rows[query.Offset:end], nil
 }
 
-func (f *fakeStore) Count(database.FileListQuery) (int, error) {
+func (f *fakeStore) Count(_ context.Context, _ database.FileListQuery) (int, error) {
 	f.countCalls++
 	return len(f.rows), nil
 }
@@ -50,7 +51,7 @@ func TestServicePaginationUsesFetchLimitAndReportsHasMore(t *testing.T) {
 	store := newFakeStore(25)
 	svc := NewFileListService(store)
 
-	page1, err := svc.ListFiles("/", false, 1, 10, "name", "asc")
+	page1, err := svc.ListFiles(t.Context(), "/", false, 1, 10, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 1: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestServicePaginationUsesFetchLimitAndReportsHasMore(t *testing.T) {
 		t.Errorf("store query = limit %d offset %d, want limit 11 offset 0", got.Limit, got.Offset)
 	}
 
-	page3, err := svc.ListFiles("/", false, 3, 10, "name", "asc")
+	page3, err := svc.ListFiles(t.Context(), "/", false, 3, 10, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 3: %v", err)
 	}
@@ -81,14 +82,14 @@ func TestServiceNormalizesSortInput(t *testing.T) {
 	store := newFakeStore(1)
 	svc := NewFileListService(store)
 
-	if _, err := svc.ListFiles("/", false, 1, 10, "evil; DROP TABLE files", "asc"); err != nil {
+	if _, err := svc.ListFiles(t.Context(), "/", false, 1, 10, "evil; DROP TABLE files", "asc"); err != nil {
 		t.Fatalf("ListFiles: %v", err)
 	}
 	if got := store.queries[0]; got.SortBy != "name" || got.SortOrder != "ASC" {
 		t.Errorf("unexpected normalized sort: %q %q, want name ASC", got.SortBy, got.SortOrder)
 	}
 
-	if _, err := svc.ListFiles("/", false, 1, 10, "size", "DESC"); err != nil {
+	if _, err := svc.ListFiles(t.Context(), "/", false, 1, 10, "size", "DESC"); err != nil {
 		t.Fatalf("ListFiles: %v", err)
 	}
 	if got := store.queries[1]; got.SortBy != "size" || got.SortOrder != "DESC" {
@@ -100,7 +101,7 @@ func TestServiceIncludeTotalAsksStoreForCount(t *testing.T) {
 	store := newFakeStore(25)
 	svc := NewFileListService(store)
 
-	result, err := svc.ListFilesWithTotal("/", false, 1, 10, "name", "asc")
+	result, err := svc.ListFilesWithTotal(t.Context(), "/", false, 1, 10, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFilesWithTotal: %v", err)
 	}

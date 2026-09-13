@@ -82,7 +82,7 @@ func benchWrite(b *testing.B, store StorageAdapter, size int64) {
 
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("bench/write/%d/%d", size, i)
-		if err := store.Write(key, data); err != nil {
+		if err := store.Write(b.Context(), key, data); err != nil {
 			b.Fatalf("Write failed: %v", err)
 		}
 	}
@@ -91,7 +91,7 @@ func benchWrite(b *testing.B, store StorageAdapter, size int64) {
 func benchRead(b *testing.B, store StorageAdapter, size int64) {
 	data := generateBenchData(size)
 	key := fmt.Sprintf("bench/read/%d", size)
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(b.Context(), key, data); err != nil {
 		b.Fatalf("Write setup failed: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func benchRead(b *testing.B, store StorageAdapter, size int64) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := store.Read(key); err != nil {
+		if _, err := store.Read(b.Context(), key); err != nil {
 			b.Fatalf("Read failed: %v", err)
 		}
 	}
@@ -112,7 +112,7 @@ func benchWriteFromReader(b *testing.B, store StorageAdapter, size int64) {
 
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("bench/writer/%d/%d", size, i)
-		if err := store.WriteFromReader(key, bytes.NewReader(data)); err != nil {
+		if err := store.WriteFromReader(b.Context(), key, bytes.NewReader(data)); err != nil {
 			b.Fatalf("WriteFromReader failed: %v", err)
 		}
 	}
@@ -121,7 +121,7 @@ func benchWriteFromReader(b *testing.B, store StorageAdapter, size int64) {
 func benchOpenReader(b *testing.B, store StorageAdapter, size int64) {
 	data := generateBenchData(size)
 	key := fmt.Sprintf("bench/openreader/%d", size)
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(b.Context(), key, data); err != nil {
 		b.Fatalf("Write setup failed: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func benchOpenReader(b *testing.B, store StorageAdapter, size int64) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		reader, err := store.OpenReader(key)
+		reader, err := store.OpenReader(b.Context(), key)
 		if err != nil {
 			b.Fatalf("OpenReader failed: %v", err)
 		}
@@ -144,7 +144,7 @@ func benchOpenReader(b *testing.B, store StorageAdapter, size int64) {
 func benchReadAt(b *testing.B, store StorageAdapter, size int64, chunkSize int, offset int64) {
 	data := generateBenchData(size)
 	key := fmt.Sprintf("bench/readat/%d", size)
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(b.Context(), key, data); err != nil {
 		b.Fatalf("Write setup failed: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func benchReadAt(b *testing.B, store StorageAdapter, size int64, chunkSize int, 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := store.ReadAt(key, chunkSize, offset); err != nil {
+		if _, err := store.ReadAt(b.Context(), key, chunkSize, offset); err != nil {
 			b.Fatalf("ReadAt failed: %v", err)
 		}
 	}
@@ -171,7 +171,7 @@ func benchConcurrentWrite(b *testing.B, store StorageAdapter, size int64, concur
 			go func(idx int) {
 				defer wg.Done()
 				key := fmt.Sprintf("bench/concwrite/%d/%d/%d", size, i, idx)
-				if err := store.Write(key, data); err != nil {
+				if err := store.Write(b.Context(), key, data); err != nil {
 					errCh <- err
 				}
 			}(j)
@@ -187,7 +187,7 @@ func benchConcurrentWrite(b *testing.B, store StorageAdapter, size int64, concur
 func benchConcurrentRead(b *testing.B, store StorageAdapter, size int64, concurrency int) {
 	data := generateBenchData(size)
 	key := fmt.Sprintf("bench/concread/%d", size)
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(b.Context(), key, data); err != nil {
 		b.Fatalf("Write setup failed: %v", err)
 	}
 
@@ -201,7 +201,7 @@ func benchConcurrentRead(b *testing.B, store StorageAdapter, size int64, concurr
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if _, err := store.Read(key); err != nil {
+				if _, err := store.Read(b.Context(), key); err != nil {
 					errCh <- err
 				}
 			}()
@@ -222,10 +222,10 @@ func benchRename(b *testing.B, store StorageAdapter, size int64) {
 	for i := 0; i < b.N; i++ {
 		oldKey := fmt.Sprintf("bench/rename/old/%d/%d", size, i)
 		newKey := fmt.Sprintf("bench/rename/new/%d/%d", size, i)
-		if err := store.Write(oldKey, data); err != nil {
+		if err := store.Write(b.Context(), oldKey, data); err != nil {
 			b.Fatalf("Write failed: %v", err)
 		}
-		if err := store.Rename(oldKey, newKey); err != nil {
+		if err := store.Rename(b.Context(), oldKey, newKey); err != nil {
 			b.Fatalf("Rename failed: %v", err)
 		}
 	}
@@ -238,10 +238,10 @@ func benchRemove(b *testing.B, store StorageAdapter, size int64) {
 
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("bench/remove/%d/%d", size, i)
-		if err := store.Write(key, data); err != nil {
+		if err := store.Write(b.Context(), key, data); err != nil {
 			b.Fatalf("Write failed: %v", err)
 		}
-		if err := store.Remove(key); err != nil {
+		if err := store.Remove(b.Context(), key); err != nil {
 			b.Fatalf("Remove failed: %v", err)
 		}
 	}
@@ -250,7 +250,7 @@ func benchRemove(b *testing.B, store StorageAdapter, size int64) {
 func benchExists(b *testing.B, store StorageAdapter, size int64) {
 	data := generateBenchData(size)
 	key := fmt.Sprintf("bench/exists/%d", size)
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(b.Context(), key, data); err != nil {
 		b.Fatalf("Write setup failed: %v", err)
 	}
 
@@ -266,14 +266,14 @@ func benchExists(b *testing.B, store StorageAdapter, size int64) {
 func benchGetSize(b *testing.B, store StorageAdapter, size int64) {
 	data := generateBenchData(size)
 	key := fmt.Sprintf("bench/getsize/%d", size)
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(b.Context(), key, data); err != nil {
 		b.Fatalf("Write setup failed: %v", err)
 	}
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := store.GetSize(key); err != nil {
+		if _, err := store.GetSize(b.Context(), key); err != nil {
 			b.Fatalf("GetSize failed: %v", err)
 		}
 	}

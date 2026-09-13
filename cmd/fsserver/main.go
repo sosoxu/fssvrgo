@@ -21,6 +21,8 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/etcd"
 	"github.com/sosoxu/fssvrgo/internal/logger"
 	"github.com/sosoxu/fssvrgo/internal/metrics"
+	"github.com/sosoxu/fssvrgo/internal/service/apikey"
+	"github.com/sosoxu/fssvrgo/internal/service/auditlog"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -75,13 +77,15 @@ func main() {
 	var store storage.StorageAdapter
 	switch cfg.Storage.Type {
 	case "minio":
-		minioStore, err := storage.NewMinIOStorage(storage.MinIOConfig{
+		initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		minioStore, err := storage.NewMinIOStorage(initCtx, storage.MinIOConfig{
 			Endpoint:  cfg.Storage.MinIO.Endpoint,
 			AccessKey: cfg.Storage.MinIO.AccessKey,
 			SecretKey: cfg.Storage.MinIO.SecretKey,
 			Bucket:    cfg.Storage.MinIO.Bucket,
 			UseSSL:    cfg.Storage.MinIO.UseSSL,
 		})
+		initCancel()
 		if err != nil {
 			logger.Error("Failed to initialize MinIO storage: %v", err)
 			os.Exit(1)
@@ -210,9 +214,8 @@ func main() {
 	authSvc := auth.NewAuthService()
 	authSvc.Init(cfg.Auth.Enabled, cfg.Auth.Secret)
 	// Wire API key lookup so keys created via the management API are validated against the database.
-	authSvc.SetApiKeyLookup(func(ctx context.Context, keyHash string) (*database.ApiKey, error) {
-		return database.NewApiKeyService(queryDB).GetByKeyHash(keyHash)
-	})
+	apiKeyStore := database.NewApiKeyService(queryDB)
+	authSvc.SetApiKeyLookup(apiKeyStore.GetByKeyHash)
 
 	// Crypto
 	cryptoSvc := crypto.NewCryptoService()
@@ -290,12 +293,25 @@ func main() {
 	defer cleanupSvc.Stop()
 
 	// HTTP server
-	httpServer := http.NewServer(
-		cfg.Server, cfg.TLS,
-		fm, dirSvc, flSvc, transferSvc,
-		authSvc, cryptoSvc,
-		store, cacheSvc, metricsSvc, queryDB,
-	)
+	httpServer := http.NewServer(http.Deps{
+		Config:      cfg.Server,
+		TLS:         cfg.TLS,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Metrics:     metricsSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(queryDB),
+			database.NewAuditWriter(queryDB, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(apiKeyStore, authSvc.GenerateApiKey),
+		DB:      queryDB,
+	})
 
 	// gRPC server
 	var grpcServer *grpc.Server
@@ -320,7 +336,7 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				fm.CleanFileLocks()
+				fm.CleanFileLocks(ctx)
 			case <-ctx.Done():
 				return
 			}

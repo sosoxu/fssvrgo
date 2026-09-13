@@ -11,7 +11,6 @@ import (
 type RedisCache struct {
 	client *redis.Client
 	ttl    time.Duration
-	ctx    context.Context
 }
 
 func NewRedisCache(addr, password string, db, poolSize int, ttl int64) *RedisCache {
@@ -24,12 +23,11 @@ func NewRedisCache(addr, password string, db, poolSize int, ttl int64) *RedisCac
 	return &RedisCache{
 		client: rdb,
 		ttl:    time.Duration(ttl) * time.Second,
-		ctx:    context.Background(),
 	}
 }
 
-func (c *RedisCache) Get(key string) (interface{}, bool) {
-	val, err := c.client.Get(c.ctx, key).Result()
+func (c *RedisCache) Get(ctx context.Context, key string) (interface{}, bool) {
+	val, err := c.client.Get(ctx, key).Result()
 	if err != nil {
 		return nil, false
 	}
@@ -40,20 +38,20 @@ func (c *RedisCache) Get(key string) (interface{}, bool) {
 	return result, true
 }
 
-func (c *RedisCache) Set(key string, value interface{}) {
+func (c *RedisCache) Set(ctx context.Context, key string, value interface{}) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return
 	}
-	c.client.Set(c.ctx, key, data, c.ttl)
+	c.client.Set(ctx, key, data, c.ttl)
 }
 
-func (c *RedisCache) Delete(key string) {
-	c.client.Del(c.ctx, key)
+func (c *RedisCache) Delete(ctx context.Context, key string) {
+	c.client.Del(ctx, key)
 }
 
-func (c *RedisCache) Exists(key string) bool {
-	val, err := c.client.Exists(c.ctx, key).Result()
+func (c *RedisCache) Exists(ctx context.Context, key string) bool {
+	val, err := c.client.Exists(ctx, key).Result()
 	return err == nil && val > 0
 }
 

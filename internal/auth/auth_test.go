@@ -33,10 +33,10 @@ func TestApiKeyHashing(t *testing.T) {
 func TestAuthDisabled(t *testing.T) {
 	svc := NewAuthService()
 	svc.Init(false, "")
-	if !svc.ValidateApiKey("any-key") {
+	if !svc.ValidateApiKey(t.Context(), "any-key") {
 		t.Errorf("ValidateApiKey should return true when auth is disabled")
 	}
-	if !svc.ValidateApiKey("") {
+	if !svc.ValidateApiKey(t.Context(), "") {
 		t.Errorf("ValidateApiKey should return true for empty key when auth is disabled")
 	}
 }
@@ -45,15 +45,15 @@ func TestAuthEnabled(t *testing.T) {
 	svc := NewAuthService()
 	svc.Init(true, "my-secret-key")
 
-	if !svc.ValidateApiKey("my-secret-key") {
+	if !svc.ValidateApiKey(t.Context(), "my-secret-key") {
 		t.Errorf("ValidateApiKey should return true for correct key")
 	}
 
-	if svc.ValidateApiKey("wrong-key") {
+	if svc.ValidateApiKey(t.Context(), "wrong-key") {
 		t.Errorf("ValidateApiKey should return false for wrong key")
 	}
 
-	if svc.ValidateApiKey("") {
+	if svc.ValidateApiKey(t.Context(), "") {
 		t.Errorf("ValidateApiKey should return false for empty key when auth is enabled")
 	}
 }
@@ -149,16 +149,16 @@ func TestHasPermission(t *testing.T) {
 	svc := NewAuthService()
 	svc.Init(true, "admin-key")
 
-	if !svc.HasPermission("admin-key", "files", "read") {
+	if !svc.HasPermission(t.Context(), "admin-key", "files", "read") {
 		t.Errorf("admin should have read permission")
 	}
-	if !svc.HasPermission("admin-key", "files", "write") {
+	if !svc.HasPermission(t.Context(), "admin-key", "files", "write") {
 		t.Errorf("admin should have write permission")
 	}
-	if !svc.HasPermission("admin-key", "files", "delete") {
+	if !svc.HasPermission(t.Context(), "admin-key", "files", "delete") {
 		t.Errorf("admin should have delete permission")
 	}
-	if !svc.HasPermission("admin-key", "users", "manage") {
+	if !svc.HasPermission(t.Context(), "admin-key", "users", "manage") {
 		t.Errorf("admin should have all permissions")
 	}
 
@@ -172,17 +172,17 @@ func TestHasPermission(t *testing.T) {
 	}
 	svc.CreateUser(user)
 
-	if !svc.HasPermission(userKey, "files", "read") {
+	if !svc.HasPermission(t.Context(), userKey, "files", "read") {
 		t.Errorf("user should have read permission on files")
 	}
-	if !svc.HasPermission(userKey, "files", "write") {
+	if !svc.HasPermission(t.Context(), userKey, "files", "write") {
 		t.Errorf("user should have write permission on files")
 	}
-	if svc.HasPermission(userKey, "files", "delete") {
+	if svc.HasPermission(t.Context(), userKey, "files", "delete") {
 		t.Errorf("user should not have delete permission on files")
 	}
 
-	if svc.HasPermission("unknown-key", "files", "read") {
+	if svc.HasPermission(t.Context(), "unknown-key", "files", "read") {
 		t.Errorf("unknown key should have no permission")
 	}
 }
@@ -227,11 +227,11 @@ func TestValidateApiKeyWithDatabaseLookup(t *testing.T) {
 	}
 	svc.SetApiKeyLookup(mock)
 
-	if !svc.ValidateApiKey(dbKey) {
+	if !svc.ValidateApiKey(t.Context(), dbKey) {
 		t.Errorf("ValidateApiKey should return true for active database-managed key")
 	}
 
-	if svc.ValidateApiKey("nonexistent-db-key") {
+	if svc.ValidateApiKey(t.Context(), "nonexistent-db-key") {
 		t.Errorf("ValidateApiKey should return false for key not found in database")
 	}
 
@@ -249,7 +249,7 @@ func TestValidateApiKeyWithDatabaseLookup(t *testing.T) {
 		return nil, nil
 	}
 	svc.SetApiKeyLookup(inactiveMock)
-	if svc.ValidateApiKey(inactiveKey) {
+	if svc.ValidateApiKey(t.Context(), inactiveKey) {
 		t.Errorf("ValidateApiKey should return false for inactive database key")
 	}
 }
@@ -275,7 +275,7 @@ func TestGetUserByApiKeyWithDatabaseLookup(t *testing.T) {
 	}
 	svc.SetApiKeyLookup(mock)
 
-	user := svc.GetUserByApiKey(dbKey)
+	user := svc.GetUserByApiKey(t.Context(), dbKey)
 	if user == nil {
 		t.Fatalf("GetUserByApiKey should return a user for active database key")
 	}
@@ -292,7 +292,7 @@ func TestGetUserByApiKeyWithDatabaseLookup(t *testing.T) {
 		t.Errorf("expected database-backed user to be enabled")
 	}
 
-	if svc.GetUserByApiKey("unknown-db-key") != nil {
+	if svc.GetUserByApiKey(t.Context(), "unknown-db-key") != nil {
 		t.Errorf("GetUserByApiKey should return nil for unknown key")
 	}
 
@@ -309,7 +309,7 @@ func TestGetUserByApiKeyWithDatabaseLookup(t *testing.T) {
 		return nil, nil
 	}
 	svc.SetApiKeyLookup(adminMock)
-	adminUser := svc.GetUserByApiKey(dbKey)
+	adminUser := svc.GetUserByApiKey(t.Context(), dbKey)
 	if adminUser == nil {
 		t.Fatalf("GetUserByApiKey should return admin user from database")
 	}
@@ -332,7 +332,7 @@ func TestGetUserByApiKeyWithJWT(t *testing.T) {
 		t.Fatalf("GenerateTokenPair failed: %v", err)
 	}
 
-	user := svc.GetUserByApiKey(pair.AccessToken)
+	user := svc.GetUserByApiKey(t.Context(), pair.AccessToken)
 	if user == nil {
 		t.Fatalf("GetUserByApiKey should return a user for valid access token")
 	}
@@ -347,7 +347,7 @@ func TestGetUserByApiKeyWithJWT(t *testing.T) {
 	}
 
 	// Refresh tokens should not be accepted as API auth identity.
-	if svc.GetUserByApiKey(pair.RefreshToken) != nil {
+	if svc.GetUserByApiKey(t.Context(), pair.RefreshToken) != nil {
 		t.Errorf("GetUserByApiKey should return nil for refresh token")
 	}
 }
@@ -373,16 +373,16 @@ func TestHasPermissionWithDatabaseUser(t *testing.T) {
 	}
 	svc.SetApiKeyLookup(mock)
 
-	if !svc.HasPermission(dbKey, "files", "read") {
+	if !svc.HasPermission(t.Context(), dbKey, "files", "read") {
 		t.Errorf("database user should have read permission on files")
 	}
-	if !svc.HasPermission(dbKey, "files", "write") {
+	if !svc.HasPermission(t.Context(), dbKey, "files", "write") {
 		t.Errorf("database user should have write permission on files")
 	}
-	if svc.HasPermission(dbKey, "files", "delete") {
+	if svc.HasPermission(t.Context(), dbKey, "files", "delete") {
 		t.Errorf("database user should not have delete permission on files")
 	}
-	if svc.HasPermission(dbKey, "users", "manage") {
+	if svc.HasPermission(t.Context(), dbKey, "users", "manage") {
 		t.Errorf("database user should not have manage permission on users")
 	}
 
@@ -402,10 +402,10 @@ func TestHasPermissionWithDatabaseUser(t *testing.T) {
 		return nil, nil
 	}
 	svc.SetApiKeyLookup(adminMock)
-	if !svc.HasPermission(adminKey, "files", "delete") {
+	if !svc.HasPermission(t.Context(), adminKey, "files", "delete") {
 		t.Errorf("database admin should have delete permission on files")
 	}
-	if !svc.HasPermission(adminKey, "users", "manage") {
+	if !svc.HasPermission(t.Context(), adminKey, "users", "manage") {
 		t.Errorf("database admin should have manage permission on users")
 	}
 }
@@ -511,7 +511,7 @@ func TestValidateApiKeyRejectsEmptyKey(t *testing.T) {
 	svc := NewAuthService()
 	svc.Init(true, "admin-key")
 
-	if svc.ValidateApiKey("") {
+	if svc.ValidateApiKey(t.Context(), "") {
 		t.Errorf("ValidateApiKey should return false for empty key when auth enabled")
 	}
 
@@ -522,7 +522,7 @@ func TestValidateApiKeyRejectsEmptyKey(t *testing.T) {
 		return nil, nil
 	}
 	svc.SetApiKeyLookup(mock)
-	if svc.ValidateApiKey("") {
+	if svc.ValidateApiKey(t.Context(), "") {
 		t.Errorf("ValidateApiKey should return false for empty key even with lookup set")
 	}
 	if called {
@@ -530,7 +530,7 @@ func TestValidateApiKeyRejectsEmptyKey(t *testing.T) {
 	}
 
 	// GetUserByApiKey should also reject empty keys.
-	if svc.GetUserByApiKey("") != nil {
+	if svc.GetUserByApiKey(t.Context(), "") != nil {
 		t.Errorf("GetUserByApiKey should return nil for empty key")
 	}
 }
@@ -540,7 +540,7 @@ func TestSetApiKeyLookup(t *testing.T) {
 	svc.Init(true, "admin-key")
 
 	// Without a lookup function, unknown keys still fail (fall through to JWT).
-	if svc.ValidateApiKey("totally-unknown-key") {
+	if svc.ValidateApiKey(t.Context(), "totally-unknown-key") {
 		t.Errorf("ValidateApiKey should return false for unknown key without lookup")
 	}
 
@@ -554,7 +554,7 @@ func TestSetApiKeyLookup(t *testing.T) {
 	svc.SetApiKeyLookup(mock)
 
 	// With the lookup set, an unknown key triggers a database lookup.
-	if svc.ValidateApiKey("still-unknown-key") {
+	if svc.ValidateApiKey(t.Context(), "still-unknown-key") {
 		t.Errorf("ValidateApiKey should return false when lookup returns nil")
 	}
 	if called == 0 {
@@ -579,12 +579,12 @@ func TestSetApiKeyLookup(t *testing.T) {
 		return nil, nil
 	}
 	svc.SetApiKeyLookup(okMock)
-	if !svc.ValidateApiKey(okKey) {
+	if !svc.ValidateApiKey(t.Context(), okKey) {
 		t.Errorf("ValidateApiKey should return true after replacing lookup with one that returns active key")
 	}
 
 	// Default admin key must still validate even when a lookup is registered.
-	if !svc.ValidateApiKey("admin-key") {
+	if !svc.ValidateApiKey(t.Context(), "admin-key") {
 		t.Errorf("ValidateApiKey should still accept the default admin key with lookup set")
 	}
 }

@@ -31,6 +31,8 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/logger"
+	"github.com/sosoxu/fssvrgo/internal/service/apikey"
+	"github.com/sosoxu/fssvrgo/internal/service/auditlog"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -79,59 +81,59 @@ func testRedisPassword() string {
 // ---- result structures -----------------------------------------------------------
 
 type latencyStats struct {
-	MinUS  int64   `json:"min_us"`
-	MaxUS  int64   `json:"max_us"`
-	AvgUS  int64   `json:"avg_us"`
-	P50US  int64   `json:"p50_us"`
-	P95US  int64   `json:"p95_us"`
-	P99US  int64   `json:"p99_us"`
-	Sample int     `json:"sample"`
+	MinUS  int64 `json:"min_us"`
+	MaxUS  int64 `json:"max_us"`
+	AvgUS  int64 `json:"avg_us"`
+	P50US  int64 `json:"p50_us"`
+	P95US  int64 `json:"p95_us"`
+	P99US  int64 `json:"p99_us"`
+	Sample int   `json:"sample"`
 }
 
 type phaseResult struct {
-	Name         string       `json:"name"`
-	Protocol     string       `json:"protocol"`
-	Operation    string       `json:"operation"`
-	FileCount    int          `json:"file_count"`
-	FileSize     int          `json:"file_size"`
-	Concurrency  int          `json:"concurrency"`
-	DurationSec  float64      `json:"duration_sec"`
-	Success      int64        `json:"success"`
-	Fail         int64        `json:"fail"`
-	FilesPerSec  float64      `json:"files_per_sec"`
-	MBPerSec     float64      `json:"mb_per_sec"`
-	Latency      latencyStats `json:"latency"`
-	Errors       []string     `json:"errors,omitempty"`
+	Name        string       `json:"name"`
+	Protocol    string       `json:"protocol"`
+	Operation   string       `json:"operation"`
+	FileCount   int          `json:"file_count"`
+	FileSize    int          `json:"file_size"`
+	Concurrency int          `json:"concurrency"`
+	DurationSec float64      `json:"duration_sec"`
+	Success     int64        `json:"success"`
+	Fail        int64        `json:"fail"`
+	FilesPerSec float64      `json:"files_per_sec"`
+	MBPerSec    float64      `json:"mb_per_sec"`
+	Latency     latencyStats `json:"latency"`
+	Errors      []string     `json:"errors,omitempty"`
 }
 
 type benchReport struct {
-	GeneratedAt  string         `json:"generated_at"`
-	Environment  map[string]any `json:"environment"`
-	Config       map[string]any `json:"config"`
-	Phases       []phaseResult  `json:"phases"`
-	Summary      map[string]any `json:"summary"`
+	GeneratedAt string         `json:"generated_at"`
+	Environment map[string]any `json:"environment"`
+	Config      map[string]any `json:"config"`
+	Phases      []phaseResult  `json:"phases"`
+	Summary     map[string]any `json:"summary"`
 }
 
 // ---- cluster setup ---------------------------------------------------------------
 
 type massiveCluster struct {
-	httpBaseURL  string
-	grpcAddr     string
-	httpServer   *httpserver.Server
-	grpcServer   *grpcserver.Server
-	fm           *filemanager.FileManager
-	transferSvc  *transfer.FileTransferService
-	store        storage.StorageAdapter
-	dbObj        *database.Database
-	qdb          *database.DB
-	redisMgr     *distributed.RedisManager
-	storageDir   string
-	tempDir      string
-	httpClient   *http.Client
-	grpcConn     *grpc.ClientConn
-	grpcClient   pb.FileServiceClient
-	storageType  string // "local" or "minio"
-	minioBucket  string // populated when storageType == "minio"
+	httpBaseURL string
+	grpcAddr    string
+	httpServer  *httpserver.Server
+	grpcServer  *grpcserver.Server
+	fm          *filemanager.FileManager
+	transferSvc *transfer.FileTransferService
+	store       storage.StorageAdapter
+	dbObj       *database.Database
+	qdb         *database.DB
+	redisMgr    *distributed.RedisManager
+	storageDir  string
+	tempDir     string
+	httpClient  *http.Client
+	grpcConn    *grpc.ClientConn
+	grpcClient  pb.FileServiceClient
+	storageType string // "local" or "minio"
+	minioBucket string // populated when storageType == "minio"
 }
 
 func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
@@ -191,7 +193,7 @@ func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
 			UseSSL:    false,
 		}
 		minioBucket = minioCfg.Bucket
-		ms, mErr := storage.NewMinIOStorage(minioCfg)
+		ms, mErr := storage.NewMinIOStorage(t.Context(), minioCfg)
 		if mErr != nil {
 			dbObj.Close()
 			os.RemoveAll(tempDir)
@@ -237,7 +239,23 @@ func setupMassiveCluster(t *testing.T, concurrency int) *massiveCluster {
 		MaxPageSize:        1000,
 		CORSAllowedOrigins: "*",
 	}
-	httpSrv := httpserver.NewServer(httpCfg, config.TLSConfig{}, fm, dirSvc, flSvc, transferSvc, authSvc, cryptoSvc, store, cacheSvc, nil, qdb)
+	httpSrv := httpserver.NewServer(httpserver.Deps{
+		Config:      httpCfg,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(qdb),
+			database.NewAuditWriter(qdb, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(database.NewApiKeyService(qdb), authSvc.GenerateApiKey),
+		DB:      qdb,
+	})
 	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
 		cleanupMassiveCluster(nil, dbObj, redisMgr, tempDir)
@@ -330,12 +348,12 @@ func (c *massiveCluster) cleanState() {
 		// is a no-op for MinIO (objects removed via API), but call it for
 		// parity with local cleanup of the in-memory path-lock map.
 		if ms, ok := c.store.(*storage.MinIOStorage); ok {
-			ms.CleanPathLocks()
+			ms.CleanPathLocks(context.Background())
 		}
 	} else {
 		removeDirContents(c.storageDir)
 		if ls, ok := c.store.(*storage.LocalStorage); ok {
-			ls.CleanPathLocks()
+			ls.CleanPathLocks(context.Background())
 		}
 	}
 }
@@ -477,10 +495,10 @@ func (e *errorRecorder) snapshot() []string {
 
 // progressLogger periodically logs throughput while a phase is running.
 type progressLogger struct {
-	name     string
-	total    int
-	done     *atomic.Int64
-	stopCh   chan struct{}
+	name   string
+	total  int
+	done   *atomic.Int64
+	stopCh chan struct{}
 }
 
 func startProgress(name string, total int, done *atomic.Int64) *progressLogger {
@@ -765,18 +783,18 @@ func TestMassiveSmallFiles_Performance(t *testing.T) {
 	report := benchReport{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Environment: map[string]any{
-			"go_version":  runtime.Version(),
-			"gomaxprocs":  runtime.GOMAXPROCS(0),
-			"os":          runtime.GOOS + "/" + runtime.GOARCH,
-			"storage":     envStr("FSS_BENCH_STORAGE", "local"),
-			"database":    "postgresql",
-			"lock":        "redis (distributed SET NX + Lua unlock)",
+			"go_version": runtime.Version(),
+			"gomaxprocs": runtime.GOMAXPROCS(0),
+			"os":         runtime.GOOS + "/" + runtime.GOARCH,
+			"storage":    envStr("FSS_BENCH_STORAGE", "local"),
+			"database":   "postgresql",
+			"lock":       "redis (distributed SET NX + Lua unlock)",
 		},
 		Config: map[string]any{
-			"file_count":        fileCount,
-			"file_size":         fileSize,
-			"http_concurrency":  httpConcurrency,
-			"grpc_concurrency":  grpcConcurrency,
+			"file_count":       fileCount,
+			"file_size":        fileSize,
+			"http_concurrency": httpConcurrency,
+			"grpc_concurrency": grpcConcurrency,
 		},
 		Phases: phases,
 	}

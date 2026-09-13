@@ -17,10 +17,10 @@ import (
 // database.DirectoryMetadataService satisfies it, and tests can supply an
 // in-memory fake instead of a PostgreSQL instance.
 type metadataStore interface {
-	Create(meta *database.DirectoryMetadata) error
-	GetByPath(path string) (*database.DirectoryMetadata, error)
-	Remove(id string) error
-	Exists(path string) (bool, error)
+	Create(ctx context.Context, meta *database.DirectoryMetadata) error
+	GetByPath(ctx context.Context, path string) (*database.DirectoryMetadata, error)
+	Remove(ctx context.Context, id string) error
+	Exists(ctx context.Context, path string) (bool, error)
 }
 
 // treeStore is the data-access seam for the cascade operations that walk or
@@ -28,12 +28,12 @@ type metadataStore interface {
 // tests supply an in-memory fake so the service can be covered without a
 // database.
 type treeStore interface {
-	CountChildren(path string) (fileCount, dirCount int, err error)
-	ListChildFiles(path string, limit int) ([]database.PathEntry, error)
-	ListChildDirectories(path string, limit int) ([]database.PathEntry, error)
-	SoftDeleteFiles(updatedAt string, entries []database.PathEntry) error
-	SoftDeleteDirectories(updatedAt string, entries []database.PathEntry) error
-	RenameTree(updatedAt string, files, dirs []database.PathUpdate, target database.PathUpdate) error
+	CountChildren(ctx context.Context, path string) (fileCount, dirCount int, err error)
+	ListChildFiles(ctx context.Context, path string, limit int) ([]database.PathEntry, error)
+	ListChildDirectories(ctx context.Context, path string, limit int) ([]database.PathEntry, error)
+	SoftDeleteFiles(ctx context.Context, updatedAt string, entries []database.PathEntry) error
+	SoftDeleteDirectories(ctx context.Context, updatedAt string, entries []database.PathEntry) error
+	RenameTree(ctx context.Context, updatedAt string, files, dirs []database.PathUpdate, target database.PathUpdate) error
 }
 
 type DirectoryManager struct {
@@ -76,19 +76,19 @@ func NewDirectoryManagerWithStores(meta metadataStore, tree treeStore, store sto
 // (e.g. recursive delete/rename of large directories) do not lose the lock
 // when the initial TTL expires. This matches the behavior of the upload
 // completion path (see transfer.FileTransferService.CompleteUpload).
-func (dm *DirectoryManager) lockDirectory(path string) (func(), error) {
+func (dm *DirectoryManager) lockDirectory(ctx context.Context, path string) (func(), error) {
 	if dm.distLock == nil {
 		return func() {}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	lockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	token, cancelRenew, err := distributed.AcquireLockWithRenewal(ctx, dm.distLock, "dir:"+path, 10*time.Second, 30, 50*time.Millisecond)
+	token, cancelRenew, err := distributed.AcquireLockWithRenewal(lockCtx, dm.distLock, "dir:"+path, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire directory lock for %s: %w", path, err)
 	}
 	return func() {
 		cancelRenew()
-		unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		unlockCtx, unlockCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer unlockCancel()
 		if err := dm.distLock.Unlock(unlockCtx, "dir:"+path, token); err != nil {
 			logger.Warn("failed to release directory lock for %s: %v", path, err)
@@ -108,16 +108,16 @@ func (dm *DirectoryManager) supportsDirectoryStorageOps() bool {
 	return dm.store != nil && dm.store.StorageType() == "local"
 }
 
-func (dm *DirectoryManager) CreateDirectory(path string) error {
+func (dm *DirectoryManager) CreateDirectory(ctx context.Context, path string) error {
 	path = utils.NormalizePath(path)
 
-	release, err := dm.lockDirectory(path)
+	release, err := dm.lockDirectory(ctx, path)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	if dm.Exists(path) {
+	if dm.Exists(ctx, path) {
 		return fmt.Errorf("directory already exists: %s", path)
 	}
 
@@ -133,7 +133,7 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 		IsDeleted: false,
 	}
 
-	if err := dm.meta.Create(meta); err != nil {
+	if err := dm.meta.Create(ctx, meta); err != nil {
 		return err
 	}
 
@@ -144,7 +144,7 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 	// The DB record is the source of truth; LocalStorage will also auto-create
 	// the directory on first file write, so failure here is best-effort.
 	if dm.supportsDirectoryStorageOps() {
-		if err := dm.store.CreateDirectory(path); err != nil {
+		if err := dm.store.CreateDirectory(ctx, path); err != nil {
 			logger.Warn("failed to create directory marker in storage for %s: %v", path, err)
 		}
 	}
@@ -152,21 +152,21 @@ func (dm *DirectoryManager) CreateDirectory(path string) error {
 	return nil
 }
 
-func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
+func (dm *DirectoryManager) DeleteDirectory(ctx context.Context, path string, recursive bool) error {
 	path = utils.NormalizePath(path)
 
-	release, err := dm.lockDirectory(path)
+	release, err := dm.lockDirectory(ctx, path)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	if !dm.Exists(path) {
+	if !dm.Exists(ctx, path) {
 		return fmt.Errorf("directory not found: %s", path)
 	}
 
 	if !recursive {
-		fileCount, dirCount, err := dm.tree.CountChildren(path)
+		fileCount, dirCount, err := dm.tree.CountChildren(ctx, path)
 		if err != nil {
 			return fmt.Errorf("failed to check directory contents: %w", err)
 		}
@@ -177,14 +177,14 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 			return fmt.Errorf("directory is not empty: %s", path)
 		}
 
-		meta, err := dm.meta.GetByPath(path)
+		meta, err := dm.meta.GetByPath(ctx, path)
 		if err != nil {
 			return fmt.Errorf("failed to get directory metadata: %w", err)
 		}
 		if meta == nil {
 			return fmt.Errorf("directory not found: %s", path)
 		}
-		return dm.meta.Remove(meta.ID)
+		return dm.meta.Remove(ctx, meta.ID)
 	}
 
 	// Recursive deletion. The distributed lock held above serializes concurrent
@@ -200,7 +200,7 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 		// Fetch the next batch outside the transaction — we only need the IDs
 		// to soft-delete, and holding a long read transaction for large dirs
 		// would hurt concurrency on SQLite.
-		entries, err := dm.tree.ListChildFiles(path, batchSize)
+		entries, err := dm.tree.ListChildFiles(ctx, path, batchSize)
 		if err != nil {
 			return fmt.Errorf("failed to list child files: %w", err)
 		}
@@ -210,7 +210,7 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 		}
 
 		// Soft-delete the whole batch atomically.
-		if err := dm.tree.SoftDeleteFiles(utils.GetCurrentTimestamp(), entries); err != nil {
+		if err := dm.tree.SoftDeleteFiles(ctx, utils.GetCurrentTimestamp(), entries); err != nil {
 			return fmt.Errorf("failed to delete file metadata: %w", err)
 		}
 
@@ -218,7 +218,7 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 		// orphan object that the cleanup service can reap later.
 		for _, e := range entries {
 			if dm.store != nil {
-				if err := dm.store.Remove(e.Path); err != nil {
+				if err := dm.store.Remove(ctx, e.Path); err != nil {
 					logger.Warn("failed to remove storage object %s during directory delete: %v", e.Path, err)
 				}
 			}
@@ -226,7 +226,7 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 	}
 
 	for {
-		entries, err := dm.tree.ListChildDirectories(path, batchSize)
+		entries, err := dm.tree.ListChildDirectories(ctx, path, batchSize)
 		if err != nil {
 			return fmt.Errorf("failed to list child directories: %w", err)
 		}
@@ -235,7 +235,7 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 			break
 		}
 
-		if err := dm.tree.SoftDeleteDirectories(utils.GetCurrentTimestamp(), entries); err != nil {
+		if err := dm.tree.SoftDeleteDirectories(ctx, utils.GetCurrentTimestamp(), entries); err != nil {
 			return fmt.Errorf("failed to delete directory metadata: %w", err)
 		}
 
@@ -246,24 +246,24 @@ func (dm *DirectoryManager) DeleteDirectory(path string, recursive bool) error {
 		// (now empty) prefix. Skip it.
 		for _, e := range entries {
 			if dm.supportsDirectoryStorageOps() {
-				if err := dm.store.RemoveDirectory(e.Path); err != nil {
+				if err := dm.store.RemoveDirectory(ctx, e.Path); err != nil {
 					logger.Warn("failed to remove storage directory %s during delete: %v", e.Path, err)
 				}
 			}
 		}
 	}
 
-	meta, err := dm.meta.GetByPath(path)
+	meta, err := dm.meta.GetByPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to get directory metadata: %w", err)
 	}
 	if meta == nil {
 		return fmt.Errorf("directory not found: %s", path)
 	}
-	return dm.meta.Remove(meta.ID)
+	return dm.meta.Remove(ctx, meta.ID)
 }
 
-func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
+func (dm *DirectoryManager) RenameDirectory(ctx context.Context, oldPath, newName string) error {
 	oldPath = utils.NormalizePath(oldPath)
 
 	// Object storage has no real directories. The file DB `Path` is used
@@ -280,32 +280,32 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 		return fmt.Errorf("directory rename is not supported for object storage: %s", oldPath)
 	}
 
-	release, err := dm.lockDirectory(oldPath)
+	release, err := dm.lockDirectory(ctx, oldPath)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	meta, err := dm.GetDirectoryMetadata(oldPath)
+	meta, err := dm.GetDirectoryMetadata(ctx, oldPath)
 	if err != nil {
 		return err
 	}
 
 	newPath := utils.NormalizePath(utils.GetDirectory(oldPath) + "/" + newName)
 
-	if dm.Exists(newPath) {
+	if dm.Exists(ctx, newPath) {
 		return fmt.Errorf("target path already exists: %s", newPath)
 	}
 
 	// Snapshot the children to rename. The distributed lock serializes this
 	// against concurrent rename/delete on the same directory, so the snapshot
 	// is stable for the duration of the operation.
-	fileEntries, err := dm.tree.ListChildFiles(oldPath, 0)
+	fileEntries, err := dm.tree.ListChildFiles(ctx, oldPath, 0)
 	if err != nil {
 		return fmt.Errorf("failed to list child files: %w", err)
 	}
 
-	dirEntries, err := dm.tree.ListChildDirectories(oldPath, 0)
+	dirEntries, err := dm.tree.ListChildDirectories(ctx, oldPath, 0)
 	if err != nil {
 		return fmt.Errorf("failed to list child directories: %w", err)
 	}
@@ -327,7 +327,7 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 		return err
 	}
 
-	if err := dm.tree.RenameTree(now, fileUpdates, dirUpdates, database.PathUpdate{ID: meta.ID, Path: newPath, Name: newName}); err != nil {
+	if err := dm.tree.RenameTree(ctx, now, fileUpdates, dirUpdates, database.PathUpdate{ID: meta.ID, Path: newPath, Name: newName}); err != nil {
 		return fmt.Errorf("failed to rename directory: %w", err)
 	}
 
@@ -337,7 +337,7 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 	for _, e := range fileEntries {
 		newItemPath := newPath + e.Path[len(oldPath):]
 		if dm.store != nil {
-			if err := dm.store.Rename(e.Path, newItemPath); err != nil {
+			if err := dm.store.Rename(ctx, e.Path, newItemPath); err != nil {
 				logger.Warn("failed to rename storage object %s -> %s: %v", e.Path, newItemPath, err)
 			}
 		}
@@ -345,7 +345,7 @@ func (dm *DirectoryManager) RenameDirectory(oldPath, newName string) error {
 
 	// Move the target directory's own storage object (if it has one).
 	if dm.store != nil {
-		if err := dm.store.Rename(oldPath, newPath); err != nil {
+		if err := dm.store.Rename(ctx, oldPath, newPath); err != nil {
 			logger.Warn("failed to rename storage directory %s -> %s: %v", oldPath, newPath, err)
 		}
 	}
@@ -378,9 +378,9 @@ func rewritePaths(entries []database.PathEntry, oldPath, newPath string) ([]data
 	return updates, nil
 }
 
-func (dm *DirectoryManager) GetDirectoryMetadata(path string) (*database.DirectoryMetadata, error) {
+func (dm *DirectoryManager) GetDirectoryMetadata(ctx context.Context, path string) (*database.DirectoryMetadata, error) {
 	path = utils.NormalizePath(path)
-	meta, err := dm.meta.GetByPath(path)
+	meta, err := dm.meta.GetByPath(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("directory metadata not found: %w", err)
 	}
@@ -390,9 +390,9 @@ func (dm *DirectoryManager) GetDirectoryMetadata(path string) (*database.Directo
 	return meta, nil
 }
 
-func (dm *DirectoryManager) Exists(path string) bool {
+func (dm *DirectoryManager) Exists(ctx context.Context, path string) bool {
 	path = utils.NormalizePath(path)
-	exists, err := dm.meta.Exists(path)
+	exists, err := dm.meta.Exists(ctx, path)
 	if err != nil {
 		return false
 	}

@@ -25,6 +25,8 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
+	"github.com/sosoxu/fssvrgo/internal/service/apikey"
+	"github.com/sosoxu/fssvrgo/internal/service/auditlog"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -167,7 +169,23 @@ func createPerfInstance(t *testing.T, id int, db *database.DB, store storage.Sto
 		CORSAllowedOrigins: "*",
 	}
 
-	srv := httpserver.NewServer(serverCfg, config.TLSConfig{}, fm, dirSvc, flSvc, transferSvc, authSvc, cryptoSvc, store, cacheSvc, nil, db)
+	srv := httpserver.NewServer(httpserver.Deps{
+		Config:      serverCfg,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(db),
+			database.NewAuditWriter(db, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(database.NewApiKeyService(db), authSvc.GenerateApiKey),
+		DB:      db,
+	})
 
 	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -660,7 +678,7 @@ func benchmarkGRPCUpload(b *testing.B, size int) {
 	b.SetBytes(int64(size))
 	for i := 0; i < b.N; i++ {
 		path := fmt.Sprintf("/perf/grpc/upload/%s/%d", formatSize(int64(size)), i)
-		_, err := inst.FM.UploadFile(path, data)
+		_, err := inst.FM.UploadFile(b.Context(), path, data)
 		if err != nil {
 			b.Fatalf("upload failed: %v", err)
 		}
@@ -674,7 +692,7 @@ func benchmarkGRPCDownload(b *testing.B, size int) {
 	data := generatePerfData(size)
 	path := fmt.Sprintf("/perf/grpc/download/%s/file.dat", formatSize(int64(size)))
 
-	_, err := inst.FM.UploadFile(path, data)
+	_, err := inst.FM.UploadFile(b.Context(), path, data)
 	if err != nil {
 		b.Fatalf("setup upload failed: %v", err)
 	}
@@ -682,7 +700,7 @@ func benchmarkGRPCDownload(b *testing.B, size int) {
 	b.ResetTimer()
 	b.SetBytes(int64(size))
 	for i := 0; i < b.N; i++ {
-		downloaded, err := inst.FM.DownloadFile(path)
+		downloaded, err := inst.FM.DownloadFile(b.Context(), path)
 		if err != nil {
 			b.Fatalf("download failed: %v", err)
 		}
@@ -708,7 +726,7 @@ func benchmarkGRPCStreamingUpload(b *testing.B, size int) {
 	b.SetBytes(int64(size))
 	for i := 0; i < b.N; i++ {
 		path := fmt.Sprintf("/perf/grpc/stream_upload/%s/%d", formatSize(int64(size)), i)
-		sessionID, err := inst.TransferSvc.CreateUploadSession(path, filepath.Base(path), totalSize, "perf", hash)
+		sessionID, err := inst.TransferSvc.CreateUploadSession(b.Context(), path, filepath.Base(path), totalSize, "perf", hash)
 		if err != nil {
 			b.Fatalf("create session failed: %v", err)
 		}
@@ -718,12 +736,12 @@ func benchmarkGRPCStreamingUpload(b *testing.B, size int) {
 			if end > len(data) {
 				end = len(data)
 			}
-			if err := inst.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset)); err != nil {
+			if err := inst.TransferSvc.UploadChunk(b.Context(), sessionID, data[offset:end], int64(offset)); err != nil {
 				b.Fatalf("upload chunk failed: %v", err)
 			}
 		}
 
-		if _, err := inst.TransferSvc.CompleteUpload(sessionID); err != nil {
+		if _, err := inst.TransferSvc.CompleteUpload(b.Context(), sessionID); err != nil {
 			b.Fatalf("complete upload failed: %v", err)
 		}
 	}
@@ -742,7 +760,7 @@ func benchmarkGRPCStreamingDownload(b *testing.B, size int) {
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
 	path := fmt.Sprintf("/perf/grpc/stream_download/%s/file.dat", formatSize(int64(size)))
 
-	sessionID, err := inst.TransferSvc.CreateUploadSession(path, filepath.Base(path), totalSize, "perf", hash)
+	sessionID, err := inst.TransferSvc.CreateUploadSession(b.Context(), path, filepath.Base(path), totalSize, "perf", hash)
 	if err != nil {
 		b.Fatalf("setup create session failed: %v", err)
 	}
@@ -751,14 +769,14 @@ func benchmarkGRPCStreamingDownload(b *testing.B, size int) {
 		if end > len(data) {
 			end = len(data)
 		}
-		inst.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
+		inst.TransferSvc.UploadChunk(b.Context(), sessionID, data[offset:end], int64(offset))
 	}
-	_, _ = inst.TransferSvc.CompleteUpload(sessionID)
+	_, _ = inst.TransferSvc.CompleteUpload(b.Context(), sessionID)
 
 	b.ResetTimer()
 	b.SetBytes(int64(size))
 	for i := 0; i < b.N; i++ {
-		dlSessionID, err := inst.TransferSvc.CreateDownloadSession(path, "perf")
+		dlSessionID, err := inst.TransferSvc.CreateDownloadSession(b.Context(), path, "perf")
 		if err != nil {
 			b.Fatalf("create download session failed: %v", err)
 		}
@@ -770,7 +788,7 @@ func benchmarkGRPCStreamingDownload(b *testing.B, size int) {
 			if totalSize-offset < sz {
 				sz = totalSize - offset
 			}
-			chunk, err := inst.TransferSvc.DownloadChunk(dlSessionID, int(sz), offset)
+			chunk, err := inst.TransferSvc.DownloadChunk(b.Context(), dlSessionID, int(sz), offset)
 			if err != nil {
 				b.Fatalf("download chunk failed: %v", err)
 			}
@@ -919,7 +937,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 		for i := 0; i < iterations; i++ {
 			path := fmt.Sprintf("/perf/grpc/upload/%s/%d", sizeLabel, i)
 			start := time.Now()
-			_, err := inst.FM.UploadFile(path, data)
+			_, err := inst.FM.UploadFile(t.Context(), path, data)
 			dur := time.Since(start)
 			if err != nil {
 				results = append(results, PerfResult{Operation: "Upload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
@@ -942,7 +960,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 		grpcPath := fmt.Sprintf("/perf/grpc/upload/%s/0", sizeLabel)
 		for i := 0; i < iterations; i++ {
 			start := time.Now()
-			downloaded, err := inst.FM.DownloadFile(grpcPath)
+			downloaded, err := inst.FM.DownloadFile(t.Context(), grpcPath)
 			dur := time.Since(start)
 			if err != nil {
 				results = append(results, PerfResult{Operation: "Download", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
@@ -971,7 +989,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 		for i := 0; i < iterations; i++ {
 			path := fmt.Sprintf("/perf/grpc/stream_upload/%s/%d", sizeLabel, i)
 			start := time.Now()
-			sessionID, err := inst.TransferSvc.CreateUploadSession(path, fmt.Sprintf("perf_%s.dat", sizeLabel), int64(size), "perf", hash)
+			sessionID, err := inst.TransferSvc.CreateUploadSession(t.Context(), path, fmt.Sprintf("perf_%s.dat", sizeLabel), int64(size), "perf", hash)
 			if err != nil {
 				results = append(results, PerfResult{Operation: "StreamUpload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
 				continue
@@ -985,9 +1003,9 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 				if end > int(size) {
 					end = int(size)
 				}
-				inst.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
+				inst.TransferSvc.UploadChunk(t.Context(), sessionID, data[offset:end], int64(offset))
 			}
-			_, err = inst.TransferSvc.CompleteUpload(sessionID)
+			_, err = inst.TransferSvc.CompleteUpload(t.Context(), sessionID)
 			dur := time.Since(start)
 			if err != nil {
 				results = append(results, PerfResult{Operation: "StreamUpload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
@@ -1010,7 +1028,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 		grpcStreamPath := fmt.Sprintf("/perf/grpc/stream_upload/%s/0", sizeLabel)
 		for i := 0; i < iterations; i++ {
 			start := time.Now()
-			dlSessionID, err := inst.TransferSvc.CreateDownloadSession(grpcStreamPath, "perf")
+			dlSessionID, err := inst.TransferSvc.CreateDownloadSession(t.Context(), grpcStreamPath, "perf")
 			if err != nil {
 				results = append(results, PerfResult{Operation: "StreamDownload", FileSize: sizeLabel, FileSizeInt: size, Protocol: "gRPC", Error: err.Error()})
 				continue
@@ -1026,7 +1044,7 @@ func TestPostgreSQLRedis_Performance(t *testing.T) {
 				if int64(size)-offset < sz {
 					sz = int64(size) - offset
 				}
-				chunk, err := inst.TransferSvc.DownloadChunk(dlSessionID, int(sz), offset)
+				chunk, err := inst.TransferSvc.DownloadChunk(t.Context(), dlSessionID, int(sz), offset)
 				if err != nil {
 					break
 				}

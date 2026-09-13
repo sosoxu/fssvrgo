@@ -44,10 +44,10 @@ func TestCrossBackendAcceptsLegalDoubleDotName(t *testing.T) {
 	}
 	runOnBothBackends(t, func(t *testing.T, name string, s StorageAdapter) {
 		for _, p := range legalNames {
-			if err := s.Write(p, []byte("x")); err != nil {
+			if err := s.Write(t.Context(), p, []byte("x")); err != nil {
 				t.Errorf("[%s] Write(%q) = %v, want nil (legitimate name)", name, p, err)
 			}
-			if _, err := s.Read(p); err != nil {
+			if _, err := s.Read(t.Context(), p); err != nil {
 				t.Errorf("[%s] Read(%q) = %v, want nil (legitimate name)", name, p, err)
 			}
 		}
@@ -65,7 +65,7 @@ func TestCrossBackendRejectsRootEscape(t *testing.T) {
 	escaping := []string{"../etc/passwd", "foo/../../bar"}
 	runOnBothBackends(t, func(t *testing.T, name string, s StorageAdapter) {
 		for _, p := range escaping {
-			if err := s.Write(p, []byte("x")); err == nil {
+			if err := s.Write(t.Context(), p, []byte("x")); err == nil {
 				t.Errorf("[%s] Write(%q) = nil, want error (escapes root)", name, p)
 			}
 		}
@@ -80,10 +80,10 @@ func TestCrossBackendWriteReadDoubleDotName(t *testing.T) {
 	runOnBothBackends(t, func(t *testing.T, name string, s StorageAdapter) {
 		path := "ver..1.0/release..notes.txt"
 		data := []byte("hello from " + name)
-		if err := s.Write(path, data); err != nil {
+		if err := s.Write(t.Context(), path, data); err != nil {
 			t.Fatalf("[%s] Write(%q) = %v", name, path, err)
 		}
-		got, err := s.Read(path)
+		got, err := s.Read(t.Context(), path)
 		if err != nil {
 			t.Fatalf("[%s] Read(%q) = %v", name, path, err)
 		}
@@ -103,7 +103,7 @@ func TestMinIOExistsDirectoryWithChildren(t *testing.T) {
 	store, _ := newTestMinIOStorage(t)
 	ensureBucket(t, store)
 
-	if err := store.Write("docs/readme.txt", []byte("x")); err != nil {
+	if err := store.Write(t.Context(), "docs/readme.txt", []byte("x")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if !mustExist(t, store, "docs/readme.txt") {
@@ -123,7 +123,7 @@ func TestLocalStorageExistsDirectoryWithChildren(t *testing.T) {
 	root := t.TempDir()
 	s := NewLocalStorage(root)
 
-	if err := s.Write("docs/readme.txt", []byte("x")); err != nil {
+	if err := s.Write(t.Context(), "docs/readme.txt", []byte("x")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if !mustExist(t, s, "docs/readme.txt") {
@@ -145,19 +145,19 @@ func TestStorageIsNotExist(t *testing.T) {
 	// LocalStorage: reading a missing file yields an os.ErrNotExist-wrapped error.
 	root := t.TempDir()
 	ls := NewLocalStorage(root)
-	if _, err := ls.Read("missing.txt"); err == nil {
+	if _, err := ls.Read(t.Context(), "missing.txt"); err == nil {
 		t.Fatal("expected error reading missing file")
 	} else if !IsNotExist(err) {
 		t.Errorf("IsNotExist(LocalStorage missing read) = false, want true (err=%v)", err)
 	}
-	if err := ls.Remove("missing.txt"); err != nil && !IsNotExist(err) {
+	if err := ls.Remove(t.Context(), "missing.txt"); err != nil && !IsNotExist(err) {
 		t.Errorf("IsNotExist(LocalStorage missing remove) = false, want true (err=%v)", err)
 	}
 
 	// MinIO: StatObject on a missing key returns a NoSuchKey error response.
 	store, _ := newTestMinIOStorage(t)
 	ensureBucket(t, store)
-	if err := store.Remove("never-existed-key"); err != nil && !IsNotExist(err) {
+	if err := store.Remove(t.Context(), "never-existed-key"); err != nil && !IsNotExist(err) {
 		t.Errorf("IsNotExist(MinIO missing remove) = false, want true (err=%v)", err)
 	}
 	// nil must not be reported as not-exist.
@@ -221,11 +221,11 @@ func TestCrossBackendWriteFromTempFileAcceptsTemp(t *testing.T) {
 		f.Close()
 		defer os.Remove(tempPath)
 
-		if err := s.WriteFromTempFile("dst/file.bin", tempPath); err != nil {
+		if err := s.WriteFromTempFile(t.Context(), "dst/file.bin", tempPath); err != nil {
 			t.Errorf("[%s] WriteFromTempFile(valid temp path) = %v, want nil", name, err)
 			return
 		}
-		got, err := s.Read("dst/file.bin")
+		got, err := s.Read(t.Context(), "dst/file.bin")
 		if err != nil {
 			t.Fatalf("[%s] Read: %v", name, err)
 		}
@@ -249,14 +249,14 @@ func TestCrossBackendWriteFromTempFileRejectsNonTemp(t *testing.T) {
 	t.Run("LocalStorage", func(t *testing.T) {
 		root := t.TempDir()
 		s := NewLocalStorage(root)
-		if err := s.WriteFromTempFile("target/file.txt", nonTempPath); err == nil {
+		if err := s.WriteFromTempFile(t.Context(), "target/file.txt", nonTempPath); err == nil {
 			t.Errorf("WriteFromTempFile(non-temp path) = nil, want error")
 		}
 	})
 	t.Run("MinIO", func(t *testing.T) {
 		store, _ := newTestMinIOStorage(t)
 		ensureBucket(t, store)
-		if err := store.WriteFromTempFile("target/file.txt", nonTempPath); err == nil {
+		if err := store.WriteFromTempFile(t.Context(), "target/file.txt", nonTempPath); err == nil {
 			t.Errorf("WriteFromTempFile(non-temp path) = nil, want error")
 		}
 	})

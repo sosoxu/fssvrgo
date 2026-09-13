@@ -49,11 +49,11 @@ func TestFileMetadata_CreateAndGet(t *testing.T) {
 	svc := NewFileMetadataService(db)
 
 	m := newFileMetadata("fmd-1", "/docs/readme.md")
-	if err := svc.Create(m); err != nil {
+	if err := svc.Create(t.Context(), m); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	gotByPath, err := svc.GetByPath("/docs/readme.md")
+	gotByPath, err := svc.GetByPath(t.Context(), "/docs/readme.md")
 	if err != nil {
 		t.Fatalf("get by path: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestFileMetadata_CreateAndGet(t *testing.T) {
 		t.Errorf("expected normalized path docs/readme.md, got %s", gotByPath.Path)
 	}
 
-	gotByID, err := svc.GetById("fmd-1")
+	gotByID, err := svc.GetById(t.Context(), "fmd-1")
 	if err != nil {
 		t.Fatalf("get by id: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestFileMetadata_CreateAndGet(t *testing.T) {
 	}
 
 	// nonexistent id returns nil, nil
-	missing, err := svc.GetById("does-not-exist")
+	missing, err := svc.GetById(t.Context(), "does-not-exist")
 	if err != nil {
 		t.Fatalf("get missing by id: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestFileMetadata_Update(t *testing.T) {
 	svc := NewFileMetadataService(db)
 
 	m := newFileMetadata("fmd-2", "/pics/cat.png")
-	if err := svc.Create(m); err != nil {
+	if err := svc.Create(t.Context(), m); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -118,11 +118,11 @@ func TestFileMetadata_Update(t *testing.T) {
 	m.Hash = "newhash"
 	m.StorageLocation = "/data/new-location"
 	m.UpdatedAt = updated
-	if err := svc.Update(m); err != nil {
+	if err := svc.Update(t.Context(), m); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 
-	got, err := svc.GetById("fmd-2")
+	got, err := svc.GetById(t.Context(), "fmd-2")
 	if err != nil {
 		t.Fatalf("get after update: %v", err)
 	}
@@ -149,15 +149,15 @@ func TestFileMetadata_Remove(t *testing.T) {
 	svc := NewFileMetadataService(db)
 
 	m := newFileMetadata("fmd-3", "/tmp/scratch.txt")
-	if err := svc.Create(m); err != nil {
+	if err := svc.Create(t.Context(), m); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	if err := svc.Remove("fmd-3"); err != nil {
+	if err := svc.Remove(t.Context(), "fmd-3"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 
-	got, err := svc.GetById("fmd-3")
+	got, err := svc.GetById(t.Context(), "fmd-3")
 	if err != nil {
 		t.Fatalf("get after remove: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestFileMetadata_Remove(t *testing.T) {
 		t.Errorf("expected nil after soft delete, got %+v", got)
 	}
 
-	gotByPath, err := svc.GetByPath("/tmp/scratch.txt")
+	gotByPath, err := svc.GetByPath(t.Context(), "/tmp/scratch.txt")
 	if err != nil {
 		t.Fatalf("get by path after remove: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestFileMetadata_Remove(t *testing.T) {
 		t.Errorf("expected nil by path after soft delete, got %+v", gotByPath)
 	}
 
-	exists, err := svc.Exists("/tmp/scratch.txt")
+	exists, err := svc.Exists(t.Context(), "/tmp/scratch.txt")
 	if err != nil {
 		t.Fatalf("exists after remove: %v", err)
 	}
@@ -193,13 +193,13 @@ func TestFileMetadata_ListFiles(t *testing.T) {
 		newFileMetadata("fmd-l3", "/other/gamma.txt"),
 	}
 	for _, f := range files {
-		if err := svc.Create(f); err != nil {
+		if err := svc.Create(t.Context(), f); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 	}
 
 	// list all (NormalizePath("/") == "" so no LIKE filter is applied)
-	all, err := svc.List("/", "name", "asc", 1, 100)
+	all, err := svc.List(t.Context(), "/", "name", "asc", 1, 100)
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestFileMetadata_ListFiles(t *testing.T) {
 	}
 
 	// list with directory filter (normalized to "dir")
-	dirFiles, err := svc.List("/dir", "name", "asc", 1, 100)
+	dirFiles, err := svc.List(t.Context(), "/dir", "name", "asc", 1, 100)
 	if err != nil {
 		t.Fatalf("list dir: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestFileMetadata_ListFiles(t *testing.T) {
 	}
 
 	// descending order
-	desc, err := svc.List("/", "name", "desc", 1, 100)
+	desc, err := svc.List(t.Context(), "/", "name", "desc", 1, 100)
 	if err != nil {
 		t.Fatalf("list desc: %v", err)
 	}
@@ -232,14 +232,14 @@ func TestFileMetadata_ListFiles(t *testing.T) {
 	}
 
 	// pagination: page 1 size 2
-	page1, err := svc.List("/", "name", "asc", 1, 2)
+	page1, err := svc.List(t.Context(), "/", "name", "asc", 1, 2)
 	if err != nil {
 		t.Fatalf("list page 1: %v", err)
 	}
 	if len(page1) != 2 {
 		t.Fatalf("expected 2 files on page 1, got %d", len(page1))
 	}
-	page2, err := svc.List("/", "name", "asc", 2, 2)
+	page2, err := svc.List(t.Context(), "/", "name", "asc", 2, 2)
 	if err != nil {
 		t.Fatalf("list page 2: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestFileMetadata_ListFiles(t *testing.T) {
 	}
 
 	// invalid sort column falls back to "name"
-	invalidSort, err := svc.List("/", "nonexistent_col", "asc", 1, 100)
+	invalidSort, err := svc.List(t.Context(), "/", "nonexistent_col", "asc", 1, 100)
 	if err != nil {
 		t.Fatalf("list invalid sort: %v", err)
 	}
@@ -271,11 +271,11 @@ func TestDirectoryMetadata_CreateAndGet(t *testing.T) {
 		UpdatedAt: now,
 		IsDeleted: false,
 	}
-	if err := svc.Create(dm); err != nil {
+	if err := svc.Create(t.Context(), dm); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	gotByPath, err := svc.GetByPath("/projects/api")
+	gotByPath, err := svc.GetByPath(t.Context(), "/projects/api")
 	if err != nil {
 		t.Fatalf("get by path: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestDirectoryMetadata_CreateAndGet(t *testing.T) {
 		t.Errorf("expected normalized path projects/api, got %s", gotByPath.Path)
 	}
 
-	gotByID, err := svc.GetById("dir-1")
+	gotByID, err := svc.GetById(t.Context(), "dir-1")
 	if err != nil {
 		t.Fatalf("get by id: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestDirectoryMetadata_CreateAndGet(t *testing.T) {
 		t.Errorf("expected normalized path projects/api, got %s", gotByID.Path)
 	}
 
-	missing, err := svc.GetById("nope")
+	missing, err := svc.GetById(t.Context(), "nope")
 	if err != nil {
 		t.Fatalf("get missing by id: %v", err)
 	}
@@ -329,15 +329,15 @@ func TestDirectoryMetadata_Remove(t *testing.T) {
 		UpdatedAt: now,
 		IsDeleted: false,
 	}
-	if err := svc.Create(dm); err != nil {
+	if err := svc.Create(t.Context(), dm); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	if err := svc.Remove("dir-2"); err != nil {
+	if err := svc.Remove(t.Context(), "dir-2"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 
-	got, err := svc.GetById("dir-2")
+	got, err := svc.GetById(t.Context(), "dir-2")
 	if err != nil {
 		t.Fatalf("get after remove: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestDirectoryMetadata_Remove(t *testing.T) {
 		t.Errorf("expected nil after soft delete, got %+v", got)
 	}
 
-	gotByPath, err := svc.GetByPath("/projects/old")
+	gotByPath, err := svc.GetByPath(t.Context(), "/projects/old")
 	if err != nil {
 		t.Fatalf("get by path after remove: %v", err)
 	}
@@ -368,11 +368,11 @@ func TestDirectoryMetadata_Exists(t *testing.T) {
 		UpdatedAt: now,
 		IsDeleted: false,
 	}
-	if err := svc.Create(dm); err != nil {
+	if err := svc.Create(t.Context(), dm); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	exists, err := svc.Exists("/projects/check")
+	exists, err := svc.Exists(t.Context(), "/projects/check")
 	if err != nil {
 		t.Fatalf("exists: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestDirectoryMetadata_Exists(t *testing.T) {
 		t.Errorf("expected exists true")
 	}
 
-	notExists, err := svc.Exists("/projects/missing")
+	notExists, err := svc.Exists(t.Context(), "/projects/missing")
 	if err != nil {
 		t.Fatalf("exists missing: %v", err)
 	}
@@ -388,10 +388,10 @@ func TestDirectoryMetadata_Exists(t *testing.T) {
 		t.Errorf("expected exists false for missing dir")
 	}
 
-	if err := svc.Remove("dir-3"); err != nil {
+	if err := svc.Remove(t.Context(), "dir-3"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	existsAfterRemove, err := svc.Exists("/projects/check")
+	existsAfterRemove, err := svc.Exists(t.Context(), "/projects/check")
 	if err != nil {
 		t.Fatalf("exists after remove: %v", err)
 	}
@@ -442,13 +442,13 @@ func TestAuditLog_CreateAndList(t *testing.T) {
 		},
 	}
 	for _, l := range logs {
-		if err := svc.Create(l); err != nil {
+		if err := svc.Create(t.Context(), l); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 	}
 
 	// list all
-	all, err := svc.List("", "", 1, 100)
+	all, err := svc.List(t.Context(), "", "", 1, 100)
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestAuditLog_CreateAndList(t *testing.T) {
 	}
 
 	// filter by operation
-	uploads, err := svc.List("upload", "", 1, 100)
+	uploads, err := svc.List(t.Context(), "upload", "", 1, 100)
 	if err != nil {
 		t.Fatalf("list uploads: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestAuditLog_CreateAndList(t *testing.T) {
 	}
 
 	// filter by resource path (LIKE)
-	aLogs, err := svc.List("", "/files/a.txt", 1, 100)
+	aLogs, err := svc.List(t.Context(), "", "/files/a.txt", 1, 100)
 	if err != nil {
 		t.Fatalf("list by resource: %v", err)
 	}
@@ -480,14 +480,14 @@ func TestAuditLog_CreateAndList(t *testing.T) {
 	}
 
 	// pagination
-	page1, err := svc.List("", "", 1, 2)
+	page1, err := svc.List(t.Context(), "", "", 1, 2)
 	if err != nil {
 		t.Fatalf("list page 1: %v", err)
 	}
 	if len(page1) != 2 {
 		t.Fatalf("expected 2 on page 1, got %d", len(page1))
 	}
-	page2, err := svc.List("", "", 2, 2)
+	page2, err := svc.List(t.Context(), "", "", 2, 2)
 	if err != nil {
 		t.Fatalf("list page 2: %v", err)
 	}
@@ -513,11 +513,11 @@ func TestApiKey_CreateAndGetByKeyHash(t *testing.T) {
 		ExpiresAt:   future,
 		IsActive:    true,
 	}
-	if err := svc.Create(key); err != nil {
+	if err := svc.Create(t.Context(), key); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	got, err := svc.GetByKeyHash("hash-abc-123")
+	got, err := svc.GetByKeyHash(t.Context(), "hash-abc-123")
 	if err != nil {
 		t.Fatalf("get by key hash: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestApiKey_CreateAndGetByKeyHash(t *testing.T) {
 	}
 
 	// GetById also works
-	byID, err := svc.GetById("key-1")
+	byID, err := svc.GetById(t.Context(), "key-1")
 	if err != nil {
 		t.Fatalf("get by id: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestApiKey_GetByKeyHash_NotFound(t *testing.T) {
 	svc := NewApiKeyService(db)
 
 	// nonexistent hash returns nil, nil
-	missing, err := svc.GetByKeyHash("does-not-exist")
+	missing, err := svc.GetByKeyHash(t.Context(), "does-not-exist")
 	if err != nil {
 		t.Fatalf("get missing: %v", err)
 	}
@@ -579,10 +579,10 @@ func TestApiKey_GetByKeyHash_NotFound(t *testing.T) {
 		CreatedAt: now,
 		IsActive:  false,
 	}
-	if err := svc.Create(inactiveKey); err != nil {
+	if err := svc.Create(t.Context(), inactiveKey); err != nil {
 		t.Fatalf("create inactive: %v", err)
 	}
-	gotInactive, err := svc.GetByKeyHash("hash-inactive")
+	gotInactive, err := svc.GetByKeyHash(t.Context(), "hash-inactive")
 	if err != nil {
 		t.Fatalf("get inactive: %v", err)
 	}
@@ -600,10 +600,10 @@ func TestApiKey_GetByKeyHash_NotFound(t *testing.T) {
 		ExpiresAt: past,
 		IsActive:  true,
 	}
-	if err := svc.Create(expiredKey); err != nil {
+	if err := svc.Create(t.Context(), expiredKey); err != nil {
 		t.Fatalf("create expired: %v", err)
 	}
-	expiredGot, err := svc.GetByKeyHash("hash-expired")
+	expiredGot, err := svc.GetByKeyHash(t.Context(), "hash-expired")
 	if err != nil {
 		t.Fatalf("get expired: %v", err)
 	}
@@ -651,12 +651,12 @@ func TestApiKey_UpdateLastUsed(t *testing.T) {
 		CreatedAt: now,
 		IsActive:  true,
 	}
-	if err := svc.Create(key); err != nil {
+	if err := svc.Create(t.Context(), key); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
 	// initially no last_used_at
-	got, err := svc.GetById("key-ulu")
+	got, err := svc.GetById(t.Context(), "key-ulu")
 	if err != nil {
 		t.Fatalf("get before update: %v", err)
 	}
@@ -664,11 +664,11 @@ func TestApiKey_UpdateLastUsed(t *testing.T) {
 		t.Errorf("expected empty LastUsedAt, got %s", got.LastUsedAt)
 	}
 
-	if err := svc.UpdateLastUsed("key-ulu"); err != nil {
+	if err := svc.UpdateLastUsed(t.Context(), "key-ulu"); err != nil {
 		t.Fatalf("update last used: %v", err)
 	}
 
-	got, err = svc.GetById("key-ulu")
+	got, err = svc.GetById(t.Context(), "key-ulu")
 	if err != nil {
 		t.Fatalf("get after update: %v", err)
 	}
@@ -690,15 +690,15 @@ func TestApiKey_Deactivate(t *testing.T) {
 		CreatedAt: now,
 		IsActive:  true,
 	}
-	if err := svc.Create(key); err != nil {
+	if err := svc.Create(t.Context(), key); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	if err := svc.Deactivate("key-deact"); err != nil {
+	if err := svc.Deactivate(t.Context(), "key-deact"); err != nil {
 		t.Fatalf("deactivate: %v", err)
 	}
 
-	got, err := svc.GetById("key-deact")
+	got, err := svc.GetById(t.Context(), "key-deact")
 	if err != nil {
 		t.Fatalf("get after deactivate: %v", err)
 	}
@@ -707,7 +707,7 @@ func TestApiKey_Deactivate(t *testing.T) {
 	}
 
 	// deactivated key no longer returned by GetByKeyHash
-	byHash, err := svc.GetByKeyHash("hash-deact")
+	byHash, err := svc.GetByKeyHash(t.Context(), "hash-deact")
 	if err != nil {
 		t.Fatalf("get by hash after deactivate: %v", err)
 	}
@@ -729,18 +729,18 @@ func TestApiKey_List(t *testing.T) {
 		{ID: "k-l3", KeyHash: "h3", Name: "key3", CreatedAt: now, ExpiresAt: future, IsActive: true},
 	}
 	for _, k := range keys {
-		if err := svc.Create(k); err != nil {
+		if err := svc.Create(t.Context(), k); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		// List scans last_used_at directly into a string; populate it so the
 		// scan succeeds for keys that have never been used.
-		if err := svc.UpdateLastUsed(k.ID); err != nil {
+		if err := svc.UpdateLastUsed(t.Context(), k.ID); err != nil {
 			t.Fatalf("update last used: %v", err)
 		}
 	}
 
 	// list all
-	all, err := svc.List(false, 1, 100)
+	all, err := svc.List(t.Context(), false, 1, 100)
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -749,7 +749,7 @@ func TestApiKey_List(t *testing.T) {
 	}
 
 	// list active only
-	active, err := svc.List(true, 1, 100)
+	active, err := svc.List(t.Context(), true, 1, 100)
 	if err != nil {
 		t.Fatalf("list active: %v", err)
 	}
@@ -763,14 +763,14 @@ func TestApiKey_List(t *testing.T) {
 	}
 
 	// pagination
-	page1, err := svc.List(false, 1, 2)
+	page1, err := svc.List(t.Context(), false, 1, 2)
 	if err != nil {
 		t.Fatalf("list page 1: %v", err)
 	}
 	if len(page1) != 2 {
 		t.Fatalf("expected 2 keys on page 1, got %d", len(page1))
 	}
-	page2, err := svc.List(false, 2, 2)
+	page2, err := svc.List(t.Context(), false, 2, 2)
 	if err != nil {
 		t.Fatalf("list page 2: %v", err)
 	}
@@ -779,10 +779,10 @@ func TestApiKey_List(t *testing.T) {
 	}
 
 	// deactivate one and check active count
-	if err := svc.Deactivate("k-l1"); err != nil {
+	if err := svc.Deactivate(t.Context(), "k-l1"); err != nil {
 		t.Fatalf("deactivate: %v", err)
 	}
-	activeAfter, err := svc.List(true, 1, 100)
+	activeAfter, err := svc.List(t.Context(), true, 1, 100)
 	if err != nil {
 		t.Fatalf("list active after deactivation: %v", err)
 	}

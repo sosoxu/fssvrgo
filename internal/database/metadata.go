@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -243,12 +244,12 @@ func NewFileMetadataService(db *DB) *FileMetadataService {
 	return &FileMetadataService{db: db}
 }
 
-func (s *FileMetadataService) Create(m *FileMetadata) error {
+func (s *FileMetadataService) Create(ctx context.Context, m *FileMetadata) error {
 	m.Path = utils.NormalizePath(m.Path)
 	var existingID string
-	err := s.db.QueryRow("SELECT id FROM files WHERE path = ? AND is_deleted = TRUE", m.Path).Scan(&existingID)
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM files WHERE path = ? AND is_deleted = TRUE", m.Path).Scan(&existingID)
 	if err == nil {
-		_, err := s.db.Exec(`UPDATE files SET id = ?, name = ?, size = ?, hash = ?, storage_type = ?,
+		_, err := s.db.ExecContext(ctx, `UPDATE files SET id = ?, name = ?, size = ?, hash = ?, storage_type = ?,
 			storage_location = ?, created_at = ?, updated_at = ?, is_deleted = FALSE WHERE path = ?`,
 			m.ID, m.Name, m.Size, m.Hash, m.StorageType, m.StorageLocation, m.CreatedAt, m.UpdatedAt, m.Path)
 		if err != nil {
@@ -257,7 +258,7 @@ func (s *FileMetadataService) Create(m *FileMetadata) error {
 		return nil
 	}
 
-	_, err = s.db.Exec(`INSERT INTO files (id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO files (id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.Path, m.Name, m.Size, m.Hash, m.StorageType, m.StorageLocation, m.CreatedAt, m.UpdatedAt, m.IsDeleted)
 	if err != nil {
@@ -266,8 +267,8 @@ func (s *FileMetadataService) Create(m *FileMetadata) error {
 	return nil
 }
 
-func (s *FileMetadataService) Update(m *FileMetadata) error {
-	_, err := s.db.Exec(`UPDATE files SET path = ?, name = ?, size = ?, hash = ?, storage_type = ?,
+func (s *FileMetadataService) Update(ctx context.Context, m *FileMetadata) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE files SET path = ?, name = ?, size = ?, hash = ?, storage_type = ?,
 		storage_location = ?, updated_at = ?, is_deleted = ? WHERE id = ?`,
 		m.Path, m.Name, m.Size, m.Hash, m.StorageType, m.StorageLocation, m.UpdatedAt, m.IsDeleted, m.ID)
 	if err != nil {
@@ -276,28 +277,28 @@ func (s *FileMetadataService) Update(m *FileMetadata) error {
 	return nil
 }
 
-func (s *FileMetadataService) Remove(id string) error {
-	_, err := s.db.Exec("UPDATE files SET is_deleted = TRUE, updated_at = ? WHERE id = ?", time.Now().UTC().Format(time.RFC3339), id)
+func (s *FileMetadataService) Remove(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE files SET is_deleted = TRUE, updated_at = ? WHERE id = ?", time.Now().UTC().Format(time.RFC3339), id)
 	if err != nil {
 		return fmt.Errorf("failed to remove file metadata: %w", err)
 	}
 	return nil
 }
 
-func (s *FileMetadataService) GetById(id string) (*FileMetadata, error) {
-	row := s.db.QueryRow(`SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted
+func (s *FileMetadataService) GetById(ctx context.Context, id string) (*FileMetadata, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted
 		FROM files WHERE id = ? AND is_deleted = FALSE`, id)
 	return scanFileMetadata(row)
 }
 
-func (s *FileMetadataService) GetByPath(path string) (*FileMetadata, error) {
+func (s *FileMetadataService) GetByPath(ctx context.Context, path string) (*FileMetadata, error) {
 	path = utils.NormalizePath(path)
-	row := s.db.QueryRow(`SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted
+	row := s.db.QueryRowContext(ctx, `SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted
 		FROM files WHERE path = ? AND is_deleted = FALSE`, path)
 	return scanFileMetadata(row)
 }
 
-func (s *FileMetadataService) List(directoryPath string, sortBy string, sortOrder string, page int, pageSize int) ([]FileMetadata, error) {
+func (s *FileMetadataService) List(ctx context.Context, directoryPath string, sortBy string, sortOrder string, page int, pageSize int) ([]FileMetadata, error) {
 	directoryPath = utils.NormalizePath(directoryPath)
 	query := "SELECT id, path, name, size, hash, storage_type, storage_location, created_at, updated_at, is_deleted FROM files WHERE is_deleted = FALSE"
 	var args []interface{}
@@ -322,7 +323,7 @@ func (s *FileMetadataService) List(directoryPath string, sortBy string, sortOrde
 	query += " LIMIT ? OFFSET ?"
 	args = append(args, pageSize, offset)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
@@ -344,10 +345,10 @@ func (s *FileMetadataService) List(directoryPath string, sortBy string, sortOrde
 	return results, nil
 }
 
-func (s *FileMetadataService) Exists(path string) (bool, error) {
+func (s *FileMetadataService) Exists(ctx context.Context, path string) (bool, error) {
 	path = utils.NormalizePath(path)
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM files WHERE path = ? AND is_deleted = FALSE", path).Scan(&count)
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM files WHERE path = ? AND is_deleted = FALSE", path).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("failed to check file existence: %w", err)
 	}
@@ -375,12 +376,12 @@ func NewDirectoryMetadataService(db *DB) *DirectoryMetadataService {
 	return &DirectoryMetadataService{db: db}
 }
 
-func (s *DirectoryMetadataService) Create(m *DirectoryMetadata) error {
+func (s *DirectoryMetadataService) Create(ctx context.Context, m *DirectoryMetadata) error {
 	m.Path = utils.NormalizePath(m.Path)
 	var existingID string
-	err := s.db.QueryRow("SELECT id FROM directories WHERE path = ? AND is_deleted = TRUE", m.Path).Scan(&existingID)
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM directories WHERE path = ? AND is_deleted = TRUE", m.Path).Scan(&existingID)
 	if err == nil {
-		_, err := s.db.Exec(`UPDATE directories SET id = ?, name = ?, created_at = ?, updated_at = ?, is_deleted = FALSE WHERE path = ?`,
+		_, err := s.db.ExecContext(ctx, `UPDATE directories SET id = ?, name = ?, created_at = ?, updated_at = ?, is_deleted = FALSE WHERE path = ?`,
 			m.ID, m.Name, m.CreatedAt, m.UpdatedAt, m.Path)
 		if err != nil {
 			return fmt.Errorf("failed to restore deleted directory record: %w", err)
@@ -388,7 +389,7 @@ func (s *DirectoryMetadataService) Create(m *DirectoryMetadata) error {
 		return nil
 	}
 
-	_, err = s.db.Exec(`INSERT INTO directories (id, path, name, created_at, updated_at, is_deleted)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO directories (id, path, name, created_at, updated_at, is_deleted)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		m.ID, m.Path, m.Name, m.CreatedAt, m.UpdatedAt, m.IsDeleted)
 	if err != nil {
@@ -397,8 +398,8 @@ func (s *DirectoryMetadataService) Create(m *DirectoryMetadata) error {
 	return nil
 }
 
-func (s *DirectoryMetadataService) Update(m *DirectoryMetadata) error {
-	_, err := s.db.Exec(`UPDATE directories SET path = ?, name = ?, updated_at = ?, is_deleted = ? WHERE id = ?`,
+func (s *DirectoryMetadataService) Update(ctx context.Context, m *DirectoryMetadata) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE directories SET path = ?, name = ?, updated_at = ?, is_deleted = ? WHERE id = ?`,
 		m.Path, m.Name, m.UpdatedAt, m.IsDeleted, m.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update directory metadata: %w", err)
@@ -406,28 +407,28 @@ func (s *DirectoryMetadataService) Update(m *DirectoryMetadata) error {
 	return nil
 }
 
-func (s *DirectoryMetadataService) Remove(id string) error {
-	_, err := s.db.Exec("UPDATE directories SET is_deleted = TRUE, updated_at = ? WHERE id = ?", time.Now().UTC().Format(time.RFC3339), id)
+func (s *DirectoryMetadataService) Remove(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE directories SET is_deleted = TRUE, updated_at = ? WHERE id = ?", time.Now().UTC().Format(time.RFC3339), id)
 	if err != nil {
 		return fmt.Errorf("failed to remove directory metadata: %w", err)
 	}
 	return nil
 }
 
-func (s *DirectoryMetadataService) GetById(id string) (*DirectoryMetadata, error) {
-	row := s.db.QueryRow(`SELECT id, path, name, created_at, updated_at, is_deleted
+func (s *DirectoryMetadataService) GetById(ctx context.Context, id string) (*DirectoryMetadata, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, path, name, created_at, updated_at, is_deleted
 		FROM directories WHERE id = ? AND is_deleted = FALSE`, id)
 	return scanDirectoryMetadata(row)
 }
 
-func (s *DirectoryMetadataService) GetByPath(path string) (*DirectoryMetadata, error) {
+func (s *DirectoryMetadataService) GetByPath(ctx context.Context, path string) (*DirectoryMetadata, error) {
 	path = utils.NormalizePath(path)
-	row := s.db.QueryRow(`SELECT id, path, name, created_at, updated_at, is_deleted
+	row := s.db.QueryRowContext(ctx, `SELECT id, path, name, created_at, updated_at, is_deleted
 		FROM directories WHERE path = ? AND is_deleted = FALSE`, path)
 	return scanDirectoryMetadata(row)
 }
 
-func (s *DirectoryMetadataService) List(parentPath string, page int, pageSize int) ([]DirectoryMetadata, error) {
+func (s *DirectoryMetadataService) List(ctx context.Context, parentPath string, page int, pageSize int) ([]DirectoryMetadata, error) {
 	parentPath = utils.NormalizePath(parentPath)
 	query := "SELECT id, path, name, created_at, updated_at, is_deleted FROM directories WHERE is_deleted = FALSE"
 	var args []interface{}
@@ -442,7 +443,7 @@ func (s *DirectoryMetadataService) List(parentPath string, page int, pageSize in
 	offset := (page - 1) * pageSize
 	args = append(args, pageSize, offset)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list directories: %w", err)
 	}
@@ -463,10 +464,10 @@ func (s *DirectoryMetadataService) List(parentPath string, page int, pageSize in
 	return results, nil
 }
 
-func (s *DirectoryMetadataService) Exists(path string) (bool, error) {
+func (s *DirectoryMetadataService) Exists(ctx context.Context, path string) (bool, error) {
 	path = utils.NormalizePath(path)
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM directories WHERE path = ? AND is_deleted = FALSE", path).Scan(&count)
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM directories WHERE path = ? AND is_deleted = FALSE", path).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("failed to check directory existence: %w", err)
 	}
@@ -493,8 +494,8 @@ func NewTransferTaskService(db *DB) *TransferTaskService {
 	return &TransferTaskService{db: db}
 }
 
-func (s *TransferTaskService) Create(t *TransferTask) error {
-	_, err := s.db.Exec(`INSERT INTO transfer_tasks (id, type, file_id, client_id, "offset", total_size, status, created_at, updated_at)
+func (s *TransferTaskService) Create(ctx context.Context, t *TransferTask) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO transfer_tasks (id, type, file_id, client_id, "offset", total_size, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.Type, t.FileID, t.ClientID, t.Offset, t.TotalSize, t.Status, t.CreatedAt, t.UpdatedAt)
 	if err != nil {
@@ -503,8 +504,8 @@ func (s *TransferTaskService) Create(t *TransferTask) error {
 	return nil
 }
 
-func (s *TransferTaskService) Update(t *TransferTask) error {
-	_, err := s.db.Exec(`UPDATE transfer_tasks SET type = ?, file_id = ?, client_id = ?, "offset" = ?,
+func (s *TransferTaskService) Update(ctx context.Context, t *TransferTask) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE transfer_tasks SET type = ?, file_id = ?, client_id = ?, "offset" = ?,
 		total_size = ?, status = ?, updated_at = ? WHERE id = ?`,
 		t.Type, t.FileID, t.ClientID, t.Offset, t.TotalSize, t.Status, t.UpdatedAt, t.ID)
 	if err != nil {
@@ -513,22 +514,22 @@ func (s *TransferTaskService) Update(t *TransferTask) error {
 	return nil
 }
 
-func (s *TransferTaskService) Remove(id string) error {
-	_, err := s.db.Exec("DELETE FROM transfer_tasks WHERE id = ?", id)
+func (s *TransferTaskService) Remove(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM transfer_tasks WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to remove transfer task: %w", err)
 	}
 	return nil
 }
 
-func (s *TransferTaskService) GetById(id string) (*TransferTask, error) {
-	row := s.db.QueryRow(`SELECT id, type, file_id, client_id, "offset", total_size, status, created_at, updated_at
+func (s *TransferTaskService) GetById(ctx context.Context, id string) (*TransferTask, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, type, file_id, client_id, "offset", total_size, status, created_at, updated_at
 		FROM transfer_tasks WHERE id = ?`, id)
 	return scanTransferTask(row)
 }
 
-func (s *TransferTaskService) ListByFileId(fileId string) ([]TransferTask, error) {
-	rows, err := s.db.Query(`SELECT id, type, file_id, client_id, "offset", total_size, status, created_at, updated_at
+func (s *TransferTaskService) ListByFileId(ctx context.Context, fileId string) ([]TransferTask, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, type, file_id, client_id, "offset", total_size, status, created_at, updated_at
 		FROM transfer_tasks WHERE file_id = ? ORDER BY created_at DESC`, fileId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list transfer tasks by file id: %w", err)
@@ -550,8 +551,8 @@ func (s *TransferTaskService) ListByFileId(fileId string) ([]TransferTask, error
 	return results, nil
 }
 
-func (s *TransferTaskService) UpdateProgress(taskId string, offset int64) error {
-	_, err := s.db.Exec(`UPDATE transfer_tasks SET "offset" = ?, updated_at = ? WHERE id = ?`,
+func (s *TransferTaskService) UpdateProgress(ctx context.Context, taskId string, offset int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE transfer_tasks SET "offset" = ?, updated_at = ? WHERE id = ?`,
 		offset, time.Now().UTC().Format(time.RFC3339), taskId)
 	if err != nil {
 		return fmt.Errorf("failed to update transfer task progress: %w", err)
@@ -559,8 +560,8 @@ func (s *TransferTaskService) UpdateProgress(taskId string, offset int64) error 
 	return nil
 }
 
-func (s *TransferTaskService) CompleteTask(taskId string) error {
-	_, err := s.db.Exec("UPDATE transfer_tasks SET status = 'completed', updated_at = ? WHERE id = ?",
+func (s *TransferTaskService) CompleteTask(ctx context.Context, taskId string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE transfer_tasks SET status = 'completed', updated_at = ? WHERE id = ?",
 		time.Now().UTC().Format(time.RFC3339), taskId)
 	if err != nil {
 		return fmt.Errorf("failed to complete transfer task: %w", err)
@@ -568,8 +569,8 @@ func (s *TransferTaskService) CompleteTask(taskId string) error {
 	return nil
 }
 
-func (s *TransferTaskService) FailTask(taskId string) error {
-	_, err := s.db.Exec("UPDATE transfer_tasks SET status = 'failed', updated_at = ? WHERE id = ?",
+func (s *TransferTaskService) FailTask(ctx context.Context, taskId string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE transfer_tasks SET status = 'failed', updated_at = ? WHERE id = ?",
 		time.Now().UTC().Format(time.RFC3339), taskId)
 	if err != nil {
 		return fmt.Errorf("failed to fail transfer task: %w", err)
@@ -597,8 +598,8 @@ func NewAuditLogService(db *DB) *AuditLogService {
 	return &AuditLogService{db: db}
 }
 
-func (s *AuditLogService) Create(log *AuditLog) error {
-	_, err := s.db.Exec(`INSERT INTO audit_log (id, timestamp, operation, resource_path, user_identifier, client_ip, user_agent, success, details)
+func (s *AuditLogService) Create(ctx context.Context, log *AuditLog) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_log (id, timestamp, operation, resource_path, user_identifier, client_ip, user_agent, success, details)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.ID, log.Timestamp, log.Operation, log.ResourcePath, log.UserIdentifier, log.ClientIP, log.UserAgent, log.Success, log.Details)
 	if err != nil {
@@ -607,13 +608,13 @@ func (s *AuditLogService) Create(log *AuditLog) error {
 	return nil
 }
 
-func (s *AuditLogService) GetById(id string) (*AuditLog, error) {
-	row := s.db.QueryRow(`SELECT id, timestamp, operation, resource_path, user_identifier, client_ip, user_agent, success, details
+func (s *AuditLogService) GetById(ctx context.Context, id string) (*AuditLog, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, timestamp, operation, resource_path, user_identifier, client_ip, user_agent, success, details
 		FROM audit_log WHERE id = ?`, id)
 	return scanAuditLog(row)
 }
 
-func (s *AuditLogService) List(operation string, resourcePath string, page int, pageSize int) ([]AuditLog, error) {
+func (s *AuditLogService) List(ctx context.Context, operation string, resourcePath string, page int, pageSize int) ([]AuditLog, error) {
 	query := "SELECT id, timestamp, operation, resource_path, user_identifier, client_ip, user_agent, success, details FROM audit_log WHERE 1=1"
 	var args []interface{}
 
@@ -632,7 +633,7 @@ func (s *AuditLogService) List(operation string, resourcePath string, page int, 
 	offset := (page - 1) * pageSize
 	args = append(args, pageSize, offset)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list audit logs: %w", err)
 	}
@@ -654,11 +655,11 @@ func (s *AuditLogService) List(operation string, resourcePath string, page int, 
 	return results, nil
 }
 
-func (s *AuditLogService) ListByTimeRange(startTime string, endTime string, page int, pageSize int) ([]AuditLog, error) {
+func (s *AuditLogService) ListByTimeRange(ctx context.Context, startTime string, endTime string, page int, pageSize int) ([]AuditLog, error) {
 	query := `SELECT id, timestamp, operation, resource_path, user_identifier, client_ip, user_agent, success, details
 		FROM audit_log WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`
 	offset := (page - 1) * pageSize
-	rows, err := s.db.Query(query, startTime, endTime, pageSize, offset)
+	rows, err := s.db.QueryContext(ctx, query, startTime, endTime, pageSize, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list audit logs by time range: %w", err)
 	}
@@ -701,9 +702,9 @@ func NewApiKeyService(db *DB) *ApiKeyService {
 	return &ApiKeyService{db: db}
 }
 
-func (s *ApiKeyService) Create(key *ApiKey) error {
+func (s *ApiKeyService) Create(ctx context.Context, key *ApiKey) error {
 	expiresAt := toNullString(key.ExpiresAt)
-	_, err := s.db.Exec(`INSERT INTO api_keys (id, key_hash, name, description, permissions, created_at, expires_at, is_active)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (id, key_hash, name, description, permissions, created_at, expires_at, is_active)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		key.ID, key.KeyHash, key.Name, key.Description, key.Permissions, key.CreatedAt, expiresAt, key.IsActive)
 	if err != nil {
@@ -712,9 +713,9 @@ func (s *ApiKeyService) Create(key *ApiKey) error {
 	return nil
 }
 
-func (s *ApiKeyService) Update(key *ApiKey) error {
+func (s *ApiKeyService) Update(ctx context.Context, key *ApiKey) error {
 	expiresAt := toNullString(key.ExpiresAt)
-	_, err := s.db.Exec(`UPDATE api_keys SET name = ?, description = ?, permissions = ?, expires_at = ?, is_active = ? WHERE id = ?`,
+	_, err := s.db.ExecContext(ctx, `UPDATE api_keys SET name = ?, description = ?, permissions = ?, expires_at = ?, is_active = ? WHERE id = ?`,
 		key.Name, key.Description, key.Permissions, expiresAt, key.IsActive, key.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update api key: %w", err)
@@ -722,22 +723,22 @@ func (s *ApiKeyService) Update(key *ApiKey) error {
 	return nil
 }
 
-func (s *ApiKeyService) Remove(id string) error {
-	_, err := s.db.Exec("DELETE FROM api_keys WHERE id = ?", id)
+func (s *ApiKeyService) Remove(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM api_keys WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to remove api key: %w", err)
 	}
 	return nil
 }
 
-func (s *ApiKeyService) GetById(id string) (*ApiKey, error) {
-	row := s.db.QueryRow(`SELECT id, key_hash, name, description, permissions, created_at, expires_at, last_used_at, is_active
+func (s *ApiKeyService) GetById(ctx context.Context, id string) (*ApiKey, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, key_hash, name, description, permissions, created_at, expires_at, last_used_at, is_active
 		FROM api_keys WHERE id = ?`, id)
 	return scanApiKey(row)
 }
 
-func (s *ApiKeyService) GetByKeyHash(keyHash string) (*ApiKey, error) {
-	row := s.db.QueryRow(`SELECT id, key_hash, name, description, permissions, created_at, expires_at, last_used_at, is_active
+func (s *ApiKeyService) GetByKeyHash(ctx context.Context, keyHash string) (*ApiKey, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, key_hash, name, description, permissions, created_at, expires_at, last_used_at, is_active
 		FROM api_keys WHERE key_hash = ? AND is_active = TRUE`, keyHash)
 	key, err := scanApiKey(row)
 	if err != nil {
@@ -752,14 +753,14 @@ func (s *ApiKeyService) GetByKeyHash(keyHash string) (*ApiKey, error) {
 	return key, nil
 }
 
-func (s *ApiKeyService) List(activeOnly bool, page int, pageSize int) ([]ApiKey, error) {
+func (s *ApiKeyService) List(ctx context.Context, activeOnly bool, page int, pageSize int) ([]ApiKey, error) {
 	query := "SELECT id, key_hash, name, description, permissions, created_at, expires_at, last_used_at, is_active FROM api_keys"
 	if activeOnly {
 		query += " WHERE is_active = TRUE"
 	}
 	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
 	offset := (page - 1) * pageSize
-	rows, err := s.db.Query(query, pageSize, offset)
+	rows, err := s.db.QueryContext(ctx, query, pageSize, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list api keys: %w", err)
 	}
@@ -781,17 +782,17 @@ func (s *ApiKeyService) List(activeOnly bool, page int, pageSize int) ([]ApiKey,
 	return results, nil
 }
 
-func (s *ApiKeyService) UpdateLastUsed(id string) error {
+func (s *ApiKeyService) UpdateLastUsed(ctx context.Context, id string) error {
 	now := utils.GetCurrentTimestamp()
-	_, err := s.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now, id)
+	_, err := s.db.ExecContext(ctx, "UPDATE api_keys SET last_used_at = ? WHERE id = ?", now, id)
 	if err != nil {
 		return fmt.Errorf("failed to update api key last used: %w", err)
 	}
 	return nil
 }
 
-func (s *ApiKeyService) Deactivate(id string) error {
-	_, err := s.db.Exec("UPDATE api_keys SET is_active = FALSE WHERE id = ?", id)
+func (s *ApiKeyService) Deactivate(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE api_keys SET is_active = FALSE WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to deactivate api key: %w", err)
 	}

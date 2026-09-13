@@ -65,7 +65,7 @@ func TestSetTempDir_UploadUsesConfiguredDir(t *testing.T) {
 		t.Fatalf("SetTempDir: %v", err)
 	}
 
-	sessionID, err := svc.CreateUploadSession("resume.txt", "resume.txt", 16, "client", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "resume.txt", "resume.txt", 16, "client", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession: %v", err)
 	}

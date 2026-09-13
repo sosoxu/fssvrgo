@@ -94,7 +94,7 @@ func TestMinIOWriteAndRead(t *testing.T) {
 	key := "test/write-read.txt"
 	data := []byte("hello minio storage")
 
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(t.Context(), key, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestMinIOWriteAndRead(t *testing.T) {
 		t.Error("object should exist after write")
 	}
 
-	result, err := store.Read(key)
+	result, err := store.Read(t.Context(), key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -118,11 +118,11 @@ func TestMinIOReadAt(t *testing.T) {
 
 	key := "test/readat.bin"
 	data := []byte("0123456789abcdef")
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(t.Context(), key, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	result, err := store.ReadAt(key, 4, 8)
+	result, err := store.ReadAt(t.Context(), key, 4, 8)
 	if err != nil {
 		t.Fatalf("ReadAt failed: %v", err)
 	}
@@ -139,18 +139,18 @@ func TestMinIOWriteAt(t *testing.T) {
 
 	key := "test/writeat.bin"
 	data := []byte("0123456789abcdef")
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(t.Context(), key, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
 	// 对象存储不支持原地随机写，WriteAt 必须返回 ErrWriteAtUnsupported。
 	patch := []byte("XXXX")
-	if err := store.WriteAt(key, patch, 4); !errors.Is(err, ErrWriteAtUnsupported) {
+	if err := store.WriteAt(t.Context(), key, patch, 4); !errors.Is(err, ErrWriteAtUnsupported) {
 		t.Fatalf("expected ErrWriteAtUnsupported, got %v", err)
 	}
 
 	// 原对象内容不应被修改（WriteAt 是 no-op）。
-	result, err := store.Read(key)
+	result, err := store.Read(t.Context(), key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -165,18 +165,18 @@ func TestMinIOWriteAtExtend(t *testing.T) {
 
 	key := "test/writeat-extend.bin"
 	data := []byte("short")
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(t.Context(), key, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
 	// 对象存储不支持原地随机写（含扩展），WriteAt 必须返回 ErrWriteAtUnsupported。
 	patch := []byte("extended!")
-	if err := store.WriteAt(key, patch, 10); !errors.Is(err, ErrWriteAtUnsupported) {
+	if err := store.WriteAt(t.Context(), key, patch, 10); !errors.Is(err, ErrWriteAtUnsupported) {
 		t.Fatalf("expected ErrWriteAtUnsupported, got %v", err)
 	}
 
 	// 原对象内容与长度不应改变。
-	result, err := store.Read(key)
+	result, err := store.Read(t.Context(), key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -192,11 +192,11 @@ func TestMinIOWriteFromReader(t *testing.T) {
 	key := "test/write-from-reader.txt"
 	data := []byte("streaming write content")
 
-	if err := store.WriteFromReader(key, bytes.NewReader(data)); err != nil {
+	if err := store.WriteFromReader(t.Context(), key, bytes.NewReader(data)); err != nil {
 		t.Fatalf("WriteFromReader failed: %v", err)
 	}
 
-	result, err := store.Read(key)
+	result, err := store.Read(t.Context(), key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -213,11 +213,11 @@ func TestMinIOOpenReader(t *testing.T) {
 	key := "test/open-reader.txt"
 	data := []byte("open reader content")
 
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(t.Context(), key, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	reader, err := store.OpenReader(key)
+	reader, err := store.OpenReader(t.Context(), key)
 	if err != nil {
 		t.Fatalf("OpenReader failed: %v", err)
 	}
@@ -251,11 +251,11 @@ func TestMinIOWriteFromTempFile(t *testing.T) {
 	tmpFile.Close()
 
 	key := "test/from-temp-file.txt"
-	if err := store.WriteFromTempFile(key, tmpFile.Name()); err != nil {
+	if err := store.WriteFromTempFile(t.Context(), key, tmpFile.Name()); err != nil {
 		t.Fatalf("WriteFromTempFile failed: %v", err)
 	}
 
-	result, err := store.Read(key)
+	result, err := store.Read(t.Context(), key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -270,11 +270,11 @@ func TestMinIORemove(t *testing.T) {
 	ensureBucket(t, store)
 
 	key := "test/remove.txt"
-	if err := store.Write(key, []byte("bye")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("bye")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if err := store.Remove(key); err != nil {
+	if err := store.Remove(t.Context(), key); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -291,11 +291,11 @@ func TestMinIORename(t *testing.T) {
 	newKey := "test/rename-new.txt"
 	data := []byte("renamed content")
 
-	if err := store.Write(oldKey, data); err != nil {
+	if err := store.Write(t.Context(), oldKey, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if err := store.Rename(oldKey, newKey); err != nil {
+	if err := store.Rename(t.Context(), oldKey, newKey); err != nil {
 		t.Fatalf("Rename failed: %v", err)
 	}
 
@@ -306,7 +306,7 @@ func TestMinIORename(t *testing.T) {
 		t.Error("new object does not exist after rename")
 	}
 
-	result, err := store.Read(newKey)
+	result, err := store.Read(t.Context(), newKey)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -320,11 +320,11 @@ func TestMinIORenameSameKey(t *testing.T) {
 	ensureBucket(t, store)
 
 	key := "test/rename-same.txt"
-	if err := store.Write(key, []byte("same")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("same")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if err := store.Rename(key, key); err != nil {
+	if err := store.Rename(t.Context(), key, key); err != nil {
 		t.Fatalf("Rename same key should not fail: %v", err)
 	}
 
@@ -342,7 +342,7 @@ func TestMinIOExists(t *testing.T) {
 	}
 
 	key := "test/exists.txt"
-	if err := store.Write(key, []byte("yes")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("yes")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -350,7 +350,7 @@ func TestMinIOExists(t *testing.T) {
 		t.Error("object should exist after write")
 	}
 
-	store.Remove(key)
+	store.Remove(t.Context(), key)
 
 	if mustExist(t, store, key) {
 		t.Error("object should not exist after remove")
@@ -363,11 +363,11 @@ func TestMinIOGetSize(t *testing.T) {
 
 	key := "test/size.txt"
 	data := []byte("exactly 13 chars")
-	if err := store.Write(key, data); err != nil {
+	if err := store.Write(t.Context(), key, data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	size, err := store.GetSize(key)
+	size, err := store.GetSize(t.Context(), key)
 	if err != nil {
 		t.Fatalf("GetSize failed: %v", err)
 	}
@@ -383,11 +383,11 @@ func TestMinIOCreateDirectory(t *testing.T) {
 
 	prefix := "test-newdir"
 
-	if err := store.CreateDirectory(prefix); err != nil {
+	if err := store.CreateDirectory(t.Context(), prefix); err != nil {
 		t.Skipf("CreateDirectory not supported by S3 mock (works on real MinIO): %v", err)
 	}
 
-	if !mustExist(t, store, prefix + "/") {
+	if !mustExist(t, store, prefix+"/") {
 		t.Error("directory marker should exist after CreateDirectory")
 	}
 }
@@ -397,15 +397,15 @@ func TestMinIORemoveDirectory(t *testing.T) {
 	ensureBucket(t, store)
 
 	prefix := "test-rmdir"
-	store.CreateDirectory(prefix)
-	store.Write(prefix+"/a.txt", []byte("a"))
-	store.Write(prefix+"/b.txt", []byte("b"))
+	store.CreateDirectory(t.Context(), prefix)
+	store.Write(t.Context(), prefix+"/a.txt", []byte("a"))
+	store.Write(t.Context(), prefix+"/b.txt", []byte("b"))
 
-	if err := store.RemoveDirectory(prefix); err != nil {
+	if err := store.RemoveDirectory(t.Context(), prefix); err != nil {
 		t.Fatalf("RemoveDirectory failed: %v", err)
 	}
 
-	if mustExist(t, store, prefix + "/a.txt") {
+	if mustExist(t, store, prefix+"/a.txt") {
 		t.Error("object should not exist after RemoveDirectory")
 	}
 }
@@ -424,11 +424,11 @@ func TestMinIOConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			key := fmt.Sprintf("test-concurrent/file_%d.txt", idx)
 			data := []byte(fmt.Sprintf("data_%d", idx))
-			if err := store.Write(key, data); err != nil {
+			if err := store.Write(t.Context(), key, data); err != nil {
 				errCh <- err
 				return
 			}
-			result, err := store.Read(key)
+			result, err := store.Read(t.Context(), key)
 			if err != nil {
 				errCh <- err
 				return
@@ -437,7 +437,7 @@ func TestMinIOConcurrentAccess(t *testing.T) {
 				errCh <- fmt.Errorf("content mismatch for file_%d", idx)
 				return
 			}
-			store.Remove(key)
+			store.Remove(t.Context(), key)
 		}(i)
 	}
 
@@ -460,11 +460,11 @@ func TestMinIOStreamingWriteAndRead(t *testing.T) {
 		data[i] = byte(i % 256)
 	}
 
-	if err := store.WriteFromReader(key, bytes.NewReader(data)); err != nil {
+	if err := store.WriteFromReader(t.Context(), key, bytes.NewReader(data)); err != nil {
 		t.Fatalf("WriteFromReader failed: %v", err)
 	}
 
-	reader, err := store.OpenReader(key)
+	reader, err := store.OpenReader(t.Context(), key)
 	if err != nil {
 		t.Fatalf("OpenReader failed: %v", err)
 	}
@@ -492,16 +492,16 @@ func TestMinIOReadAtInvalidOffset(t *testing.T) {
 	ensureBucket(t, store)
 
 	key := "test/readat-invalid.bin"
-	if err := store.Write(key, []byte("short")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("short")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	_, err := store.ReadAt(key, 10, -1)
+	_, err := store.ReadAt(t.Context(), key, 10, -1)
 	if err == nil {
 		t.Error("expected error for negative offset")
 	}
 
-	_, err = store.ReadAt(key, 0, 0)
+	_, err = store.ReadAt(t.Context(), key, 0, 0)
 	if err == nil {
 		t.Error("expected error for zero size")
 	}
@@ -512,11 +512,11 @@ func TestMinIOWriteAtInvalidOffset(t *testing.T) {
 	ensureBucket(t, store)
 
 	key := "test/writeat-invalid.bin"
-	if err := store.Write(key, []byte("data")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("data")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	err := store.WriteAt(key, []byte("x"), -1)
+	err := store.WriteAt(t.Context(), key, []byte("x"), -1)
 	if err == nil {
 		t.Error("expected error for negative offset")
 	}
@@ -527,15 +527,15 @@ func TestMinIOOverwrite(t *testing.T) {
 	ensureBucket(t, store)
 
 	key := "test/overwrite.txt"
-	if err := store.Write(key, []byte("original")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("original")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if err := store.Write(key, []byte("replaced")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("replaced")); err != nil {
 		t.Fatalf("Overwrite failed: %v", err)
 	}
 
-	result, err := store.Read(key)
+	result, err := store.Read(t.Context(), key)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestMinIOHTTPHealthCheck(t *testing.T) {
 	ensureBucket(t, store)
 
 	key := "test/health.txt"
-	if err := store.Write(key, []byte("ok")); err != nil {
+	if err := store.Write(t.Context(), key, []byte("ok")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 

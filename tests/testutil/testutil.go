@@ -17,6 +17,8 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/logger"
 	"github.com/sosoxu/fssvrgo/internal/pgtest"
+	"github.com/sosoxu/fssvrgo/internal/service/apikey"
+	"github.com/sosoxu/fssvrgo/internal/service/auditlog"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -114,7 +116,23 @@ func NewTestServer() (*TestServer, error) {
 		CORSAllowedOrigins: "*",
 	}
 
-	srv := httpserver.NewServer(serverCfg, config.TLSConfig{}, fm, dirSvc, flSvc, transferSvc, authSvc, cryptoSvc, store, cacheSvc, nil, qdb)
+	srv := httpserver.NewServer(httpserver.Deps{
+		Config:      serverCfg,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(qdb),
+			database.NewAuditWriter(qdb, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(database.NewApiKeyService(qdb), authSvc.GenerateApiKey),
+		DB:      qdb,
+	})
 
 	go srv.ListenAndServe()
 

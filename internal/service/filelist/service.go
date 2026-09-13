@@ -1,6 +1,7 @@
 package filelist
 
 import (
+	"context"
 	"strings"
 
 	"github.com/sosoxu/fssvrgo/internal/database"
@@ -23,7 +24,7 @@ type FileListItem struct {
 // instead of Total. When includeTotal is true, Total is the exact count of all
 // items matching the filter (computed via a separate COUNT query).
 type FileListResult struct {
-	Total    int  // -1 when not computed (includeTotal=false); exact count otherwise
+	Total    int // -1 when not computed (includeTotal=false); exact count otherwise
 	Page     int
 	PageSize int
 	HasMore  bool // true if there are more items beyond this page
@@ -35,8 +36,8 @@ type FileListResult struct {
 // logic, so unit tests can drive it with an in-memory fake instead of a
 // PostgreSQL instance.
 type Listing interface {
-	List(query database.FileListQuery) ([]database.FileListRow, error)
-	Count(query database.FileListQuery) (int, error)
+	List(ctx context.Context, query database.FileListQuery) ([]database.FileListRow, error)
+	Count(ctx context.Context, query database.FileListQuery) (int, error)
 }
 
 type FileListService struct {
@@ -56,18 +57,18 @@ func NewFileListServiceFromDB(db *database.DB) *FileListService {
 // ListFiles lists files and directories under path with pagination. It does NOT
 // compute Total (Total=-1); use ListFilesWithTotal if you need the exact count.
 // HasMore is set so callers can paginate without Total.
-func (s *FileListService) ListFiles(path string, recursive bool, page, pageSize int, sortBy, sortOrder string) (*FileListResult, error) {
-	return s.listFiles(path, recursive, page, pageSize, sortBy, sortOrder, false)
+func (s *FileListService) ListFiles(ctx context.Context, path string, recursive bool, page, pageSize int, sortBy, sortOrder string) (*FileListResult, error) {
+	return s.listFiles(ctx, path, recursive, page, pageSize, sortBy, sortOrder, false)
 }
 
 // ListFilesWithTotal is like ListFiles but also computes the exact Total via a
 // COUNT query. Use this only when the caller genuinely needs the total (e.g. a
 // UI showing "N items"); it costs an extra full-scan COUNT on large directories.
-func (s *FileListService) ListFilesWithTotal(path string, recursive bool, page, pageSize int, sortBy, sortOrder string) (*FileListResult, error) {
-	return s.listFiles(path, recursive, page, pageSize, sortBy, sortOrder, true)
+func (s *FileListService) ListFilesWithTotal(ctx context.Context, path string, recursive bool, page, pageSize int, sortBy, sortOrder string) (*FileListResult, error) {
+	return s.listFiles(ctx, path, recursive, page, pageSize, sortBy, sortOrder, true)
 }
 
-func (s *FileListService) listFiles(path string, recursive bool, page, pageSize int, sortBy, sortOrder string, includeTotal bool) (*FileListResult, error) {
+func (s *FileListService) listFiles(ctx context.Context, path string, recursive bool, page, pageSize int, sortBy, sortOrder string, includeTotal bool) (*FileListResult, error) {
 	path = utils.NormalizePath(path)
 	if path == "." {
 		path = ""
@@ -102,7 +103,7 @@ func (s *FileListService) listFiles(path string, recursive bool, page, pageSize 
 		Offset:    (page - 1) * pageSize,
 	}
 
-	rows, err := s.store.List(query)
+	rows, err := s.store.List(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +128,7 @@ func (s *FileListService) listFiles(path string, recursive bool, page, pageSize 
 
 	total := -1 // -1 signals "not computed"
 	if includeTotal {
-		exact, err := s.store.Count(query)
+		exact, err := s.store.Count(ctx, query)
 		if err != nil {
 			return nil, err
 		}

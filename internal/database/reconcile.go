@@ -67,8 +67,8 @@ func (r *Reconciler) Scan(ctx context.Context) (*ReconcileReport, error) {
 	}
 
 	dbPaths := make(map[string]struct{})
-	rows, err := r.db.Query(
-		"SELECT path FROM files WHERE is_deleted = " + r.db.GetDialect().BooleanCheck(false),
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT path FROM files WHERE is_deleted = "+r.db.GetDialect().BooleanCheck(false),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list file metadata: %w", err)
@@ -136,7 +136,7 @@ func (r *Reconciler) Repair(ctx context.Context, report *ReconcileReport) (*Reco
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if err := r.store.Remove(path); err != nil && !storage.IsNotExist(err) {
+		if err := r.store.Remove(ctx, path); err != nil && !storage.IsNotExist(err) {
 			result.Errors = append(result.Errors, fmt.Sprintf("remove orphan %s: %v", path, err))
 			continue
 		}
@@ -147,7 +147,7 @@ func (r *Reconciler) Repair(ctx context.Context, report *ReconcileReport) (*Reco
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if _, err := r.db.Exec(
+		if _, err := r.db.ExecContext(ctx,
 			"UPDATE files SET is_deleted = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
 			true, path,
 		); err != nil {

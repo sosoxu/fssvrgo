@@ -26,6 +26,8 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/pgtest"
+	"github.com/sosoxu/fssvrgo/internal/service/apikey"
+	"github.com/sosoxu/fssvrgo/internal/service/auditlog"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -145,7 +147,23 @@ func createRedisInstance(t *testing.T, id int, db *database.DB, store storage.St
 		CORSAllowedOrigins: "*",
 	}
 
-	srv := httpserver.NewServer(serverCfg, config.TLSConfig{}, fm, dirSvc, flSvc, transferSvc, authSvc, cryptoSvc, store, cacheSvc, nil, db)
+	srv := httpserver.NewServer(httpserver.Deps{
+		Config:      serverCfg,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(db),
+			database.NewAuditWriter(db, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(database.NewApiKeyService(db), authSvc.GenerateApiKey),
+		DB:      db,
+	})
 
 	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -655,13 +673,13 @@ func TestRedisLock_GRPCUploadDownloadConsistency(t *testing.T) {
 	data := generateRedisData(1024 * 100)
 	filePath := "/redis_grpc_consistency_test.dat"
 
-	_, err := cluster.Instances[0].FM.UploadFile(filePath, data)
+	_, err := cluster.Instances[0].FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload via instance 0 failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		downloaded, err := inst.FM.DownloadFile(filePath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Download from instance %d failed: %v", i, err)
 			continue
@@ -683,18 +701,18 @@ func TestRedisLock_GRPCMetadataConsistency(t *testing.T) {
 	data := generateRedisData(1024 * 50)
 	filePath := "/redis_grpc_metadata_test.dat"
 
-	_, err := cluster.Instances[0].FM.UploadFile(filePath, data)
+	_, err := cluster.Instances[0].FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	meta1, err := cluster.Instances[0].FM.GetFileMetadata(filePath)
+	meta1, err := cluster.Instances[0].FM.GetFileMetadata(t.Context(), filePath)
 	if err != nil {
 		t.Fatalf("Get metadata from instance 0 failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances[1:] {
-		meta, err := inst.FM.GetFileMetadata(filePath)
+		meta, err := inst.FM.GetFileMetadata(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Get metadata from instance %d failed: %v", i+1, err)
 			continue
@@ -718,17 +736,17 @@ func TestRedisLock_GRPCDeleteConsistency(t *testing.T) {
 	data := generateRedisData(1024)
 	filePath := "/redis_grpc_delete_test.dat"
 
-	_, err := cluster.Instances[0].FM.UploadFile(filePath, data)
+	_, err := cluster.Instances[0].FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	if err := cluster.Instances[1].FM.DeleteFile(filePath); err != nil {
+	if err := cluster.Instances[1].FM.DeleteFile(t.Context(), filePath); err != nil {
 		t.Fatalf("Delete from instance 1 failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		if inst.FM.Exists(filePath) {
+		if inst.FM.Exists(t.Context(), filePath) {
 			t.Errorf("Instance %d: file should be deleted", i)
 		}
 	}
@@ -741,26 +759,26 @@ func TestRedisLock_GRPCRenameConsistency(t *testing.T) {
 	data := generateRedisData(1024)
 	filePath := "/redis_grpc_rename_test.dat"
 
-	_, err := cluster.Instances[0].FM.UploadFile(filePath, data)
+	_, err := cluster.Instances[0].FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	if err := cluster.Instances[1].FM.RenameFile(filePath, "redis_grpc_renamed.dat"); err != nil {
+	if err := cluster.Instances[1].FM.RenameFile(t.Context(), filePath, "redis_grpc_renamed.dat"); err != nil {
 		t.Fatalf("Rename from instance 1 failed: %v", err)
 	}
 
-	if cluster.Instances[0].FM.Exists(filePath) {
+	if cluster.Instances[0].FM.Exists(t.Context(), filePath) {
 		t.Error("Old path should not exist after rename")
 	}
 
 	newPath := "/redis_grpc_renamed.dat"
 	for i, inst := range cluster.Instances {
-		if !inst.FM.Exists(newPath) {
+		if !inst.FM.Exists(t.Context(), newPath) {
 			t.Errorf("Instance %d: new path should exist after rename", i)
 			continue
 		}
-		downloaded, err := inst.FM.DownloadFile(newPath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), newPath)
 		if err != nil {
 			t.Errorf("Instance %d: download from new path failed: %v", i, err)
 			continue
@@ -786,7 +804,7 @@ func TestRedisLock_GRPCConcurrentWriteConsistency(t *testing.T) {
 				defer wg.Done()
 				data := generateRedisData(1024 * (10 + fileIdx))
 				filePath := fmt.Sprintf("/redis_grpc_concurrent_%d_%d.dat", instIdx, fileIdx)
-				if _, err := fm.UploadFile(filePath, data); err != nil {
+				if _, err := fm.UploadFile(t.Context(), filePath, data); err != nil {
 					errors <- fmt.Errorf("upload instance %d file %d: %v", instIdx, fileIdx, err)
 				}
 			}(i, j, inst.FM)
@@ -803,7 +821,7 @@ func TestRedisLock_GRPCConcurrentWriteConsistency(t *testing.T) {
 		for j := range cluster.Instances {
 			filePath := fmt.Sprintf("/redis_grpc_concurrent_%d_%d.dat", j, i)
 			for k, inst := range cluster.Instances {
-				_, err := inst.FM.DownloadFile(filePath)
+				_, err := inst.FM.DownloadFile(t.Context(), filePath)
 				if err != nil {
 					t.Errorf("Instance %d: cannot download file %s: %v", k, filePath, err)
 				}
@@ -823,14 +841,14 @@ func TestRedisLock_GRPCConcurrentOverwriteConsistency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(3)
-	go func() { defer wg.Done(); cluster.Instances[0].FM.UploadFile(filePath, data1) }()
-	go func() { defer wg.Done(); cluster.Instances[1].FM.UploadFile(filePath, data2) }()
-	go func() { defer wg.Done(); cluster.Instances[2].FM.UploadFile(filePath, data3) }()
+	go func() { defer wg.Done(); cluster.Instances[0].FM.UploadFile(t.Context(), filePath, data1) }()
+	go func() { defer wg.Done(); cluster.Instances[1].FM.UploadFile(t.Context(), filePath, data2) }()
+	go func() { defer wg.Done(); cluster.Instances[2].FM.UploadFile(t.Context(), filePath, data3) }()
 	wg.Wait()
 
-	downloaded1, err1 := cluster.Instances[0].FM.DownloadFile(filePath)
-	downloaded2, err2 := cluster.Instances[1].FM.DownloadFile(filePath)
-	downloaded3, err3 := cluster.Instances[2].FM.DownloadFile(filePath)
+	downloaded1, err1 := cluster.Instances[0].FM.DownloadFile(t.Context(), filePath)
+	downloaded2, err2 := cluster.Instances[1].FM.DownloadFile(t.Context(), filePath)
+	downloaded3, err3 := cluster.Instances[2].FM.DownloadFile(t.Context(), filePath)
 
 	if err1 != nil || err2 != nil || err3 != nil {
 		t.Fatalf("Download failed: err0=%v, err1=%v, err2=%v", err1, err2, err3)
@@ -863,12 +881,12 @@ func TestRedisLock_GRPCStreamingUploadWithRedisSession(t *testing.T) {
 	filePath := "/redis_grpc_stream_test.dat"
 	chunkSize := int64(1024 * 10)
 
-	sessionID, err := inst1.TransferSvc.CreateUploadSession(filePath, "redis_grpc_stream_test.dat", int64(len(data)), "test", hash)
+	sessionID, err := inst1.TransferSvc.CreateUploadSession(t.Context(), filePath, "redis_grpc_stream_test.dat", int64(len(data)), "test", hash)
 	if err != nil {
 		t.Fatalf("Create upload session on instance 0 failed: %v", err)
 	}
 
-	err = inst2.TransferSvc.UploadChunk(sessionID, data[:1024], 0)
+	err = inst2.TransferSvc.UploadChunk(t.Context(), sessionID, data[:1024], 0)
 	if err != nil {
 		t.Logf("Cross-instance chunk upload failed (expected - temp file not shared): %v", err)
 	} else {
@@ -882,18 +900,18 @@ func TestRedisLock_GRPCStreamingUploadWithRedisSession(t *testing.T) {
 			end = int64(len(data))
 		}
 		chunk := data[offset:end]
-		if err := inst1.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := inst1.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("Same-instance chunk upload at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		downloaded, err := inst.FM.DownloadFile(filePath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Instance %d: download failed: %v", i, err)
 			continue
@@ -914,17 +932,17 @@ func TestRedisLock_GRPCStreamingDownloadConsistency(t *testing.T) {
 	data := generateRedisData(1024 * 50)
 	filePath := "/redis_grpc_stream_dl_test.dat"
 
-	_, err := inst1.FM.UploadFile(filePath, data)
+	_, err := inst1.FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	sessionID1, err := inst1.TransferSvc.CreateDownloadSession(filePath, "test")
+	sessionID1, err := inst1.TransferSvc.CreateDownloadSession(t.Context(), filePath, "test")
 	if err != nil {
 		t.Fatalf("Create download session on instance 0 failed: %v", err)
 	}
 
-	sessionID2, err := inst2.TransferSvc.CreateDownloadSession(filePath, "test")
+	sessionID2, err := inst2.TransferSvc.CreateDownloadSession(t.Context(), filePath, "test")
 	if err != nil {
 		t.Fatalf("Create download session on instance 1 failed: %v", err)
 	}
@@ -940,13 +958,13 @@ func TestRedisLock_GRPCStreamingDownloadConsistency(t *testing.T) {
 			readSize = int(remaining)
 		}
 
-		chunk1, err := inst1.TransferSvc.DownloadChunk(sessionID1, readSize, dlOffset)
+		chunk1, err := inst1.TransferSvc.DownloadChunk(t.Context(), sessionID1, readSize, dlOffset)
 		if err != nil {
 			t.Fatalf("Download chunk from instance 0 at offset %d failed: %v", dlOffset, err)
 		}
 		downloaded1 = append(downloaded1, chunk1...)
 
-		chunk2, err := inst2.TransferSvc.DownloadChunk(sessionID2, readSize, dlOffset)
+		chunk2, err := inst2.TransferSvc.DownloadChunk(t.Context(), sessionID2, readSize, dlOffset)
 		if err != nil {
 			t.Fatalf("Download chunk from instance 1 at offset %d failed: %v", dlOffset, err)
 		}
@@ -955,8 +973,8 @@ func TestRedisLock_GRPCStreamingDownloadConsistency(t *testing.T) {
 		dlOffset += int64(readSize)
 	}
 
-	inst1.TransferSvc.CompleteDownload(sessionID1)
-	inst2.TransferSvc.CompleteDownload(sessionID2)
+	inst1.TransferSvc.CompleteDownload(t.Context(), sessionID1)
+	inst2.TransferSvc.CompleteDownload(t.Context(), sessionID2)
 
 	if string(downloaded1) != string(data) {
 		t.Error("Instance 0: downloaded data does not match original")
@@ -1045,20 +1063,20 @@ func TestRedisLock_GRPCListFilesConsistency(t *testing.T) {
 	for i := 0; i < numFilesPerInst; i++ {
 		data := generateRedisData(100)
 		filePath := fmt.Sprintf("/redis_grpc_list_%d.dat", i)
-		if _, err := cluster.Instances[0].FM.UploadFile(filePath, data); err != nil {
+		if _, err := cluster.Instances[0].FM.UploadFile(t.Context(), filePath, data); err != nil {
 			t.Fatalf("Upload file %d to instance 0 failed: %v", i, err)
 		}
 	}
 	for i := 0; i < numFilesPerInst; i++ {
 		data := generateRedisData(100)
 		filePath := fmt.Sprintf("/redis_grpc_list_%d.dat", numFilesPerInst+i)
-		if _, err := cluster.Instances[1].FM.UploadFile(filePath, data); err != nil {
+		if _, err := cluster.Instances[1].FM.UploadFile(t.Context(), filePath, data); err != nil {
 			t.Fatalf("Upload file %d to instance 1 failed: %v", numFilesPerInst+i, err)
 		}
 	}
 
 	for i, inst := range cluster.Instances {
-		result, err := inst.FlSvc.ListFilesWithTotal("/", false, 1, 100, "name", "asc")
+		result, err := inst.FlSvc.ListFilesWithTotal(t.Context(), "/", false, 1, 100, "name", "asc")
 		if err != nil {
 			t.Errorf("List files from instance %d failed: %v", i, err)
 			continue
@@ -1158,7 +1176,7 @@ func TestRedisLock_GRPCStreamingUploadWithHashVerification(t *testing.T) {
 	filePath := "/redis_grpc_stream_hash_test.dat"
 	chunkSize := int64(1024 * 10)
 
-	sessionID, err := inst1.TransferSvc.CreateUploadSession(filePath, "redis_grpc_stream_hash_test.dat", int64(len(data)), "test", hash)
+	sessionID, err := inst1.TransferSvc.CreateUploadSession(t.Context(), filePath, "redis_grpc_stream_hash_test.dat", int64(len(data)), "test", hash)
 	if err != nil {
 		t.Fatalf("Create upload session failed: %v", err)
 	}
@@ -1170,18 +1188,18 @@ func TestRedisLock_GRPCStreamingUploadWithHashVerification(t *testing.T) {
 			end = int64(len(data))
 		}
 		chunk := data[offset:end]
-		if err := inst1.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := inst1.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("Chunk upload at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("Complete upload with hash verification failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		downloaded, err := inst.FM.DownloadFile(filePath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Instance %d: download failed: %v", i, err)
 			continue
@@ -1206,7 +1224,7 @@ func TestRedisLock_CrossInstanceStreamingUploadDownload(t *testing.T) {
 	filePath := "/redis_cross_stream_test.dat"
 	chunkSize := int64(1024 * 5)
 
-	sessionID, err := inst1.TransferSvc.CreateUploadSession(filePath, "redis_cross_stream_test.dat", int64(len(data)), "test", hash)
+	sessionID, err := inst1.TransferSvc.CreateUploadSession(t.Context(), filePath, "redis_cross_stream_test.dat", int64(len(data)), "test", hash)
 	if err != nil {
 		t.Fatalf("Create upload session on instance 0 failed: %v", err)
 	}
@@ -1218,18 +1236,18 @@ func TestRedisLock_CrossInstanceStreamingUploadDownload(t *testing.T) {
 			end = int64(len(data))
 		}
 		chunk := data[offset:end]
-		if err := inst1.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := inst1.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("Chunk upload at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 
 	for i, inst := range []*RedisInstance{inst2, inst3} {
-		dlSessionID, err := inst.TransferSvc.CreateDownloadSession(filePath, "test")
+		dlSessionID, err := inst.TransferSvc.CreateDownloadSession(t.Context(), filePath, "test")
 		if err != nil {
 			t.Errorf("Instance %d: create download session failed: %v", i+1, err)
 			continue
@@ -1243,7 +1261,7 @@ func TestRedisLock_CrossInstanceStreamingUploadDownload(t *testing.T) {
 			if remaining < chunkSize {
 				readSize = int(remaining)
 			}
-			chunk, err := inst.TransferSvc.DownloadChunk(dlSessionID, readSize, dlOffset)
+			chunk, err := inst.TransferSvc.DownloadChunk(t.Context(), dlSessionID, readSize, dlOffset)
 			if err != nil {
 				t.Errorf("Instance %d: download chunk at offset %d failed: %v", i+1, dlOffset, err)
 				break
@@ -1252,7 +1270,7 @@ func TestRedisLock_CrossInstanceStreamingUploadDownload(t *testing.T) {
 			dlOffset += int64(readSize)
 		}
 
-		inst.TransferSvc.CompleteDownload(dlSessionID)
+		inst.TransferSvc.CompleteDownload(t.Context(), dlSessionID)
 
 		if len(downloaded) != len(data) {
 			t.Errorf("Instance %d: size mismatch, expected %d, got %d", i+1, len(data), len(downloaded))

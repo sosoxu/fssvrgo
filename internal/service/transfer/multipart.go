@@ -135,7 +135,7 @@ func suggestedPartSize(totalSize int64) int64 {
 	}
 }
 
-func (s *FileTransferService) CreateMultipartUpload(filePath, fileName string, totalSize int64, clientID, hash string) (string, int64, error) {
+func (s *FileTransferService) CreateMultipartUpload(ctx context.Context, filePath, fileName string, totalSize int64, clientID, hash string) (string, int64, error) {
 	if !s.acquireSessionSlot() {
 		return "", 0, fmt.Errorf("maximum number of concurrent upload sessions reached")
 	}
@@ -175,7 +175,6 @@ func (s *FileTransferService) CreateMultipartUpload(filePath, fileName string, t
 
 	s.multipartSessions.Store(sessionID, session)
 
-	ctx := context.Background()
 	if err := s.sessionStore.Set(ctx, "multipart_upload", sessionID, map[string]interface{}{
 		"session_id": sessionID,
 		"file_path":  filePath,
@@ -192,7 +191,7 @@ func (s *FileTransferService) CreateMultipartUpload(filePath, fileName string, t
 	return sessionID, partSize, nil
 }
 
-func (s *FileTransferService) UploadPartData(sessionID string, partNumber int, offset int64, data []byte) error {
+func (s *FileTransferService) UploadPartData(ctx context.Context, sessionID string, partNumber int, offset int64, data []byte) error {
 	val, ok := s.multipartSessions.Load(sessionID)
 	if !ok {
 		return fmt.Errorf("multipart upload session not found: %s", sessionID)
@@ -259,7 +258,7 @@ func (s *FileTransferService) UploadPartData(sessionID string, partNumber int, o
 	return nil
 }
 
-func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
+func (s *FileTransferService) CompleteMultipartUpload(ctx context.Context, sessionID string) error {
 	val, ok := s.multipartSessions.Load(sessionID)
 	if !ok {
 		return fmt.Errorf("multipart upload session not found: %s", sessionID)
@@ -350,17 +349,17 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		storageTempPath = encTempPath
 	}
 
-	token, cancelRenew, err := distributed.AcquireLockWithRenewal(context.Background(), s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
+	token, cancelRenew, err := distributed.AcquireLockWithRenewal(ctx, s.distLock, "file:"+session.FilePath, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		os.Remove(storageTempPath)
 		s.multipartSessions.Delete(sessionID)
 		s.releaseSessionSlot()
 		return fmt.Errorf("failed to acquire lock for file %s: %w", session.FilePath, err)
 	}
-	defer s.distLock.Unlock(context.Background(), "file:"+session.FilePath, token)
+	defer s.unlockLock(ctx, "file:"+session.FilePath, token)
 	defer cancelRenew()
 
-	if err := s.storage.WriteFromTempFile(session.FilePath, storageTempPath); err != nil {
+	if err := s.storage.WriteFromTempFile(ctx, session.FilePath, storageTempPath); err != nil {
 		os.Remove(storageTempPath)
 		s.multipartSessions.Delete(sessionID)
 		s.releaseSessionSlot()
@@ -369,7 +368,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 
 	now := utils.GetCurrentTimestamp()
 
-	existingMeta, err := s.meta.GetByPath(session.FilePath)
+	existingMeta, err := s.meta.GetByPath(ctx, session.FilePath)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		// Log the error but continue - treat as new file
 		logger.Error("Failed to query existing metadata: %v", err)
@@ -380,7 +379,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 		existingMeta.Hash = storageHash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := s.meta.Update(existingMeta); err != nil {
+		if err := s.meta.Update(ctx, existingMeta); err != nil {
 			os.Remove(storageTempPath)
 			s.multipartSessions.Delete(sessionID)
 			s.releaseSessionSlot()
@@ -400,8 +399,8 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 			IsDeleted:       false,
 		}
 
-		if err := s.meta.Create(meta); err != nil {
-			s.storage.Remove(session.FilePath)
+		if err := s.meta.Create(ctx, meta); err != nil {
+			s.storage.Remove(ctx, session.FilePath)
 			os.Remove(storageTempPath)
 			s.multipartSessions.Delete(sessionID)
 			s.releaseSessionSlot()
@@ -416,7 +415,6 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 
 	os.Remove(storageTempPath)
 
-	ctx := context.Background()
 	if err := s.sessionStore.Delete(ctx, "multipart_upload", sessionID); err != nil {
 		logger.Warn("Failed to delete session from store: %v", err)
 	}
@@ -424,7 +422,7 @@ func (s *FileTransferService) CompleteMultipartUpload(sessionID string) error {
 	return nil
 }
 
-func (s *FileTransferService) AbortMultipartUpload(sessionID string) error {
+func (s *FileTransferService) AbortMultipartUpload(ctx context.Context, sessionID string) error {
 	val, ok := s.multipartSessions.Load(sessionID)
 	if !ok {
 		return fmt.Errorf("multipart upload session not found: %s", sessionID)
@@ -441,7 +439,6 @@ func (s *FileTransferService) AbortMultipartUpload(sessionID string) error {
 	tempPath := filepath.Join(s.tempDir, sessionID+".tmp")
 	os.Remove(tempPath)
 
-	ctx := context.Background()
 	if err := s.sessionStore.Delete(ctx, "multipart_upload", sessionID); err != nil {
 		logger.Warn("Failed to delete session from store: %v", err)
 	}
@@ -449,7 +446,7 @@ func (s *FileTransferService) AbortMultipartUpload(sessionID string) error {
 	return nil
 }
 
-func (s *FileTransferService) GetMultipartUploadSession(sessionID string) (*MultipartUploadSession, error) {
+func (s *FileTransferService) GetMultipartUploadSession(ctx context.Context, sessionID string) (*MultipartUploadSession, error) {
 	val, ok := s.multipartSessions.Load(sessionID)
 	if !ok {
 		return nil, fmt.Errorf("multipart upload session not found: %s", sessionID)
@@ -473,7 +470,7 @@ func (s *FileTransferService) GetMultipartUploadProgress(sessionID string) (uplo
 	return atomic.LoadInt64(&session.uploadedSize), session.TotalSize, completedParts
 }
 
-func (s *FileTransferService) ParallelDownloadChunks(sessionID string, segments []DownloadSegment) []*DownloadSegmentResult {
+func (s *FileTransferService) ParallelDownloadChunks(ctx context.Context, sessionID string, segments []DownloadSegment) []*DownloadSegmentResult {
 	results := make([]*DownloadSegmentResult, len(segments))
 	maxConcurrency := 8
 	if len(segments) < maxConcurrency {
@@ -489,7 +486,7 @@ func (s *FileTransferService) ParallelDownloadChunks(sessionID string, segments 
 		go func(idx int, seg DownloadSegment) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			data, err := s.DownloadChunk(sessionID, seg.Size, seg.Offset)
+			data, err := s.DownloadChunk(ctx, sessionID, seg.Size, seg.Offset)
 			if err != nil {
 				logger.Error("failed to download chunk at offset %d (segment %d): %v", seg.Offset, idx, err)
 			}

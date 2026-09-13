@@ -82,7 +82,7 @@ func BenchmarkLocalStorage_Write(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		if err := env.storage.Write("bench_write.bin", data); err != nil {
+		if err := env.storage.Write(b.Context(), "bench_write.bin", data); err != nil {
 			b.Fatalf("Write failed: %v", err)
 		}
 	}
@@ -95,7 +95,7 @@ func BenchmarkLocalStorage_Read(b *testing.B) {
 	for i := range data {
 		data[i] = byte(i % 256)
 	}
-	if err := env.storage.Write("bench_read.bin", data); err != nil {
+	if err := env.storage.Write(b.Context(), "bench_read.bin", data); err != nil {
 		b.Fatalf("Write failed: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func BenchmarkLocalStorage_Read(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := env.storage.Read("bench_read.bin"); err != nil {
+		if _, err := env.storage.Read(b.Context(), "bench_read.bin"); err != nil {
 			b.Fatalf("Read failed: %v", err)
 		}
 	}
@@ -117,7 +117,7 @@ func BenchmarkLocalStorage_WriteAt(b *testing.B) {
 		data[i] = byte(i % 256)
 	}
 	// Pre-create the file so WriteAt does not pay directory creation cost each call.
-	if err := env.storage.Write("bench_writeat.bin", data); err != nil {
+	if err := env.storage.Write(b.Context(), "bench_writeat.bin", data); err != nil {
 		b.Fatalf("Write failed: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func BenchmarkFileManager_Upload(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := env.fm.UploadFile("bench_upload.bin", data); err != nil {
+		if _, err := env.fm.UploadFile(b.Context(), "bench_upload.bin", data); err != nil {
 			b.Fatalf("UploadFile failed: %v", err)
 		}
 	}
@@ -158,7 +158,7 @@ func BenchmarkFileManager_Download(b *testing.B) {
 	for i := range data {
 		data[i] = byte(i % 256)
 	}
-	if _, err := env.fm.UploadFile("bench_download.bin", data); err != nil {
+	if _, err := env.fm.UploadFile(b.Context(), "bench_download.bin", data); err != nil {
 		b.Fatalf("UploadFile failed: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func BenchmarkFileManager_Download(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := env.fm.DownloadFile("bench_download.bin"); err != nil {
+		if _, err := env.fm.DownloadFile(b.Context(), "bench_download.bin"); err != nil {
 			b.Fatalf("DownloadFile failed: %v", err)
 		}
 	}
@@ -184,14 +184,14 @@ func BenchmarkTransfer_UploadChunk(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		path := fmt.Sprintf("bench_chunk_%d.bin", i)
-		sessionID, err := env.transferSvc.CreateUploadSession(path, path, chunkSize, "bench", "")
+		sessionID, err := env.transferSvc.CreateUploadSession(b.Context(), path, path, chunkSize, "bench", "")
 		if err != nil {
 			b.Fatalf("CreateUploadSession failed: %v", err)
 		}
-		if err := env.transferSvc.UploadChunk(sessionID, data, 0); err != nil {
+		if err := env.transferSvc.UploadChunk(b.Context(), sessionID, data, 0); err != nil {
 			b.Fatalf("UploadChunk failed: %v", err)
 		}
-		if err := env.transferSvc.AbortUpload(sessionID); err != nil {
+		if err := env.transferSvc.AbortUpload(b.Context(), sessionID); err != nil {
 			b.Fatalf("AbortUpload failed: %v", err)
 		}
 	}
@@ -211,7 +211,7 @@ func BenchmarkTransfer_ConcurrentUpload(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		path := fmt.Sprintf("bench_conc_%d.bin", i)
-		sessionID, err := env.transferSvc.CreateUploadSession(path, path, totalSize, "bench", "")
+		sessionID, err := env.transferSvc.CreateUploadSession(b.Context(), path, path, totalSize, "bench", "")
 		if err != nil {
 			b.Fatalf("CreateUploadSession failed: %v", err)
 		}
@@ -223,7 +223,7 @@ func BenchmarkTransfer_ConcurrentUpload(b *testing.B) {
 			go func(idx int) {
 				defer wg.Done()
 				offset := int64(idx) * chunkSize
-				if err := env.transferSvc.UploadChunk(sessionID, data, offset); err != nil {
+				if err := env.transferSvc.UploadChunk(b.Context(), sessionID, data, offset); err != nil {
 					errCh <- fmt.Errorf("chunk %d: %w", idx, err)
 				}
 			}(j)
@@ -234,7 +234,7 @@ func BenchmarkTransfer_ConcurrentUpload(b *testing.B) {
 			b.Errorf("concurrent upload error: %v", err)
 		}
 
-		if err := env.transferSvc.AbortUpload(sessionID); err != nil {
+		if err := env.transferSvc.AbortUpload(b.Context(), sessionID); err != nil {
 			b.Fatalf("AbortUpload failed: %v", err)
 		}
 	}
@@ -281,11 +281,11 @@ func TestStress_ConcurrentUploads(t *testing.T) {
 			defer wg.Done()
 			path := fmt.Sprintf("stress_upload_%d.bin", idx)
 			data := []byte(fmt.Sprintf("content for file %d", idx))
-			if _, err := env.fm.UploadFile(path, data); err != nil {
+			if _, err := env.fm.UploadFile(t.Context(), path, data); err != nil {
 				errCh <- fmt.Errorf("upload %d: %w", idx, err)
 				return
 			}
-			if !env.fm.Exists(path) {
+			if !env.fm.Exists(t.Context(), path) {
 				errCh <- fmt.Errorf("upload %d: file does not exist after upload", idx)
 			}
 		}(i)
@@ -306,7 +306,7 @@ func TestStress_ConcurrentReads(t *testing.T) {
 
 	path := "stress_read_target.bin"
 	data := []byte("shared file content for concurrent reads")
-	if _, err := env.fm.UploadFile(path, data); err != nil {
+	if _, err := env.fm.UploadFile(t.Context(), path, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
@@ -318,7 +318,7 @@ func TestStress_ConcurrentReads(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got, err := env.fm.DownloadFile(path)
+			got, err := env.fm.DownloadFile(t.Context(), path)
 			if err != nil {
 				errCh <- fmt.Errorf("download: %w", err)
 				return
@@ -354,13 +354,13 @@ func TestStress_MixedWorkload(t *testing.T) {
 	// Pre-create files for reads and deletes so the operations have targets.
 	for i := 0; i < numReads; i++ {
 		path := fmt.Sprintf("mixed_read_%d.bin", i)
-		if _, err := env.fm.UploadFile(path, []byte("read target")); err != nil {
+		if _, err := env.fm.UploadFile(t.Context(), path, []byte("read target")); err != nil {
 			t.Fatalf("pre-upload read %d failed: %v", i, err)
 		}
 	}
 	for i := 0; i < numDeletes; i++ {
 		path := fmt.Sprintf("mixed_del_%d.bin", i)
-		if _, err := env.fm.UploadFile(path, []byte("delete target")); err != nil {
+		if _, err := env.fm.UploadFile(t.Context(), path, []byte("delete target")); err != nil {
 			t.Fatalf("pre-upload del %d failed: %v", i, err)
 		}
 	}
@@ -374,7 +374,7 @@ func TestStress_MixedWorkload(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			path := fmt.Sprintf("mixed_read_%d.bin", idx)
-			if _, err := env.fm.DownloadFile(path); err != nil {
+			if _, err := env.fm.DownloadFile(t.Context(), path); err != nil {
 				errCh <- fmt.Errorf("read %d: %w", idx, err)
 			}
 		}(i)
@@ -387,7 +387,7 @@ func TestStress_MixedWorkload(t *testing.T) {
 			defer wg.Done()
 			path := fmt.Sprintf("mixed_new_%d.bin", idx)
 			data := []byte(fmt.Sprintf("new content %d", idx))
-			if _, err := env.fm.UploadFile(path, data); err != nil {
+			if _, err := env.fm.UploadFile(t.Context(), path, data); err != nil {
 				errCh <- fmt.Errorf("write %d: %w", idx, err)
 			}
 		}(i)
@@ -399,7 +399,7 @@ func TestStress_MixedWorkload(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			path := fmt.Sprintf("mixed_del_%d.bin", idx)
-			if err := env.fm.DeleteFile(path); err != nil {
+			if err := env.fm.DeleteFile(t.Context(), path); err != nil {
 				errCh <- fmt.Errorf("delete %d: %w", idx, err)
 			}
 		}(i)
@@ -426,7 +426,7 @@ func TestStress_LargeFileStreaming(t *testing.T) {
 	path := "stress_large_streaming.bin"
 	fileName := "stress_large_streaming.bin"
 
-	sessionID, err := env.transferSvc.CreateUploadSession(path, fileName, totalSize, "stress_client", expectedHash)
+	sessionID, err := env.transferSvc.CreateUploadSession(t.Context(), path, fileName, totalSize, "stress_client", expectedHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
@@ -440,18 +440,18 @@ func TestStress_LargeFileStreaming(t *testing.T) {
 			end = totalSize
 		}
 		chunk := data[offset:end]
-		if err := env.transferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := env.transferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("UploadChunk at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := env.transferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.transferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
 	// Verify integrity.
-	got, err := env.storage.Read(path)
+	got, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestStress_MultipartUpload(t *testing.T) {
 	path := "stress_multipart.bin"
 	fileName := "stress_multipart.bin"
 
-	sessionID, _, err := env.transferSvc.CreateMultipartUpload(path, fileName, totalSize, "stress_client", expectedHash)
+	sessionID, _, err := env.transferSvc.CreateMultipartUpload(t.Context(), path, fileName, totalSize, "stress_client", expectedHash)
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload failed: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestStress_MultipartUpload(t *testing.T) {
 				end = totalSize
 			}
 			chunk := data[offset:end]
-			if err := env.transferSvc.UploadPartData(sessionID, partNum+1, offset, chunk); err != nil {
+			if err := env.transferSvc.UploadPartData(t.Context(), sessionID, partNum+1, offset, chunk); err != nil {
 				errCh <- fmt.Errorf("part %d: %w", partNum+1, err)
 			}
 		}(i)
@@ -514,12 +514,12 @@ func TestStress_MultipartUpload(t *testing.T) {
 		t.Errorf("multipart upload error: %v", err)
 	}
 
-	if err := env.transferSvc.CompleteMultipartUpload(sessionID); err != nil {
+	if err := env.transferSvc.CompleteMultipartUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteMultipartUpload failed: %v", err)
 	}
 
 	// Verify integrity.
-	got, err := env.storage.Read(path)
+	got, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestStress_SessionCleanup(t *testing.T) {
 	sessionIDs := make([]string, totalSessions)
 	for i := 0; i < totalSessions; i++ {
 		path := fmt.Sprintf("cleanup_%d.bin", i)
-		sessionID, err := env.transferSvc.CreateUploadSession(path, path, 1024, "cleanup_client", "")
+		sessionID, err := env.transferSvc.CreateUploadSession(t.Context(), path, path, 1024, "cleanup_client", "")
 		if err != nil {
 			t.Fatalf("CreateUploadSession %d failed: %v", i, err)
 		}
@@ -554,7 +554,7 @@ func TestStress_SessionCleanup(t *testing.T) {
 	// Mark the first `expiredCount` sessions as 2 hours old.
 	oldTimestamp := time.Now().Add(-2 * time.Hour).UTC().Format("2006-01-02T15:04:05Z")
 	for i := 0; i < expiredCount; i++ {
-		sess, err := env.transferSvc.GetUploadSession(sessionIDs[i])
+		sess, err := env.transferSvc.GetUploadSession(t.Context(), sessionIDs[i])
 		if err != nil {
 			t.Fatalf("GetUploadSession %d failed: %v", i, err)
 		}
@@ -562,18 +562,18 @@ func TestStress_SessionCleanup(t *testing.T) {
 	}
 
 	// Run cleanup with a 1-hour max age window.
-	env.transferSvc.CleanupExpiredSessions(3600)
+	env.transferSvc.CleanupExpiredSessions(t.Context(), 3600)
 
 	// Expired sessions should have been removed.
 	for i := 0; i < expiredCount; i++ {
-		if _, err := env.transferSvc.GetUploadSession(sessionIDs[i]); err == nil {
+		if _, err := env.transferSvc.GetUploadSession(t.Context(), sessionIDs[i]); err == nil {
 			t.Errorf("expired session %d should have been cleaned up", i)
 		}
 	}
 
 	// Recent sessions should still be present.
 	for i := expiredCount; i < totalSessions; i++ {
-		if _, err := env.transferSvc.GetUploadSession(sessionIDs[i]); err != nil {
+		if _, err := env.transferSvc.GetUploadSession(t.Context(), sessionIDs[i]); err != nil {
 			t.Errorf("recent session %d should still exist: %v", i, err)
 		}
 	}

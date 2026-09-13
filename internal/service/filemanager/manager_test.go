@@ -38,7 +38,7 @@ func TestUploadFile(t *testing.T) {
 
 	path := "test.txt"
 	data := []byte("hello world")
-	meta, err := fm.UploadFile(path, data)
+	meta, err := fm.UploadFile(t.Context(), path, data)
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
@@ -72,13 +72,13 @@ func TestUploadFile_Overwrite(t *testing.T) {
 
 	path := "overwrite.txt"
 	original := []byte("original content")
-	meta1, err := fm.UploadFile(path, original)
+	meta1, err := fm.UploadFile(t.Context(), path, original)
 	if err != nil {
 		t.Fatalf("first UploadFile failed: %v", err)
 	}
 
 	updated := []byte("updated content with more bytes")
-	meta2, err := fm.UploadFile(path, updated)
+	meta2, err := fm.UploadFile(t.Context(), path, updated)
 	if err != nil {
 		t.Fatalf("overwrite UploadFile failed: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestUploadFile_Overwrite(t *testing.T) {
 		t.Errorf("meta2.Hash = %q, want %q", meta2.Hash, expectedHash(updated))
 	}
 
-	got, err := fm.DownloadFile(path)
+	got, err := fm.DownloadFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("DownloadFile after overwrite failed: %v", err)
 	}
@@ -108,11 +108,11 @@ func TestDownloadFile(t *testing.T) {
 
 	path := "download.txt"
 	data := []byte("download me please")
-	if _, err := fm.UploadFile(path, data); err != nil {
+	if _, err := fm.UploadFile(t.Context(), path, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	got, err := fm.DownloadFile(path)
+	got, err := fm.DownloadFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("DownloadFile failed: %v", err)
 	}
@@ -127,11 +127,11 @@ func TestDownloadFileAt(t *testing.T) {
 
 	path := "range.txt"
 	data := []byte("Hello, World!")
-	if _, err := fm.UploadFile(path, data); err != nil {
+	if _, err := fm.UploadFile(t.Context(), path, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	got, err := fm.DownloadFileAt(path, 5, 7)
+	got, err := fm.DownloadFileAt(t.Context(), path, 5, 7)
 	if err != nil {
 		t.Fatalf("DownloadFileAt failed: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestDownloadFileAt(t *testing.T) {
 	}
 
 	// read from start
-	gotStart, err := fm.DownloadFileAt(path, 5, 0)
+	gotStart, err := fm.DownloadFileAt(t.Context(), path, 5, 0)
 	if err != nil {
 		t.Fatalf("DownloadFileAt start failed: %v", err)
 	}
@@ -155,16 +155,16 @@ func TestDownloadFileData(t *testing.T) {
 
 	path := "download-data.txt"
 	data := []byte("download me please")
-	if _, err := fm.UploadFile(path, data); err != nil {
+	if _, err := fm.UploadFile(t.Context(), path, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	meta, err := fm.GetFileMetadata(path)
+	meta, err := fm.GetFileMetadata(t.Context(), path)
 	if err != nil {
 		t.Fatalf("GetFileMetadata failed: %v", err)
 	}
 
-	got, err := fm.DownloadFileData(meta)
+	got, err := fm.DownloadFileData(t.Context(), meta)
 	if err != nil {
 		t.Fatalf("DownloadFileData failed: %v", err)
 	}
@@ -179,16 +179,16 @@ func TestDownloadFileDataAt(t *testing.T) {
 
 	path := "range-data.txt"
 	data := []byte("Hello, World!")
-	if _, err := fm.UploadFile(path, data); err != nil {
+	if _, err := fm.UploadFile(t.Context(), path, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	meta, err := fm.GetFileMetadata(path)
+	meta, err := fm.GetFileMetadata(t.Context(), path)
 	if err != nil {
 		t.Fatalf("GetFileMetadata failed: %v", err)
 	}
 
-	got, err := fm.DownloadFileDataAt(meta, 5, 7)
+	got, err := fm.DownloadFileDataAt(t.Context(), meta, 5, 7)
 	if err != nil {
 		t.Fatalf("DownloadFileDataAt failed: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestDownloadFileDataAt(t *testing.T) {
 		t.Errorf("DownloadFileDataAt(5,7) = %q, want %q", string(got), "World")
 	}
 
-	gotStart, err := fm.DownloadFileDataAt(meta, 5, 0)
+	gotStart, err := fm.DownloadFileDataAt(t.Context(), meta, 5, 0)
 	if err != nil {
 		t.Fatalf("DownloadFileDataAt start failed: %v", err)
 	}
@@ -209,10 +209,10 @@ func TestDownloadFileData_NilMeta(t *testing.T) {
 	fm, cleanup := setupFileManager(t)
 	defer cleanup()
 
-	if _, err := fm.DownloadFileData(nil); err == nil {
+	if _, err := fm.DownloadFileData(t.Context(), nil); err == nil {
 		t.Fatal("DownloadFileData(nil) expected error, got nil")
 	}
-	if _, err := fm.DownloadFileDataAt(nil, 5, 0); err == nil {
+	if _, err := fm.DownloadFileDataAt(t.Context(), nil, 5, 0); err == nil {
 		t.Fatal("DownloadFileDataAt(nil,...) expected error, got nil")
 	}
 }
@@ -221,7 +221,7 @@ func TestDownloadFile_NotFound(t *testing.T) {
 	fm, cleanup := setupFileManager(t)
 	defer cleanup()
 
-	_, err := fm.DownloadFile("does/not/exist.txt")
+	_, err := fm.DownloadFile(t.Context(), "does/not/exist.txt")
 	if err == nil {
 		t.Fatal("DownloadFile expected error for missing file, got nil")
 	}
@@ -236,15 +236,15 @@ func TestDeleteFile(t *testing.T) {
 
 	path := "delete.txt"
 	data := []byte("to be deleted")
-	if _, err := fm.UploadFile(path, data); err != nil {
+	if _, err := fm.UploadFile(t.Context(), path, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	if err := fm.DeleteFile(path); err != nil {
+	if err := fm.DeleteFile(t.Context(), path); err != nil {
 		t.Fatalf("DeleteFile failed: %v", err)
 	}
 
-	if _, err := fm.DownloadFile(path); err == nil {
+	if _, err := fm.DownloadFile(t.Context(), path); err == nil {
 		t.Error("DownloadFile should fail after delete, got nil")
 	}
 }
@@ -253,7 +253,7 @@ func TestDeleteFile_NotFound(t *testing.T) {
 	fm, cleanup := setupFileManager(t)
 	defer cleanup()
 
-	if err := fm.DeleteFile("no/such/file.txt"); err == nil {
+	if err := fm.DeleteFile(t.Context(), "no/such/file.txt"); err == nil {
 		t.Fatal("DeleteFile expected error for missing file, got nil")
 	}
 }
@@ -264,21 +264,21 @@ func TestRenameFile(t *testing.T) {
 
 	oldPath := "rename_me.txt"
 	data := []byte("rename content")
-	if _, err := fm.UploadFile(oldPath, data); err != nil {
+	if _, err := fm.UploadFile(t.Context(), oldPath, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	if err := fm.RenameFile(oldPath, "renamed.txt"); err != nil {
+	if err := fm.RenameFile(t.Context(), oldPath, "renamed.txt"); err != nil {
 		t.Fatalf("RenameFile failed: %v", err)
 	}
 
 	// old path no longer exists
-	if _, err := fm.GetFileMetadata(oldPath); err == nil {
+	if _, err := fm.GetFileMetadata(t.Context(), oldPath); err == nil {
 		t.Error("GetFileMetadata for old path should fail after rename")
 	}
 
 	// new path exists with correct content
-	got, err := fm.DownloadFile("renamed.txt")
+	got, err := fm.DownloadFile(t.Context(), "renamed.txt")
 	if err != nil {
 		t.Fatalf("DownloadFile for renamed path failed: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestRenameFile(t *testing.T) {
 		t.Errorf("content after rename = %q, want %q", string(got), string(data))
 	}
 
-	meta, err := fm.GetFileMetadata("renamed.txt")
+	meta, err := fm.GetFileMetadata(t.Context(), "renamed.txt")
 	if err != nil {
 		t.Fatalf("GetFileMetadata for renamed path failed: %v", err)
 	}
@@ -301,11 +301,11 @@ func TestGetFileMetadata(t *testing.T) {
 
 	path := "meta.txt"
 	data := []byte("metadata test")
-	if _, err := fm.UploadFile(path, data); err != nil {
+	if _, err := fm.UploadFile(t.Context(), path, data); err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	meta, err := fm.GetFileMetadata(path)
+	meta, err := fm.GetFileMetadata(t.Context(), path)
 	if err != nil {
 		t.Fatalf("GetFileMetadata failed: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestFileManager_ConcurrentUpload(t *testing.T) {
 			defer wg.Done()
 			path := fmt.Sprintf("concurrent/file%d.txt", idx)
 			data := []byte(fmt.Sprintf("content-%d", idx))
-			_, errs[idx] = fm.UploadFile(path, data)
+			_, errs[idx] = fm.UploadFile(t.Context(), path, data)
 		}(i)
 	}
 	wg.Wait()
@@ -353,7 +353,7 @@ func TestFileManager_ConcurrentUpload(t *testing.T) {
 	for i := 0; i < n; i++ {
 		path := fmt.Sprintf("concurrent/file%d.txt", i)
 		want := fmt.Sprintf("content-%d", i)
-		got, err := fm.DownloadFile(path)
+		got, err := fm.DownloadFile(t.Context(), path)
 		if err != nil {
 			t.Fatalf("DownloadFile %s failed: %v", path, err)
 		}

@@ -46,7 +46,7 @@ func insertFile(t *testing.T, db *database.DB, path, name string, size int64, cr
 		UpdatedAt:       createdAt,
 		IsDeleted:       false,
 	}
-	if err := database.NewFileMetadataService(db).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("failed to create file metadata %q: %v", path, err)
 	}
 }
@@ -62,7 +62,7 @@ func insertDir(t *testing.T, db *database.DB, path, name, createdAt string) {
 		UpdatedAt: createdAt,
 		IsDeleted: false,
 	}
-	if err := database.NewDirectoryMetadataService(db).Create(meta); err != nil {
+	if err := database.NewDirectoryMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("failed to create directory metadata %q: %v", path, err)
 	}
 }
@@ -80,7 +80,7 @@ func TestListFiles_Empty(t *testing.T) {
 	db := setupTestDB(t)
 	svc := NewFileListServiceFromDB(db)
 
-	result, err := svc.ListFilesWithTotal("", false, 1, 10, "name", "asc")
+	result, err := svc.ListFilesWithTotal(t.Context(), "", false, 1, 10, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles failed on empty database: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestListFiles_WithFiles(t *testing.T) {
 	insertFile(t, db, "beta.txt", "beta.txt", 200, ts)
 	insertDir(t, db, "subdir", "subdir", ts)
 
-	result, err := svc.ListFilesWithTotal("", false, 1, 50, "name", "asc")
+	result, err := svc.ListFilesWithTotal(t.Context(), "", false, 1, 50, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles failed: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 
 	// Page 1 with pageSize=3 → 3 items, total 10.
-	page1, err := svc.ListFilesWithTotal("", false, 1, 3, "name", "asc")
+	page1, err := svc.ListFilesWithTotal(t.Context(), "", false, 1, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 1 failed: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 
 	// Page 4 with pageSize=3 → only 1 item (10 - 3*3 = 1).
-	page4, err := svc.ListFilesWithTotal("", false, 4, 3, "name", "asc")
+	page4, err := svc.ListFilesWithTotal(t.Context(), "", false, 4, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 4 failed: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 
 	// Page 5 with pageSize=3 → 0 items (already returned all 10).
-	page5, err := svc.ListFiles("", false, 5, 3, "name", "asc")
+	page5, err := svc.ListFiles(t.Context(), "", false, 5, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 5 failed: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 
 	// Pages must not overlap: page1 item names and page2 item names are disjoint.
-	page2, err := svc.ListFiles("", false, 2, 3, "name", "asc")
+	page2, err := svc.ListFiles(t.Context(), "", false, 2, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 2 failed: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 
 	// page < 1 should be normalized to page 1.
-	pageZero, err := svc.ListFiles("", false, 0, 3, "name", "asc")
+	pageZero, err := svc.ListFiles(t.Context(), "", false, 0, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 0 failed: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestListFiles_Pagination(t *testing.T) {
 	}
 
 	// pageSize < 1 should be normalized to 20.
-	pageNoSize, err := svc.ListFiles("", false, 1, 0, "name", "asc")
+	pageNoSize, err := svc.ListFiles(t.Context(), "", false, 1, 0, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles pageSize 0 failed: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestListFiles_SortBy(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := svc.ListFilesWithTotal("", false, 1, 10, tc.sortBy, tc.sortOrder)
+			result, err := svc.ListFilesWithTotal(t.Context(), "", false, 1, 10, tc.sortBy, tc.sortOrder)
 			if err != nil {
 				t.Fatalf("ListFiles sortBy=%s order=%s failed: %v", tc.sortBy, tc.sortOrder, err)
 			}
@@ -314,7 +314,7 @@ func TestListFiles_Recursive(t *testing.T) {
 	insertFile(t, db, "a/sub/nested/file3.txt", "file3.txt", 30, ts)
 
 	// Non-recursive listing of "a": only direct children of "a".
-	nonRec, err := svc.ListFilesWithTotal("a", false, 1, 50, "name", "asc")
+	nonRec, err := svc.ListFilesWithTotal(t.Context(), "a", false, 1, 50, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles non-recursive failed: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestListFiles_Recursive(t *testing.T) {
 	}
 
 	// Recursive listing of "a": all descendants under "a/".
-	rec, err := svc.ListFilesWithTotal("a", true, 1, 50, "name", "asc")
+	rec, err := svc.ListFilesWithTotal(t.Context(), "a", true, 1, 50, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles recursive failed: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestListFiles_DefaultDoesNotComputeTotal(t *testing.T) {
 	}
 
 	// Page 1, pageSize=3 → 3 items, HasMore=true (5 total, only 3 returned).
-	page1, err := svc.ListFiles("", false, 1, 3, "name", "asc")
+	page1, err := svc.ListFiles(t.Context(), "", false, 1, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 1 failed: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestListFiles_DefaultDoesNotComputeTotal(t *testing.T) {
 	}
 
 	// Page 2, pageSize=3 → 2 items, HasMore=false (last page).
-	page2, err := svc.ListFiles("", false, 2, 3, "name", "asc")
+	page2, err := svc.ListFiles(t.Context(), "", false, 2, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 2 failed: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestListFiles_DefaultDoesNotComputeTotal(t *testing.T) {
 	}
 
 	// Page 3, pageSize=3 → 0 items, HasMore=false (beyond end).
-	page3, err := svc.ListFiles("", false, 3, 3, "name", "asc")
+	page3, err := svc.ListFiles(t.Context(), "", false, 3, 3, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 3 failed: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestListFilesWithTotal_ComputesExactCount(t *testing.T) {
 	}
 
 	// Page 1, pageSize=2 → 2 items, Total=4, HasMore=true.
-	page1, err := svc.ListFilesWithTotal("", false, 1, 2, "name", "asc")
+	page1, err := svc.ListFilesWithTotal(t.Context(), "", false, 1, 2, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFilesWithTotal page 1 failed: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestListFilesWithTotal_ComputesExactCount(t *testing.T) {
 	}
 
 	// Page 2, pageSize=2 → 2 items, Total=4, HasMore=false (last page).
-	page2, err := svc.ListFilesWithTotal("", false, 2, 2, "name", "asc")
+	page2, err := svc.ListFilesWithTotal(t.Context(), "", false, 2, 2, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFilesWithTotal page 2 failed: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestListFiles_EmptyHasMoreFalse(t *testing.T) {
 	db := setupTestDB(t)
 	svc := NewFileListServiceFromDB(db)
 
-	result, err := svc.ListFiles("", false, 1, 10, "name", "asc")
+	result, err := svc.ListFiles(t.Context(), "", false, 1, 10, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles on empty database failed: %v", err)
 	}

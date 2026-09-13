@@ -137,7 +137,7 @@ func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
 
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		if !s.authSvc.ValidateApiKey("") {
+		if !s.authSvc.ValidateApiKey(ctx, "") {
 			return ctx, status.Error(codes.Unauthenticated, "authentication required")
 		}
 		return ctx, nil
@@ -145,7 +145,7 @@ func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
 
 	apiKeys := md.Get("x-api-key")
 	if len(apiKeys) > 0 && apiKeys[0] != "" {
-		if s.authSvc.ValidateApiKey(apiKeys[0]) {
+		if s.authSvc.ValidateApiKey(ctx, apiKeys[0]) {
 			return s.withUser(ctx, apiKeys[0]), nil
 		}
 		return ctx, status.Error(codes.Unauthenticated, "invalid API key")
@@ -155,7 +155,7 @@ func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
 	for _, ah := range authHeaders {
 		if strings.HasPrefix(ah, "Bearer ") {
 			token := strings.TrimPrefix(ah, "Bearer ")
-			if s.authSvc.ValidateApiKey(token) {
+			if s.authSvc.ValidateApiKey(ctx, token) {
 				return s.withUser(ctx, token), nil
 			}
 			// After Bearer token API key check fails, try JWT
@@ -171,14 +171,14 @@ func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
 		}
 		if strings.HasPrefix(ah, "Api-Key ") {
 			key := strings.TrimPrefix(ah, "Api-Key ")
-			if s.authSvc.ValidateApiKey(key) {
+			if s.authSvc.ValidateApiKey(ctx, key) {
 				return s.withUser(ctx, key), nil
 			}
 			return ctx, status.Error(codes.Unauthenticated, "invalid API key")
 		}
 	}
 
-	if !s.authSvc.ValidateApiKey("") {
+	if !s.authSvc.ValidateApiKey(ctx, "") {
 		return ctx, status.Error(codes.Unauthenticated, "authentication required")
 	}
 	return ctx, nil
@@ -191,7 +191,7 @@ func (s *Server) withUser(ctx context.Context, apiKey string) context.Context {
 	if s.authSvc == nil {
 		return ctx
 	}
-	if user := s.authSvc.GetUserByApiKey(apiKey); user != nil {
+	if user := s.authSvc.GetUserByApiKey(ctx, apiKey); user != nil {
 		return context.WithValue(ctx, userContextKey, user)
 	}
 	return ctx
@@ -207,7 +207,7 @@ func (s *Server) authorize(ctx context.Context, method string) error {
 		return nil
 	}
 	// Auth disabled: allow all.
-	if s.authSvc.ValidateApiKey("") {
+	if s.authSvc.ValidateApiKey(ctx, "") {
 		return nil
 	}
 
@@ -326,27 +326,27 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 	}
 
 	// 多分块上传：走会话机制（断点续传大文件场景），需回放已消费的首块和探测消息
-	sessionID, err := s.transferSvc.CreateUploadSession(meta.Path, meta.Name, meta.TotalSize, "", meta.Hash)
+	sessionID, err := s.transferSvc.CreateUploadSession(stream.Context(), meta.Path, meta.Name, meta.TotalSize, "", meta.Hash)
 	if err != nil {
 		return fmt.Errorf("failed to create upload session: %w", err)
 	}
 
 	// 回放第一个分块
-	if err := s.transferSvc.UploadChunk(sessionID, firstChunk.Data, firstChunk.Offset); err != nil {
-		s.transferSvc.AbortUpload(sessionID)
+	if err := s.transferSvc.UploadChunk(stream.Context(), sessionID, firstChunk.Data, firstChunk.Offset); err != nil {
+		s.transferSvc.AbortUpload(stream.Context(), sessionID)
 		return fmt.Errorf("failed to upload chunk: %w", err)
 	}
 
 	// 回放探测时读取的消息（若有且为分块）
 	if nextErr == nil {
 		if rc, ok := nextReq.Data.(*pb.UploadRequest_Chunk); ok {
-			if err := s.transferSvc.UploadChunk(sessionID, rc.Chunk.Data, rc.Chunk.Offset); err != nil {
-				s.transferSvc.AbortUpload(sessionID)
+			if err := s.transferSvc.UploadChunk(stream.Context(), sessionID, rc.Chunk.Data, rc.Chunk.Offset); err != nil {
+				s.transferSvc.AbortUpload(stream.Context(), sessionID)
 				return fmt.Errorf("failed to upload chunk: %w", err)
 			}
 		}
 	} else if nextErr != io.EOF {
-		s.transferSvc.AbortUpload(sessionID)
+		s.transferSvc.AbortUpload(stream.Context(), sessionID)
 		return fmt.Errorf("failed to receive upload request: %w", nextErr)
 	}
 
@@ -357,27 +357,27 @@ func (s *Server) UploadFile(stream grpc.ClientStreamingServer[pb.UploadRequest, 
 			break
 		}
 		if err != nil {
-			s.transferSvc.AbortUpload(sessionID)
+			s.transferSvc.AbortUpload(stream.Context(), sessionID)
 			return fmt.Errorf("failed to receive upload request: %w", err)
 		}
 		cm, ok := req.Data.(*pb.UploadRequest_Chunk)
 		if !ok {
-			s.transferSvc.AbortUpload(sessionID)
+			s.transferSvc.AbortUpload(stream.Context(), sessionID)
 			return fmt.Errorf("expected chunk in multi-chunk upload")
 		}
-		if err := s.transferSvc.UploadChunk(sessionID, cm.Chunk.Data, cm.Chunk.Offset); err != nil {
-			s.transferSvc.AbortUpload(sessionID)
+		if err := s.transferSvc.UploadChunk(stream.Context(), sessionID, cm.Chunk.Data, cm.Chunk.Offset); err != nil {
+			s.transferSvc.AbortUpload(stream.Context(), sessionID)
 			return fmt.Errorf("failed to upload chunk: %w", err)
 		}
 	}
 
-	result, err := s.transferSvc.CompleteUpload(sessionID)
+	result, err := s.transferSvc.CompleteUpload(stream.Context(), sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to complete upload: %w", err)
 	}
 	_ = result // hash verification status is surfaced via HTTP API; gRPC response already carries file metadata
 
-	fileMeta, err := s.fm.GetFileMetadata(meta.Path)
+	fileMeta, err := s.fm.GetFileMetadata(stream.Context(), meta.Path)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata after upload: %w", err)
 	}
@@ -412,7 +412,7 @@ func (s *Server) uploadFileFastPath(stream grpc.ClientStreamingServer[pb.UploadR
 			return status.Error(codes.InvalidArgument, fmt.Sprintf("hash mismatch: expected %s, got %s", meta.Hash, computed))
 		}
 	}
-	fileMeta, err := s.fm.UploadFile(meta.Path, data)
+	fileMeta, err := s.fm.UploadFile(stream.Context(), meta.Path, data)
 	if err != nil {
 		return fmt.Errorf("failed to upload file: %w", err)
 	}
@@ -428,10 +428,11 @@ func (s *Server) uploadFileFastPath(stream grpc.ClientStreamingServer[pb.UploadR
 }
 
 func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreamingServer[pb.DownloadResponse]) error {
+	ctx := stream.Context()
 	if !utils.IsValidFilePath(req.Path) {
 		return status.Error(codes.InvalidArgument, "invalid file path")
 	}
-	meta, err := s.fm.GetFileMetadata(req.Path)
+	meta, err := s.fm.GetFileMetadata(ctx, req.Path)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata: %w", err)
 	}
@@ -453,7 +454,7 @@ func (s *Server) DownloadFile(req *pb.DownloadRequest, stream grpc.ServerStreami
 	}
 
 	for offset < meta.Size {
-		data, err := s.fm.DownloadFileDataAt(meta, chunkSize, offset)
+		data, err := s.fm.DownloadFileDataAt(stream.Context(), meta, chunkSize, offset)
 		if err != nil {
 			return fmt.Errorf("failed to read file chunk: %w", err)
 		}
@@ -487,7 +488,7 @@ func (s *Server) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (*pb.L
 	if maxPageSize := s.config.MaxPageSize; maxPageSize > 0 && pageSize > maxPageSize {
 		pageSize = maxPageSize
 	}
-	result, err := s.flSvc.ListFilesWithTotal(req.Path, req.Recursive, page, pageSize, req.SortBy, req.SortOrder)
+	result, err := s.flSvc.ListFilesWithTotal(ctx, req.Path, req.Recursive, page, pageSize, req.SortBy, req.SortOrder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
@@ -527,7 +528,7 @@ func (s *Server) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*pb
 	if !utils.IsValidFilePath(req.Path) {
 		return nil, status.Error(codes.InvalidArgument, "invalid file path")
 	}
-	if err := s.fm.DeleteFile(req.Path); err != nil {
+	if err := s.fm.DeleteFile(ctx, req.Path); err != nil {
 		return nil, internalError("DeleteFile", err)
 	}
 	return &pb.DeleteFileResponse{Success: true, Message: "File deleted successfully"}, nil
@@ -546,7 +547,7 @@ func (s *Server) RenameFile(ctx context.Context, req *pb.RenameFileRequest) (*pb
 	if !utils.IsValidFileName(req.NewName) {
 		return nil, status.Error(codes.InvalidArgument, "invalid new name")
 	}
-	if err := s.fm.RenameFile(req.Path, req.NewName); err != nil {
+	if err := s.fm.RenameFile(ctx, req.Path, req.NewName); err != nil {
 		return nil, internalError("RenameFile", err)
 	}
 	return &pb.RenameFileResponse{Success: true, Message: "File renamed successfully"}, nil
@@ -559,7 +560,7 @@ func (s *Server) CreateDirectory(ctx context.Context, req *pb.CreateDirectoryReq
 	if !utils.IsValidFilePath(req.Path) {
 		return nil, status.Error(codes.InvalidArgument, "invalid directory path")
 	}
-	if err := s.dirSvc.CreateDirectory(req.Path); err != nil {
+	if err := s.dirSvc.CreateDirectory(ctx, req.Path); err != nil {
 		return nil, internalError("CreateDirectory", err)
 	}
 	return &pb.CreateDirectoryResponse{Success: true, Message: "Directory created successfully"}, nil
@@ -570,7 +571,7 @@ func (s *Server) GetMetadata(ctx context.Context, req *pb.GetMetadataRequest) (*
 		return nil, status.Error(codes.InvalidArgument, "invalid path")
 	}
 	// Try to get file metadata first
-	fileMeta, err := s.fm.GetFileMetadata(req.Path)
+	fileMeta, err := s.fm.GetFileMetadata(ctx, req.Path)
 	if err == nil && fileMeta != nil {
 		createdAt, _ := parseTimestamp(fileMeta.CreatedAt)
 		updatedAt, _ := parseTimestamp(fileMeta.UpdatedAt)
@@ -588,7 +589,7 @@ func (s *Server) GetMetadata(ctx context.Context, req *pb.GetMetadataRequest) (*
 	}
 
 	// Try directory metadata
-	dirMeta, err := s.dirSvc.GetDirectoryMetadata(req.Path)
+	dirMeta, err := s.dirSvc.GetDirectoryMetadata(ctx, req.Path)
 	if err == nil && dirMeta != nil {
 		createdAt, _ := parseTimestamp(dirMeta.CreatedAt)
 		updatedAt, _ := parseTimestamp(dirMeta.UpdatedAt)
@@ -615,7 +616,7 @@ func (s *Server) DeleteDirectory(ctx context.Context, req *pb.DeleteDirectoryReq
 	if !utils.IsValidFilePath(req.Path) {
 		return nil, status.Error(codes.InvalidArgument, "invalid directory path")
 	}
-	if err := s.dirSvc.DeleteDirectory(req.Path, req.Recursive); err != nil {
+	if err := s.dirSvc.DeleteDirectory(ctx, req.Path, req.Recursive); err != nil {
 		return nil, internalError("DeleteDirectory", err)
 	}
 	return &pb.DeleteDirectoryResponse{Success: true, Message: "Directory deleted successfully"}, nil
@@ -634,7 +635,7 @@ func (s *Server) RenameDirectory(ctx context.Context, req *pb.RenameDirectoryReq
 	if !utils.IsValidFileName(req.NewName) {
 		return nil, status.Error(codes.InvalidArgument, "invalid new name")
 	}
-	if err := s.dirSvc.RenameDirectory(req.Path, req.NewName); err != nil {
+	if err := s.dirSvc.RenameDirectory(ctx, req.Path, req.NewName); err != nil {
 		return nil, internalError("RenameDirectory", err)
 	}
 	return &pb.RenameDirectoryResponse{Success: true, Message: "Directory renamed successfully"}, nil

@@ -1,6 +1,7 @@
 package directory
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -52,21 +53,21 @@ func (f *fakeDirectoryStore) putFile(path string) {
 
 // --- metadataStore ---
 
-func (f *fakeDirectoryStore) Create(meta *database.DirectoryMetadata) error {
+func (f *fakeDirectoryStore) Create(_ context.Context, meta *database.DirectoryMetadata) error {
 	f.createCalls++
 	clone := *meta
 	f.dirs[meta.Path] = &clone
 	return nil
 }
 
-func (f *fakeDirectoryStore) GetByPath(path string) (*database.DirectoryMetadata, error) {
+func (f *fakeDirectoryStore) GetByPath(_ context.Context, path string) (*database.DirectoryMetadata, error) {
 	if meta, ok := f.dirs[path]; ok {
 		return meta, nil
 	}
 	return nil, nil
 }
 
-func (f *fakeDirectoryStore) Remove(id string) error {
+func (f *fakeDirectoryStore) Remove(_ context.Context, id string) error {
 	for path, meta := range f.dirs {
 		if meta.ID == id {
 			delete(f.dirs, path)
@@ -77,14 +78,14 @@ func (f *fakeDirectoryStore) Remove(id string) error {
 	return sql.ErrNoRows
 }
 
-func (f *fakeDirectoryStore) Exists(path string) (bool, error) {
+func (f *fakeDirectoryStore) Exists(_ context.Context, path string) (bool, error) {
 	_, ok := f.dirs[path]
 	return ok, nil
 }
 
 // --- treeStore ---
 
-func (f *fakeDirectoryStore) CountChildren(path string) (int, int, error) {
+func (f *fakeDirectoryStore) CountChildren(_ context.Context, path string) (int, int, error) {
 	prefix := path + "/"
 	files, dirs := 0, 0
 	for p := range f.files {
@@ -100,7 +101,7 @@ func (f *fakeDirectoryStore) CountChildren(path string) (int, int, error) {
 	return files, dirs, nil
 }
 
-func (f *fakeDirectoryStore) ListChildFiles(path string, limit int) ([]database.PathEntry, error) {
+func (f *fakeDirectoryStore) ListChildFiles(_ context.Context, path string, limit int) ([]database.PathEntry, error) {
 	entries := make([]database.PathEntry, 0, len(f.files))
 	for _, e := range f.files {
 		entries = append(entries, e)
@@ -108,7 +109,7 @@ func (f *fakeDirectoryStore) ListChildFiles(path string, limit int) ([]database.
 	return listFakeChildren(entries, path, limit), nil
 }
 
-func (f *fakeDirectoryStore) ListChildDirectories(path string, limit int) ([]database.PathEntry, error) {
+func (f *fakeDirectoryStore) ListChildDirectories(_ context.Context, path string, limit int) ([]database.PathEntry, error) {
 	entries := make([]database.PathEntry, 0, len(f.dirs))
 	for p, meta := range f.dirs {
 		entries = append(entries, database.PathEntry{ID: meta.ID, Path: p})
@@ -116,7 +117,7 @@ func (f *fakeDirectoryStore) ListChildDirectories(path string, limit int) ([]dat
 	return listFakeChildren(entries, path, limit), nil
 }
 
-func (f *fakeDirectoryStore) SoftDeleteFiles(_ string, entries []database.PathEntry) error {
+func (f *fakeDirectoryStore) SoftDeleteFiles(_ context.Context, _ string, entries []database.PathEntry) error {
 	f.softDeleteFileCalls = append(f.softDeleteFileCalls, len(entries))
 	for _, e := range entries {
 		delete(f.files, e.Path)
@@ -124,7 +125,7 @@ func (f *fakeDirectoryStore) SoftDeleteFiles(_ string, entries []database.PathEn
 	return nil
 }
 
-func (f *fakeDirectoryStore) SoftDeleteDirectories(_ string, entries []database.PathEntry) error {
+func (f *fakeDirectoryStore) SoftDeleteDirectories(_ context.Context, _ string, entries []database.PathEntry) error {
 	f.softDeleteDirCalls = append(f.softDeleteDirCalls, len(entries))
 	for _, e := range entries {
 		delete(f.dirs, e.Path)
@@ -132,7 +133,7 @@ func (f *fakeDirectoryStore) SoftDeleteDirectories(_ string, entries []database.
 	return nil
 }
 
-func (f *fakeDirectoryStore) RenameTree(_ string, files, dirs []database.PathUpdate, target database.PathUpdate) error {
+func (f *fakeDirectoryStore) RenameTree(_ context.Context, _ string, files, dirs []database.PathUpdate, target database.PathUpdate) error {
 	f.renames = append(f.renames, fakeRename{files: files, dirs: dirs, target: target})
 	f.moveFileUpdates(files)
 	f.moveDirUpdates(append(append([]database.PathUpdate{}, dirs...), target))
@@ -187,7 +188,7 @@ func TestDeleteDirectoryNonRecursiveRefusesNonEmptyWithoutDatabase(t *testing.T)
 	store.putFile("foo/a.txt")
 	dm := NewDirectoryManagerWithStores(store, store, nil, nil)
 
-	err := dm.DeleteDirectory("foo", false)
+	err := dm.DeleteDirectory(t.Context(), "foo", false)
 	if err == nil || !strings.Contains(err.Error(), "not empty") {
 		t.Fatalf("DeleteDirectory error = %v, want non-empty rejection", err)
 	}
@@ -204,13 +205,13 @@ func TestDeleteDirectoryNonRecursiveRemovesEmptyDirectoryWithoutDatabase(t *test
 	store.putDir("foo")
 	dm := NewDirectoryManagerWithStores(store, store, nil, nil)
 
-	if err := dm.DeleteDirectory("foo", false); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", false); err != nil {
 		t.Fatalf("DeleteDirectory: %v", err)
 	}
 	if store.removeCalls != 1 {
 		t.Errorf("Remove called %d times, want 1", store.removeCalls)
 	}
-	if exists, _ := store.Exists("foo"); exists {
+	if exists, _ := store.Exists(t.Context(), "foo"); exists {
 		t.Error("directory row should be gone after delete")
 	}
 }
@@ -230,7 +231,7 @@ func TestDeleteDirectoryRecursiveBatchesAndCleansStorageWithoutDatabase(t *testi
 	storageMock.storageType = "local"
 	dm := NewDirectoryManagerWithStores(store, store, storageMock, nil)
 
-	if err := dm.DeleteDirectory("foo", true); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", true); err != nil {
 		t.Fatalf("DeleteDirectory recursive: %v", err)
 	}
 
@@ -250,7 +251,7 @@ func TestDeleteDirectoryRecursiveBatchesAndCleansStorageWithoutDatabase(t *testi
 	if got, want := fmt.Sprint(store.softDeleteDirCalls), "[2]"; got != want {
 		t.Errorf("directory batches = %s, want %s", got, want)
 	}
-	if exists, _ := store.Exists("foo"); exists {
+	if exists, _ := store.Exists(t.Context(), "foo"); exists {
 		t.Error("directory row should be gone after recursive delete")
 	}
 	if store.removeCalls != 1 {
@@ -269,7 +270,7 @@ func TestRenameDirectoryRewritesSubtreeWithoutDatabase(t *testing.T) {
 	storageMock.storageType = "local"
 	dm := NewDirectoryManagerWithStores(store, store, storageMock, nil)
 
-	if err := dm.RenameDirectory("foo", "bar"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "bar"); err != nil {
 		t.Fatalf("RenameDirectory: %v", err)
 	}
 
@@ -306,7 +307,7 @@ func TestRenameDirectoryRewritesSubtreeWithoutDatabase(t *testing.T) {
 	if _, ok := store.dirs["bar/sub"]; !ok {
 		t.Error("expected child directory at bar/sub after rename")
 	}
-	if exists, _ := store.Exists("foo"); exists {
+	if exists, _ := store.Exists(t.Context(), "foo"); exists {
 		t.Error("old directory row should be gone after rename")
 	}
 
@@ -330,7 +331,7 @@ func TestRenameDirectoryRejectsObjectStorageWithoutDatabase(t *testing.T) {
 	storageMock := newMockObjectStorage() // StorageType() == "minio"
 	dm := NewDirectoryManagerWithStores(store, store, storageMock, nil)
 
-	err := dm.RenameDirectory("foo", "bar")
+	err := dm.RenameDirectory(t.Context(), "foo", "bar")
 	if err == nil || !strings.Contains(err.Error(), "not supported for object storage") {
 		t.Fatalf("RenameDirectory error = %v, want object-storage rejection", err)
 	}
@@ -348,7 +349,7 @@ func TestRenameDirectoryRefusesExistingTargetWithoutDatabase(t *testing.T) {
 	store.putDir("bar")
 	dm := NewDirectoryManagerWithStores(store, store, nil, nil)
 
-	err := dm.RenameDirectory("foo", "bar")
+	err := dm.RenameDirectory(t.Context(), "foo", "bar")
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("RenameDirectory error = %v, want target-exists rejection", err)
 	}

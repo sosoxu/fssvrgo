@@ -24,7 +24,7 @@ func TestAuditWriterFlushClosesVisibilityWindow(t *testing.T) {
 	w.Submit(newAuditEntry("flush-visibility"))
 
 	svc := NewAuditLogService(db)
-	before, err := svc.List("flush-visibility", "", 1, 10)
+	before, err := svc.List(t.Context(), "flush-visibility", "", 1, 10)
 	if err != nil {
 		t.Fatalf("List before flush: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestAuditWriterFlushClosesVisibilityWindow(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	after, err := svc.List("flush-visibility", "", 1, 10)
+	after, err := svc.List(t.Context(), "flush-visibility", "", 1, 10)
 	if err != nil {
 		t.Fatalf("List after flush: %v", err)
 	}

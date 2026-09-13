@@ -33,7 +33,7 @@ func TestReconciler_DetectsAndRepairsDrift(t *testing.T) {
 	ctx := context.Background()
 
 	// Consistent pair: object and metadata both present.
-	if err := store.Write("/keep.txt", []byte("keep")); err != nil {
+	if err := store.Write(t.Context(), "/keep.txt", []byte("keep")); err != nil {
 		t.Fatalf("write object: %v", err)
 	}
 	insertFileMeta(t, db, "id1", "/keep.txt")
@@ -42,7 +42,7 @@ func TestReconciler_DetectsAndRepairsDrift(t *testing.T) {
 	insertFileMeta(t, db, "id2", "/ghost.txt")
 
 	// Drift 2: object with no metadata row.
-	if err := store.Write("/orphan.bin", []byte("orphan")); err != nil {
+	if err := store.Write(t.Context(), "/orphan.bin", []byte("orphan")); err != nil {
 		t.Fatalf("write orphan object: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestReconciler_DetectsAndRepairsDrift(t *testing.T) {
 	}
 
 	// The orphan object is gone from storage...
-	if _, err := store.GetSize("/orphan.bin"); err == nil {
+	if _, err := store.GetSize(t.Context(), "/orphan.bin"); err == nil {
 		t.Fatalf("orphan object still present in storage")
 	}
 	// ...and the dangling metadata row is soft-deleted rather than hard-deleted.
@@ -107,7 +107,7 @@ func TestReconciler_ConsistentWhenNoDrift(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		path := fmt.Sprintf("/dir%d/file%d.txt", i, i)
-		if err := store.Write(path, []byte("data")); err != nil {
+		if err := store.Write(t.Context(), path, []byte("data")); err != nil {
 			t.Fatalf("write object %s: %v", path, err)
 		}
 		insertFileMeta(t, db, fmt.Sprintf("id%d", i), path)

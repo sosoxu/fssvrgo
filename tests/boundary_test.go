@@ -111,11 +111,11 @@ func testLocalStorage_EmptyFile(t *testing.T) {
 	env := setupBoundaryEnv(t)
 	path := "empty.txt"
 
-	if err := env.storage.Write(path, []byte{}); err != nil {
+	if err := env.storage.Write(t.Context(), path, []byte{}); err != nil {
 		t.Fatalf("Write empty file failed: %v", err)
 	}
 
-	data, err := env.storage.Read(path)
+	data, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read empty file failed: %v", err)
 	}
@@ -123,7 +123,7 @@ func testLocalStorage_EmptyFile(t *testing.T) {
 		t.Errorf("expected 0 bytes, got %d", len(data))
 	}
 
-	size, err := env.storage.GetSize(path)
+	size, err := env.storage.GetSize(t.Context(), path)
 	if err != nil {
 		t.Fatalf("GetSize failed: %v", err)
 	}
@@ -143,11 +143,11 @@ func testLocalStorage_LargeFile(t *testing.T) {
 		data[i] = pattern[i%len(pattern)]
 	}
 
-	if err := env.storage.Write(path, data); err != nil {
+	if err := env.storage.Write(t.Context(), path, data); err != nil {
 		t.Fatalf("Write large file failed: %v", err)
 	}
 
-	got, err := env.storage.Read(path)
+	got, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read large file failed: %v", err)
 	}
@@ -158,7 +158,7 @@ func testLocalStorage_LargeFile(t *testing.T) {
 		t.Errorf("data mismatch")
 	}
 
-	gotSize, err := env.storage.GetSize(path)
+	gotSize, err := env.storage.GetSize(t.Context(), path)
 	if err != nil {
 		t.Fatalf("GetSize failed: %v", err)
 	}
@@ -178,7 +178,7 @@ func testLocalStorage_SpecialCharacters(t *testing.T) {
 	}
 	for _, p := range cases {
 		content := []byte("content for " + p)
-		if err := env.storage.Write(p, content); err != nil {
+		if err := env.storage.Write(t.Context(), p, content); err != nil {
 			t.Errorf("Write %q failed: %v", p, err)
 			continue
 		}
@@ -186,7 +186,7 @@ func testLocalStorage_SpecialCharacters(t *testing.T) {
 			t.Errorf("Exists %q returned false", p)
 			continue
 		}
-		got, err := env.storage.Read(p)
+		got, err := env.storage.Read(t.Context(), p)
 		if err != nil {
 			t.Errorf("Read %q failed: %v", p, err)
 			continue
@@ -208,11 +208,11 @@ func testLocalStorage_DeepNestedPath(t *testing.T) {
 	deepPath := strings.Join(parts, "/") + "/file.txt"
 
 	content := []byte("deep nested content")
-	if err := env.storage.Write(deepPath, content); err != nil {
+	if err := env.storage.Write(t.Context(), deepPath, content); err != nil {
 		t.Fatalf("Write to deep path failed: %v", err)
 	}
 
-	got, err := env.storage.Read(deepPath)
+	got, err := env.storage.Read(t.Context(), deepPath)
 	if err != nil {
 		t.Fatalf("Read from deep path failed: %v", err)
 	}
@@ -229,7 +229,7 @@ func testLocalStorage_PathTraversal(t *testing.T) {
 		t.Errorf("ValidatePath should reject ../etc/passwd")
 	}
 
-	if err := env.storage.Write("../etc/passwd", []byte("malicious")); err == nil {
+	if err := env.storage.Write(t.Context(), "../etc/passwd", []byte("malicious")); err == nil {
 		t.Errorf("expected error for path traversal write, got nil")
 	}
 }
@@ -239,17 +239,17 @@ func testLocalStorage_OverwriteExisting(t *testing.T) {
 	path := "overwrite.txt"
 
 	// Write initial content
-	if err := env.storage.Write(path, []byte("initial")); err != nil {
+	if err := env.storage.Write(t.Context(), path, []byte("initial")); err != nil {
 		t.Fatalf("initial Write failed: %v", err)
 	}
 
 	// Overwrite with different (longer) content
 	newContent := []byte("overwritten content that is longer")
-	if err := env.storage.Write(path, newContent); err != nil {
+	if err := env.storage.Write(t.Context(), path, newContent); err != nil {
 		t.Fatalf("overwrite Write failed: %v", err)
 	}
 
-	got, err := env.storage.Read(path)
+	got, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -272,7 +272,7 @@ func testLocalStorage_WriteAt_Offset(t *testing.T) {
 		t.Fatalf("WriteAt at offset 3 failed: %v", err)
 	}
 
-	got, err := env.storage.Read(path)
+	got, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -285,7 +285,7 @@ func testLocalStorage_WriteAt_Offset(t *testing.T) {
 	if err := env.storage.WriteAt(path, []byte("END"), 15); err != nil {
 		t.Fatalf("WriteAt beyond size failed: %v", err)
 	}
-	got, err = env.storage.Read(path)
+	got, err = env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read after extend failed: %v", err)
 	}
@@ -303,11 +303,11 @@ func testLocalStorage_Rename(t *testing.T) {
 	newPath := "newname.txt"
 
 	content := []byte("rename me")
-	if err := env.storage.Write(oldPath, content); err != nil {
+	if err := env.storage.Write(t.Context(), oldPath, content); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	if err := env.storage.Rename(oldPath, newPath); err != nil {
+	if err := env.storage.Rename(t.Context(), oldPath, newPath); err != nil {
 		t.Fatalf("Rename failed: %v", err)
 	}
 
@@ -318,7 +318,7 @@ func testLocalStorage_Rename(t *testing.T) {
 		t.Errorf("new path should exist after rename")
 	}
 
-	got, err := env.storage.Read(newPath)
+	got, err := env.storage.Read(t.Context(), newPath)
 	if err != nil {
 		t.Fatalf("Read renamed file failed: %v", err)
 	}
@@ -330,7 +330,7 @@ func testLocalStorage_Rename(t *testing.T) {
 func testLocalStorage_RemoveNonExistent(t *testing.T) {
 	env := setupBoundaryEnv(t)
 
-	err := env.storage.Remove("does_not_exist.txt")
+	err := env.storage.Remove(t.Context(), "does_not_exist.txt")
 	if err == nil {
 		t.Errorf("expected error when removing non-existent file, got nil")
 	}
@@ -341,11 +341,11 @@ func testLocalStorage_GetSize(t *testing.T) {
 	path := "sized.txt"
 
 	content := []byte("exactly 13 bytes")
-	if err := env.storage.Write(path, content); err != nil {
+	if err := env.storage.Write(t.Context(), path, content); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	size, err := env.storage.GetSize(path)
+	size, err := env.storage.GetSize(t.Context(), path)
 	if err != nil {
 		t.Fatalf("GetSize failed: %v", err)
 	}
@@ -354,7 +354,7 @@ func testLocalStorage_GetSize(t *testing.T) {
 	}
 
 	// Non-existent file should return an error.
-	_, err = env.storage.GetSize("not_exist.txt")
+	_, err = env.storage.GetSize(t.Context(), "not_exist.txt")
 	if err == nil {
 		t.Errorf("expected error for GetSize on non-existent file")
 	}
@@ -366,7 +366,7 @@ func testFileManager_EmptyFileUpload(t *testing.T) {
 	env := setupBoundaryEnv(t)
 	path := "fm_empty.txt"
 
-	meta, err := env.fm.UploadFile(path, []byte{})
+	meta, err := env.fm.UploadFile(t.Context(), path, []byte{})
 	if err != nil {
 		t.Fatalf("UploadFile empty failed: %v", err)
 	}
@@ -374,7 +374,7 @@ func testFileManager_EmptyFileUpload(t *testing.T) {
 		t.Errorf("expected size 0, got %d", meta.Size)
 	}
 
-	data, err := env.fm.DownloadFile(path)
+	data, err := env.fm.DownloadFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("DownloadFile failed: %v", err)
 	}
@@ -394,7 +394,7 @@ func testFileManager_LargeFileUpload(t *testing.T) {
 		data[i] = pattern[i%len(pattern)]
 	}
 
-	meta, err := env.fm.UploadFile(path, data)
+	meta, err := env.fm.UploadFile(t.Context(), path, data)
 	if err != nil {
 		t.Fatalf("UploadFile large failed: %v", err)
 	}
@@ -406,7 +406,7 @@ func testFileManager_LargeFileUpload(t *testing.T) {
 		t.Errorf("expected hash %s, got %s", expectedHash, meta.Hash)
 	}
 
-	got, err := env.fm.DownloadFile(path)
+	got, err := env.fm.DownloadFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("DownloadFile failed: %v", err)
 	}
@@ -420,23 +420,23 @@ func testFileManager_DeleteAndReupload(t *testing.T) {
 	path := "delete_reupload.txt"
 
 	content1 := []byte("first version")
-	if _, err := env.fm.UploadFile(path, content1); err != nil {
+	if _, err := env.fm.UploadFile(t.Context(), path, content1); err != nil {
 		t.Fatalf("first UploadFile failed: %v", err)
 	}
-	if !env.fm.Exists(path) {
+	if !env.fm.Exists(t.Context(), path) {
 		t.Fatalf("file should exist after upload")
 	}
 
-	if err := env.fm.DeleteFile(path); err != nil {
+	if err := env.fm.DeleteFile(t.Context(), path); err != nil {
 		t.Fatalf("DeleteFile failed: %v", err)
 	}
-	if env.fm.Exists(path) {
+	if env.fm.Exists(t.Context(), path) {
 		t.Errorf("file should not exist after delete")
 	}
 
 	// Re-upload with different content
 	content2 := []byte("second version with different content")
-	meta, err := env.fm.UploadFile(path, content2)
+	meta, err := env.fm.UploadFile(t.Context(), path, content2)
 	if err != nil {
 		t.Fatalf("re-upload failed: %v", err)
 	}
@@ -444,7 +444,7 @@ func testFileManager_DeleteAndReupload(t *testing.T) {
 		t.Errorf("expected size %d, got %d", len(content2), meta.Size)
 	}
 
-	got, err := env.fm.DownloadFile(path)
+	got, err := env.fm.DownloadFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("DownloadFile after reupload failed: %v", err)
 	}
@@ -463,18 +463,18 @@ func testTransfer_EmptyFileUpload(t *testing.T) {
 	totalSize := int64(0)
 	hash := sha256Hex([]byte{})
 
-	sessionID, err := env.transferSvc.CreateUploadSession(path, fileName, totalSize, "client1", hash)
+	sessionID, err := env.transferSvc.CreateUploadSession(t.Context(), path, fileName, totalSize, "client1", hash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
 	// No chunks needed for an empty file (UploadedSize 0 == TotalSize 0).
-	if _, err := env.transferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.transferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
 	// Verify the file exists in storage and is empty.
-	got, err := env.storage.Read(path)
+	got, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -492,20 +492,20 @@ func testTransfer_SingleChunkUpload(t *testing.T) {
 	totalSize := int64(len(data))
 	hash := sha256Hex(data)
 
-	sessionID, err := env.transferSvc.CreateUploadSession(path, fileName, totalSize, "client1", hash)
+	sessionID, err := env.transferSvc.CreateUploadSession(t.Context(), path, fileName, totalSize, "client1", hash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	if err := env.transferSvc.UploadChunk(sessionID, data, 0); err != nil {
+	if err := env.transferSvc.UploadChunk(t.Context(), sessionID, data, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	if _, err := env.transferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.transferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
-	got, err := env.storage.Read(path)
+	got, err := env.storage.Read(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -524,16 +524,16 @@ func testTransfer_HashMismatch(t *testing.T) {
 	// Provide a wrong hash so CompleteUpload must fail.
 	wrongHash := sha256Hex([]byte("different content"))
 
-	sessionID, err := env.transferSvc.CreateUploadSession(path, fileName, totalSize, "client1", wrongHash)
+	sessionID, err := env.transferSvc.CreateUploadSession(t.Context(), path, fileName, totalSize, "client1", wrongHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	if err := env.transferSvc.UploadChunk(sessionID, data, 0); err != nil {
+	if err := env.transferSvc.UploadChunk(t.Context(), sessionID, data, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	_, err = env.transferSvc.CompleteUpload(sessionID)
+	_, err = env.transferSvc.CompleteUpload(t.Context(), sessionID)
 	if err == nil {
 		t.Fatalf("expected hash mismatch error, got nil")
 	}
@@ -555,14 +555,14 @@ func testTransfer_OffsetBeyondSize(t *testing.T) {
 	totalSize := int64(100)
 	hash := "" // no hash check needed for this test
 
-	sessionID, err := env.transferSvc.CreateUploadSession(path, fileName, totalSize, "client1", hash)
+	sessionID, err := env.transferSvc.CreateUploadSession(t.Context(), path, fileName, totalSize, "client1", hash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
 	// offset + data length exceeds total size → must be rejected.
 	data := make([]byte, 20)
-	err = env.transferSvc.UploadChunk(sessionID, data, 90)
+	err = env.transferSvc.UploadChunk(t.Context(), sessionID, data, 90)
 	if err == nil {
 		t.Errorf("expected error for offset beyond size, got nil")
 	}

@@ -2,16 +2,22 @@ package cache
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
 )
 
 // CacheAdapter defines the interface for cache backends.
+//
+// The context is the caller's request context: the in-memory backend accepts
+// it for signature uniformity (its operations are non-blocking), while the
+// Redis backend passes it to the client so a cancelled request aborts an
+// in-flight cache round-trip.
 type CacheAdapter interface {
-	Get(key string) (interface{}, bool)
-	Set(key string, value interface{})
-	Delete(key string)
-	Exists(key string) bool
+	Get(ctx context.Context, key string) (interface{}, bool)
+	Set(ctx context.Context, key string, value interface{})
+	Delete(ctx context.Context, key string)
+	Exists(ctx context.Context, key string) bool
 }
 
 // entry holds a cached value, its expiry, and its position in the LRU list.
@@ -30,12 +36,12 @@ type entry struct {
 // All operations are goroutine-safe via a single sync.RWMutex. The hot path
 // (Set eviction, Get promotion) is O(1) — no map scans.
 type Cache struct {
-	mu      sync.RWMutex
-	items   map[string]*entry
-	lru     *list.List // front = most recently used; back = least recently used
-	ttl     int64
-	maxSize int
-	stopCh  chan struct{}
+	mu       sync.RWMutex
+	items    map[string]*entry
+	lru      *list.List // front = most recently used; back = least recently used
+	ttl      int64
+	maxSize  int
+	stopCh   chan struct{}
 	stopOnce sync.Once
 }
 
@@ -72,7 +78,7 @@ func (c *Cache) Stop() {
 
 // Get returns the cached value for key, or (nil, false) if absent or expired.
 // A successful Get promotes the entry to the front of the LRU list.
-func (c *Cache) Get(key string) (interface{}, bool) {
+func (c *Cache) Get(_ context.Context, key string) (interface{}, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -95,7 +101,7 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 // Set stores value under key, evicting the least-recently-used entry if the
 // cache is at capacity. If key already exists, its value and expiry are updated
 // and it is promoted to the front of the LRU list. All of this is O(1).
-func (c *Cache) Set(key string, value interface{}) {
+func (c *Cache) Set(_ context.Context, key string, value interface{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -140,7 +146,7 @@ func (c *Cache) removeElement(e *entry) {
 	delete(c.items, e.key)
 }
 
-func (c *Cache) Delete(key string) {
+func (c *Cache) Delete(_ context.Context, key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.items[key]; ok {
@@ -192,6 +198,6 @@ func (c *Cache) Has(key string) bool {
 	return true
 }
 
-func (c *Cache) Exists(key string) bool {
+func (c *Cache) Exists(_ context.Context, key string) bool {
 	return c.Has(key)
 }

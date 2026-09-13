@@ -105,7 +105,7 @@ func (ls *LocalStorage) ensureDirectoryExists(dirPath string) error {
 	return nil
 }
 
-func (ls *LocalStorage) Write(path string, data []byte) error {
+func (ls *LocalStorage) Write(ctx context.Context, path string, data []byte) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func (ls *LocalStorage) WriteAt(path string, data []byte, offset int64) error {
 	return nil
 }
 
-func (ls *LocalStorage) WriteFromTempFile(path string, tempFilePath string) error {
+func (ls *LocalStorage) WriteFromTempFile(ctx context.Context, path string, tempFilePath string) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func (ls *LocalStorage) WriteFromTempFile(path string, tempFilePath string) erro
 	defer dst.Close()
 
 	buf := make([]byte, 256*1024)
-	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
+	if _, err := io.CopyBuffer(dst, ctxReader{ctx: ctx, r: src}, buf); err != nil {
 		return fmt.Errorf("failed to copy file: %w", err)
 	}
 
@@ -200,7 +200,7 @@ func (ls *LocalStorage) WriteFromTempFile(path string, tempFilePath string) erro
 	return nil
 }
 
-func (ls *LocalStorage) Read(path string) ([]byte, error) {
+func (ls *LocalStorage) Read(ctx context.Context, path string) ([]byte, error) {
 	if err := ls.validatePath(path); err != nil {
 		return nil, err
 	}
@@ -212,7 +212,7 @@ func (ls *LocalStorage) Read(path string) ([]byte, error) {
 	return data, nil
 }
 
-func (ls *LocalStorage) OpenReader(path string) (io.ReadCloser, error) {
+func (ls *LocalStorage) OpenReader(ctx context.Context, path string) (io.ReadCloser, error) {
 	if err := ls.validatePath(path); err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ func (ls *LocalStorage) OpenReader(path string) (io.ReadCloser, error) {
 	return f, nil
 }
 
-func (ls *LocalStorage) WriteFromReader(path string, reader io.Reader) error {
+func (ls *LocalStorage) WriteFromReader(ctx context.Context, path string, reader io.Reader) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
@@ -245,13 +245,13 @@ func (ls *LocalStorage) WriteFromReader(path string, reader io.Reader) error {
 	defer f.Close()
 
 	buf := make([]byte, 256*1024)
-	if _, err := io.CopyBuffer(f, reader, buf); err != nil {
+	if _, err := io.CopyBuffer(f, ctxReader{ctx: ctx, r: reader}, buf); err != nil {
 		return fmt.Errorf("failed to write from reader: %w", err)
 	}
 	return nil
 }
 
-func (ls *LocalStorage) ReadAt(path string, size int, offset int64) ([]byte, error) {
+func (ls *LocalStorage) ReadAt(ctx context.Context, path string, size int, offset int64) ([]byte, error) {
 	if err := ls.validatePath(path); err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func (ls *LocalStorage) ReadAt(path string, size int, offset int64) ([]byte, err
 	return buf[:n], nil
 }
 
-func (ls *LocalStorage) Remove(path string) error {
+func (ls *LocalStorage) Remove(ctx context.Context, path string) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
@@ -294,7 +294,7 @@ func (ls *LocalStorage) Remove(path string) error {
 	return nil
 }
 
-func (ls *LocalStorage) CleanPathLocks() {
+func (ls *LocalStorage) CleanPathLocks(ctx context.Context) {
 	ls.pathLocks.Range(func(key, value interface{}) bool {
 		path := key.(string)
 		mu := value.(*sync.Mutex)
@@ -315,7 +315,7 @@ func (ls *LocalStorage) CleanPathLocks() {
 // Exists reports whether path exists. Errors other than "not found" (for
 // example a permission problem) are returned to the caller instead of being
 // reported as "absent".
-func (ls *LocalStorage) Exists(path string) (bool, error) {
+func (ls *LocalStorage) Exists(ctx context.Context, path string) (bool, error) {
 	if err := ls.validatePath(path); err != nil {
 		return false, err
 	}
@@ -329,7 +329,7 @@ func (ls *LocalStorage) Exists(path string) (bool, error) {
 	return true, nil
 }
 
-func (ls *LocalStorage) List(directory string) ([]string, error) {
+func (ls *LocalStorage) List(ctx context.Context, directory string) ([]string, error) {
 	if err := ls.validatePath(directory); err != nil {
 		return nil, err
 	}
@@ -381,7 +381,7 @@ func (ls *LocalStorage) ListObjects(ctx context.Context) ([]string, error) {
 	return objects, nil
 }
 
-func (ls *LocalStorage) GetSize(path string) (int64, error) {
+func (ls *LocalStorage) GetSize(ctx context.Context, path string) (int64, error) {
 	if err := ls.validatePath(path); err != nil {
 		return 0, err
 	}
@@ -393,7 +393,7 @@ func (ls *LocalStorage) GetSize(path string) (int64, error) {
 	return info.Size(), nil
 }
 
-func (ls *LocalStorage) Rename(oldPath, newPath string) error {
+func (ls *LocalStorage) Rename(ctx context.Context, oldPath, newPath string) error {
 	if err := ls.validatePath(oldPath); err != nil {
 		return err
 	}
@@ -433,7 +433,7 @@ func (ls *LocalStorage) Rename(oldPath, newPath string) error {
 	return nil
 }
 
-func (ls *LocalStorage) CreateDirectory(path string) error {
+func (ls *LocalStorage) CreateDirectory(ctx context.Context, path string) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
@@ -448,7 +448,7 @@ func (ls *LocalStorage) CreateDirectory(path string) error {
 	return nil
 }
 
-func (ls *LocalStorage) RemoveDirectory(path string) error {
+func (ls *LocalStorage) RemoveDirectory(ctx context.Context, path string) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}

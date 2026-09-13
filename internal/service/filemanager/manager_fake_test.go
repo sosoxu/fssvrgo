@@ -1,6 +1,7 @@
 package filemanager
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -22,26 +23,26 @@ func newFakeMetadata() *fakeMetadata {
 	return &fakeMetadata{byPath: map[string]*database.FileMetadata{}}
 }
 
-func (f *fakeMetadata) GetByPath(path string) (*database.FileMetadata, error) {
+func (f *fakeMetadata) GetByPath(_ context.Context, path string) (*database.FileMetadata, error) {
 	if meta, ok := f.byPath[path]; ok {
 		return meta, nil
 	}
 	return nil, sql.ErrNoRows
 }
 
-func (f *fakeMetadata) Create(meta *database.FileMetadata) error {
+func (f *fakeMetadata) Create(_ context.Context, meta *database.FileMetadata) error {
 	f.created++
 	f.byPath[meta.Path] = meta
 	return nil
 }
 
-func (f *fakeMetadata) Update(meta *database.FileMetadata) error {
+func (f *fakeMetadata) Update(_ context.Context, meta *database.FileMetadata) error {
 	f.updated++
 	f.byPath[meta.Path] = meta
 	return nil
 }
 
-func (f *fakeMetadata) Remove(id string) error {
+func (f *fakeMetadata) Remove(_ context.Context, id string) error {
 	f.removed++
 	for path, meta := range f.byPath {
 		if meta.ID == id {
@@ -51,7 +52,7 @@ func (f *fakeMetadata) Remove(id string) error {
 	return nil
 }
 
-func (f *fakeMetadata) Exists(path string) (bool, error) {
+func (f *fakeMetadata) Exists(_ context.Context, path string) (bool, error) {
 	_, ok := f.byPath[path]
 	return ok, nil
 }
@@ -68,7 +69,7 @@ func TestUploadFileCreatesMetadataWithoutDatabase(t *testing.T) {
 	fm, meta, store := newFakeBackedManager(t)
 	payload := []byte("hello fake metadata")
 
-	uploaded, err := fm.UploadFile("/docs/a.txt", payload)
+	uploaded, err := fm.UploadFile(t.Context(), "/docs/a.txt", payload)
 	if err != nil {
 		t.Fatalf("UploadFile: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestUploadFileCreatesMetadataWithoutDatabase(t *testing.T) {
 	if uploaded.Size != int64(len(payload)) {
 		t.Errorf("size = %d, want %d", uploaded.Size, len(payload))
 	}
-	stored, err := store.Read("/docs/a.txt")
+	stored, err := store.Read(t.Context(), "/docs/a.txt")
 	if err != nil {
 		t.Fatalf("Read back: %v", err)
 	}
@@ -90,10 +91,10 @@ func TestUploadFileCreatesMetadataWithoutDatabase(t *testing.T) {
 func TestUploadFileOverwritesExistingMetadataWithoutDatabase(t *testing.T) {
 	fm, meta, _ := newFakeBackedManager(t)
 
-	if _, err := fm.UploadFile("/docs/a.txt", []byte("first")); err != nil {
+	if _, err := fm.UploadFile(t.Context(), "/docs/a.txt", []byte("first")); err != nil {
 		t.Fatalf("first upload: %v", err)
 	}
-	second, err := fm.UploadFile("/docs/a.txt", []byte("second version"))
+	second, err := fm.UploadFile(t.Context(), "/docs/a.txt", []byte("second version"))
 	if err != nil {
 		t.Fatalf("second upload: %v", err)
 	}
@@ -108,16 +109,16 @@ func TestUploadFileOverwritesExistingMetadataWithoutDatabase(t *testing.T) {
 func TestDeleteFileRemovesMetadataWithoutDatabase(t *testing.T) {
 	fm, meta, store := newFakeBackedManager(t)
 
-	if _, err := fm.UploadFile("/docs/a.txt", []byte("payload")); err != nil {
+	if _, err := fm.UploadFile(t.Context(), "/docs/a.txt", []byte("payload")); err != nil {
 		t.Fatalf("UploadFile: %v", err)
 	}
-	if err := fm.DeleteFile("/docs/a.txt"); err != nil {
+	if err := fm.DeleteFile(t.Context(), "/docs/a.txt"); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
 	if meta.removed != 1 {
 		t.Errorf("removed = %d, want 1", meta.removed)
 	}
-	if exists, err := store.Exists("/docs/a.txt"); err != nil {
+	if exists, err := store.Exists(t.Context(), "/docs/a.txt"); err != nil {
 		t.Fatalf("Exists: %v", err)
 	} else if exists {
 		t.Error("storage object should be gone after DeleteFile")

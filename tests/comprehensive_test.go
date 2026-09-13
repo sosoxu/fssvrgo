@@ -28,6 +28,8 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/logger"
 	"github.com/sosoxu/fssvrgo/internal/pgtest"
+	"github.com/sosoxu/fssvrgo/internal/service/apikey"
+	"github.com/sosoxu/fssvrgo/internal/service/auditlog"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -123,7 +125,7 @@ func NewCompCluster(t *testing.T, cfg compClusterConfig) *CompCluster {
 	var store storage.StorageAdapter
 	switch cfg.storageType {
 	case "minio":
-		minioStore, err := storage.NewMinIOStorage(storage.MinIOConfig{
+		minioStore, err := storage.NewMinIOStorage(t.Context(), storage.MinIOConfig{
 			Endpoint:  "localhost:9000",
 			AccessKey: "minioadmin",
 			SecretKey: "minioadmin",
@@ -217,7 +219,23 @@ func createCompInstance(t *testing.T, id int, db *database.DB, store storage.Sto
 		CORSAllowedOrigins: "*",
 	}
 
-	srv := httpserver.NewServer(serverCfg, config.TLSConfig{}, fm, dirSvc, flSvc, transferSvc, authSvc, cryptoSvc, store, cacheSvc, nil, db)
+	srv := httpserver.NewServer(httpserver.Deps{
+		Config:      serverCfg,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(db),
+			database.NewAuditWriter(db, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(database.NewApiKeyService(db), authSvc.GenerateApiKey),
+		DB:      db,
+	})
 
 	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -416,7 +434,7 @@ func TestComprehensive_MinIO_Basic(t *testing.T) {
 				t.Errorf("data mismatch: uploaded %d bytes, got %d bytes", len(data), len(got))
 			}
 			// Verify storage type is MinIO
-			meta, err := inst.FM.GetFileMetadata(path)
+			meta, err := inst.FM.GetFileMetadata(t.Context(), path)
 			if err != nil {
 				t.Fatalf("get metadata: %v", err)
 			}
@@ -429,7 +447,7 @@ func TestComprehensive_MinIO_Basic(t *testing.T) {
 			data := genData(size)
 			path := fmt.Sprintf("minio/svc/%d.bin", size)
 			// Upload via FileManager (gRPC service layer equivalent)
-			meta, err := inst.FM.UploadFile(path, data)
+			meta, err := inst.FM.UploadFile(t.Context(), path, data)
 			if err != nil {
 				t.Fatalf("UploadFile: %v", err)
 			}
@@ -440,7 +458,7 @@ func TestComprehensive_MinIO_Basic(t *testing.T) {
 				t.Errorf("hash mismatch")
 			}
 			// Download via FileManager
-			got, err := inst.FM.DownloadFile(path)
+			got, err := inst.FM.DownloadFile(t.Context(), path)
 			if err != nil {
 				t.Fatalf("DownloadFile: %v", err)
 			}
@@ -811,7 +829,7 @@ func TestComprehensive_GB_ServiceLayer(t *testing.T) {
 	hash := "" // no hash pre-check
 
 	start := time.Now()
-	sessionID, err := inst.TransferSvc.CreateUploadSession(path, filepath.Base(path), totalSize, clientID, hash)
+	sessionID, err := inst.TransferSvc.CreateUploadSession(t.Context(), path, filepath.Base(path), totalSize, clientID, hash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession: %v", err)
 	}
@@ -830,14 +848,14 @@ func TestComprehensive_GB_ServiceLayer(t *testing.T) {
 			end = totalSize
 		}
 		thisChunk := chunkData[:end-sent]
-		if err := inst.TransferSvc.UploadChunk(sessionID, thisChunk, sent); err != nil {
+		if err := inst.TransferSvc.UploadChunk(t.Context(), sessionID, thisChunk, sent); err != nil {
 			t.Fatalf("UploadChunk at %d: %v", sent, err)
 		}
 		hasher.Write(thisChunk)
 		sent = end
 	}
 
-	result, err := inst.TransferSvc.CompleteUpload(sessionID)
+	result, err := inst.TransferSvc.CompleteUpload(t.Context(), sessionID)
 	if err != nil {
 		t.Fatalf("CompleteUpload: %v", err)
 	}
@@ -854,7 +872,7 @@ func TestComprehensive_GB_ServiceLayer(t *testing.T) {
 
 	// Download via service layer
 	dlStart := time.Now()
-	got, err := inst.FM.DownloadFile(path)
+	got, err := inst.FM.DownloadFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("DownloadFile: %v", err)
 	}
@@ -895,10 +913,10 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 	}
 
 	sizes := []int64{
-		1 * 1024,        // 1KB
-		64 * 1024,       // 64KB
-		1024 * 1024,     // 1MB
-		10 * 1024 * 1024, // 10MB
+		1 * 1024,          // 1KB
+		64 * 1024,         // 64KB
+		1024 * 1024,       // 1MB
+		10 * 1024 * 1024,  // 10MB
 		100 * 1024 * 1024, // 100MB
 	}
 
@@ -915,9 +933,9 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 
 			for _, size := range sizes {
 				// --- HTTP upload/download ---
-			data := genData(int(size))
-			hash := compSha256Hex(data)
-			pathHTTP := fmt.Sprintf("perf/%s/http/%s.bin", st, formatBytes(size))
+				data := genData(int(size))
+				hash := compSha256Hex(data)
+				pathHTTP := fmt.Sprintf("perf/%s/http/%s.bin", st, formatBytes(size))
 
 				// HTTP upload
 				upStart := time.Now()
@@ -931,8 +949,8 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 				// HTTP download
 				dlStart := time.Now()
 				got := httpDownload(t, inst.BaseURL, pathHTTP)
-			dlElapsed := time.Since(dlStart)
-			hashOK := compSha256Hex(got) == hash
+				dlElapsed := time.Since(dlStart)
+				hashOK := compSha256Hex(got) == hash
 
 				records = append(records, perfRecord{
 					Operation: "upload", Storage: st, Protocol: "HTTP",
@@ -950,19 +968,19 @@ func TestComprehensive_Performance_Matrix(t *testing.T) {
 				// --- Service layer (gRPC-equivalent) upload/download ---
 				pathSL := fmt.Sprintf("perf/%s/svc/%s.bin", st, formatBytes(size))
 				upStart = time.Now()
-				_, err := inst.FM.UploadFile(pathSL, data)
+				_, err := inst.FM.UploadFile(t.Context(), pathSL, data)
 				if err != nil {
 					t.Fatalf("svc upload %s: %v", formatBytes(size), err)
 				}
 				upElapsed = time.Since(upStart)
 
 				dlStart = time.Now()
-				got, err = inst.FM.DownloadFile(pathSL)
+				got, err = inst.FM.DownloadFile(t.Context(), pathSL)
 				if err != nil {
 					t.Fatalf("svc download %s: %v", formatBytes(size), err)
 				}
-			dlElapsed = time.Since(dlStart)
-			hashOK = compSha256Hex(got) == hash
+				dlElapsed = time.Since(dlStart)
+				hashOK = compSha256Hex(got) == hash
 
 				records = append(records, perfRecord{
 					Operation: "upload", Storage: st, Protocol: "gRPC",
@@ -1158,12 +1176,16 @@ func TestComprehensive_Stress_MixedWorkload(t *testing.T) {
 								continue
 							}
 							resp.Body.Close()
-							mu.Lock(); opCounts["download"]++; mu.Unlock()
+							mu.Lock()
+							opCounts["download"]++
+							mu.Unlock()
 						case 2, 3: // upload new file
 							path := fmt.Sprintf("mixed/%s/w%d-o%d.bin", st, workerID, op)
 							resp := httpUpload(t, inst.BaseURL, path, genData(fileSize))
 							resp.Body.Close()
-							mu.Lock(); opCounts["upload"]++; mu.Unlock()
+							mu.Lock()
+							opCounts["upload"]++
+							mu.Unlock()
 						case 4: // delete a file (may already be deleted — that's OK)
 							idx := (workerID*opsPerWorker + op) % prePopulate
 							path := fmt.Sprintf("mixed/%s/pre-%d.bin", st, idx)
@@ -1174,7 +1196,9 @@ func TestComprehensive_Stress_MixedWorkload(t *testing.T) {
 								continue
 							}
 							resp.Body.Close()
-							mu.Lock(); opCounts["delete"]++; mu.Unlock()
+							mu.Lock()
+							opCounts["delete"]++
+							mu.Unlock()
 						}
 					}
 				}(w)
@@ -1229,7 +1253,9 @@ func TestComprehensive_Stress_RedisLock_Mutex(t *testing.T) {
 			resp := httpUpload(t, inst.BaseURL, path, data)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusCreated {
-				mu.Lock(); successCount++; mu.Unlock()
+				mu.Lock()
+				successCount++
+				mu.Unlock()
 			}
 		}(w)
 	}
@@ -1285,9 +1311,9 @@ func TestComprehensive_MultiInstance_Consistency(t *testing.T) {
 			}
 
 			// Verify metadata is consistent across instances
-			meta0, _ := cluster.Instances[0].FM.GetFileMetadata(path)
+			meta0, _ := cluster.Instances[0].FM.GetFileMetadata(t.Context(), path)
 			for i := 1; i < len(cluster.Instances); i++ {
-				metaI, err := cluster.Instances[i].FM.GetFileMetadata(path)
+				metaI, err := cluster.Instances[i].FM.GetFileMetadata(t.Context(), path)
 				if err != nil {
 					t.Errorf("instance %d GetMetadata: %v", i, err)
 					continue

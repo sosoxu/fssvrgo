@@ -118,13 +118,13 @@ func TestMultiInstance_GRPCUploadDownloadConsistency(t *testing.T) {
 	data := generateGRPCData(1024 * 100)
 	filePath := "/grpc_consistency_test.dat"
 
-	_, err := inst1.FM.UploadFile(filePath, data)
+	_, err := inst1.FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload via instance 1 failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		downloaded, err := inst.FM.DownloadFile(filePath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Download from instance %d failed: %v", i, err)
 			continue
@@ -153,18 +153,18 @@ func TestMultiInstance_GRPCMetadataConsistency(t *testing.T) {
 	data := generateGRPCData(1024 * 50)
 	filePath := "/grpc_metadata_test.dat"
 
-	_, err := inst1.FM.UploadFile(filePath, data)
+	_, err := inst1.FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	meta1, err := inst1.FM.GetFileMetadata(filePath)
+	meta1, err := inst1.FM.GetFileMetadata(t.Context(), filePath)
 	if err != nil {
 		t.Fatalf("Get metadata from instance 1 failed: %v", err)
 	}
 
 	for i, inst := range []*GRPCInstance{inst2, inst3} {
-		meta, err := inst.FM.GetFileMetadata(filePath)
+		meta, err := inst.FM.GetFileMetadata(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Get metadata from instance %d failed: %v", i+1, err)
 			continue
@@ -194,27 +194,27 @@ func TestMultiInstance_GRPCDeleteConsistency(t *testing.T) {
 	data := generateGRPCData(1024)
 	filePath := "/grpc_delete_test.dat"
 
-	_, err := inst1.FM.UploadFile(filePath, data)
+	_, err := inst1.FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
 	for _, inst := range cluster.Instances {
-		if !inst.FM.Exists(filePath) {
+		if !inst.FM.Exists(t.Context(), filePath) {
 			t.Fatalf("File should exist on all instances before delete")
 		}
 	}
 
-	if err := inst2.FM.DeleteFile(filePath); err != nil {
+	if err := inst2.FM.DeleteFile(t.Context(), filePath); err != nil {
 		t.Fatalf("Delete from instance 2 failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		if inst.FM.Exists(filePath) {
+		if inst.FM.Exists(t.Context(), filePath) {
 			t.Errorf("Instance %d: file should be deleted", i)
 		}
 
-		_, err := inst.FM.DownloadFile(filePath)
+		_, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err == nil {
 			t.Errorf("Instance %d: download should fail after delete", i)
 		}
@@ -231,27 +231,27 @@ func TestMultiInstance_GRPCRenameConsistency(t *testing.T) {
 	data := generateGRPCData(1024)
 	filePath := "/grpc_rename_test.dat"
 
-	_, err := inst1.FM.UploadFile(filePath, data)
+	_, err := inst1.FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	if err := inst2.FM.RenameFile(filePath, "grpc_renamed.dat"); err != nil {
+	if err := inst2.FM.RenameFile(t.Context(), filePath, "grpc_renamed.dat"); err != nil {
 		t.Fatalf("Rename from instance 2 failed: %v", err)
 	}
 
-	if inst1.FM.Exists(filePath) {
+	if inst1.FM.Exists(t.Context(), filePath) {
 		t.Error("Old path should not exist after rename")
 	}
 
 	newPath := "/grpc_renamed.dat"
 	for i, inst := range cluster.Instances {
-		if !inst.FM.Exists(newPath) {
+		if !inst.FM.Exists(t.Context(), newPath) {
 			t.Errorf("Instance %d: new path should exist after rename", i)
 			continue
 		}
 
-		downloaded, err := inst.FM.DownloadFile(newPath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), newPath)
 		if err != nil {
 			t.Errorf("Instance %d: download from new path failed: %v", i, err)
 			continue
@@ -269,20 +269,20 @@ func TestMultiInstance_GRPCDirectoryConsistency(t *testing.T) {
 	inst1 := cluster.Instances[0]
 	inst2 := cluster.Instances[1]
 
-	if err := inst1.DirSvc.CreateDirectory("/grpc_testdir"); err != nil {
+	if err := inst1.DirSvc.CreateDirectory(t.Context(), "/grpc_testdir"); err != nil {
 		t.Fatalf("Create directory failed: %v", err)
 	}
 
 	data := generateGRPCData(1024)
 	filePath := "/grpc_testdir/file_in_dir.dat"
 
-	_, err := inst2.FM.UploadFile(filePath, data)
+	_, err := inst2.FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload to directory failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		downloaded, err := inst.FM.DownloadFile(filePath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Instance %d: download file in directory failed: %v", i, err)
 			continue
@@ -308,7 +308,7 @@ func TestMultiInstance_GRPCConcurrentWriteConsistency(t *testing.T) {
 				defer wg.Done()
 				data := generateGRPCData(1024 * (10 + fileIdx))
 				filePath := fmt.Sprintf("/grpc_concurrent_%d_%d.dat", instIdx, fileIdx)
-				if _, err := fm.UploadFile(filePath, data); err != nil {
+				if _, err := fm.UploadFile(t.Context(), filePath, data); err != nil {
 					errors <- fmt.Errorf("upload instance %d file %d: %v", instIdx, fileIdx, err)
 				}
 			}(i, j, inst.FM)
@@ -325,7 +325,7 @@ func TestMultiInstance_GRPCConcurrentWriteConsistency(t *testing.T) {
 		for j := range cluster.Instances {
 			filePath := fmt.Sprintf("/grpc_concurrent_%d_%d.dat", j, i)
 			for k, inst := range cluster.Instances {
-				_, err := inst.FM.DownloadFile(filePath)
+				_, err := inst.FM.DownloadFile(t.Context(), filePath)
 				if err != nil {
 					t.Errorf("Instance %d: cannot download file %s uploaded by instance %d: %v", k, filePath, j, err)
 				}
@@ -347,13 +347,13 @@ func TestMultiInstance_GRPCConcurrentOverwriteConsistency(t *testing.T) {
 	data3 := generateGRPCData(1024)
 	filePath := "/grpc_overwrite_test.dat"
 
-	inst1.FM.UploadFile(filePath, data1)
-	inst2.FM.UploadFile(filePath, data2)
-	inst3.FM.UploadFile(filePath, data3)
+	inst1.FM.UploadFile(t.Context(), filePath, data1)
+	inst2.FM.UploadFile(t.Context(), filePath, data2)
+	inst3.FM.UploadFile(t.Context(), filePath, data3)
 
-	downloaded1, err1 := inst1.FM.DownloadFile(filePath)
-	downloaded2, err2 := inst2.FM.DownloadFile(filePath)
-	downloaded3, err3 := inst3.FM.DownloadFile(filePath)
+	downloaded1, err1 := inst1.FM.DownloadFile(t.Context(), filePath)
+	downloaded2, err2 := inst2.FM.DownloadFile(t.Context(), filePath)
+	downloaded3, err3 := inst3.FM.DownloadFile(t.Context(), filePath)
 
 	if err1 != nil || err2 != nil || err3 != nil {
 		t.Fatalf("Download failed: err1=%v, err2=%v, err3=%v", err1, err2, err3)
@@ -389,12 +389,12 @@ func TestMultiInstance_GRPCStreamingUploadSessionIsolation(t *testing.T) {
 	filePath := "/grpc_stream_session_test.dat"
 	chunkSize := int64(1024 * 10)
 
-	sessionID, err := inst1.TransferSvc.CreateUploadSession(filePath, "grpc_stream_session_test.dat", int64(len(data)), "test", "")
+	sessionID, err := inst1.TransferSvc.CreateUploadSession(t.Context(), filePath, "grpc_stream_session_test.dat", int64(len(data)), "test", "")
 	if err != nil {
 		t.Fatalf("Create upload session on instance 1 failed: %v", err)
 	}
 
-	err = inst2.TransferSvc.UploadChunk(sessionID, data[:1024], 0)
+	err = inst2.TransferSvc.UploadChunk(t.Context(), sessionID, data[:1024], 0)
 	if err == nil {
 		t.Error("Cross-instance chunk upload should fail because sessions are local to each instance")
 	} else {
@@ -408,18 +408,18 @@ func TestMultiInstance_GRPCStreamingUploadSessionIsolation(t *testing.T) {
 			end = int64(len(data))
 		}
 		chunk := data[offset:end]
-		if err := inst1.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := inst1.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("Same-instance chunk upload at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		downloaded, err := inst.FM.DownloadFile(filePath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Instance %d: cannot download streaming uploaded file: %v", i, err)
 			continue
@@ -440,17 +440,17 @@ func TestMultiInstance_GRPCStreamingDownloadConsistency(t *testing.T) {
 	data := generateGRPCData(1024 * 50)
 	filePath := "/grpc_stream_dl_test.dat"
 
-	_, err := inst1.FM.UploadFile(filePath, data)
+	_, err := inst1.FM.UploadFile(t.Context(), filePath, data)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	sessionID1, err := inst1.TransferSvc.CreateDownloadSession(filePath, "test")
+	sessionID1, err := inst1.TransferSvc.CreateDownloadSession(t.Context(), filePath, "test")
 	if err != nil {
 		t.Fatalf("Create download session on instance 1 failed: %v", err)
 	}
 
-	sessionID2, err := inst2.TransferSvc.CreateDownloadSession(filePath, "test")
+	sessionID2, err := inst2.TransferSvc.CreateDownloadSession(t.Context(), filePath, "test")
 	if err != nil {
 		t.Fatalf("Create download session on instance 2 failed: %v", err)
 	}
@@ -466,13 +466,13 @@ func TestMultiInstance_GRPCStreamingDownloadConsistency(t *testing.T) {
 			readSize = int(remaining)
 		}
 
-		chunk1, err := inst1.TransferSvc.DownloadChunk(sessionID1, readSize, offset)
+		chunk1, err := inst1.TransferSvc.DownloadChunk(t.Context(), sessionID1, readSize, offset)
 		if err != nil {
 			t.Fatalf("Download chunk from instance 1 at offset %d failed: %v", offset, err)
 		}
 		downloaded1 = append(downloaded1, chunk1...)
 
-		chunk2, err := inst2.TransferSvc.DownloadChunk(sessionID2, readSize, offset)
+		chunk2, err := inst2.TransferSvc.DownloadChunk(t.Context(), sessionID2, readSize, offset)
 		if err != nil {
 			t.Fatalf("Download chunk from instance 2 at offset %d failed: %v", offset, err)
 		}
@@ -481,8 +481,8 @@ func TestMultiInstance_GRPCStreamingDownloadConsistency(t *testing.T) {
 		offset += int64(readSize)
 	}
 
-	inst1.TransferSvc.CompleteDownload(sessionID1)
-	inst2.TransferSvc.CompleteDownload(sessionID2)
+	inst1.TransferSvc.CompleteDownload(t.Context(), sessionID1)
+	inst2.TransferSvc.CompleteDownload(t.Context(), sessionID2)
 
 	if len(downloaded1) != len(data) {
 		t.Errorf("Instance 1: total downloaded size mismatch, expected %d, got %d", len(data), len(downloaded1))
@@ -513,7 +513,7 @@ func TestMultiInstance_GRPCStreamingUploadWithHashVerification(t *testing.T) {
 	filePath := "/grpc_stream_hash_test.dat"
 	chunkSize := int64(1024 * 10)
 
-	sessionID, err := inst1.TransferSvc.CreateUploadSession(filePath, "grpc_stream_hash_test.dat", int64(len(data)), "test", hash)
+	sessionID, err := inst1.TransferSvc.CreateUploadSession(t.Context(), filePath, "grpc_stream_hash_test.dat", int64(len(data)), "test", hash)
 	if err != nil {
 		t.Fatalf("Create upload session failed: %v", err)
 	}
@@ -525,18 +525,18 @@ func TestMultiInstance_GRPCStreamingUploadWithHashVerification(t *testing.T) {
 			end = int64(len(data))
 		}
 		chunk := data[offset:end]
-		if err := inst1.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := inst1.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("Chunk upload at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("Complete upload with hash verification failed: %v", err)
 	}
 
 	for i, inst := range cluster.Instances {
-		downloaded, err := inst.FM.DownloadFile(filePath)
+		downloaded, err := inst.FM.DownloadFile(t.Context(), filePath)
 		if err != nil {
 			t.Errorf("Instance %d: download failed: %v", i, err)
 			continue
@@ -559,20 +559,20 @@ func TestMultiInstance_GRPCListFilesConsistency(t *testing.T) {
 	for i := 0; i < numFilesPerInst; i++ {
 		data := generateGRPCData(100)
 		filePath := fmt.Sprintf("/grpc_list_%d.dat", i)
-		if _, err := inst1.FM.UploadFile(filePath, data); err != nil {
+		if _, err := inst1.FM.UploadFile(t.Context(), filePath, data); err != nil {
 			t.Fatalf("Upload file %d to instance 1 failed: %v", i, err)
 		}
 	}
 	for i := 0; i < numFilesPerInst; i++ {
 		data := generateGRPCData(100)
 		filePath := fmt.Sprintf("/grpc_list_%d.dat", numFilesPerInst+i)
-		if _, err := inst2.FM.UploadFile(filePath, data); err != nil {
+		if _, err := inst2.FM.UploadFile(t.Context(), filePath, data); err != nil {
 			t.Fatalf("Upload file %d to instance 2 failed: %v", numFilesPerInst+i, err)
 		}
 	}
 
 	for i, inst := range cluster.Instances {
-		result, err := inst.FlSvc.ListFilesWithTotal("/", false, 1, 100, "name", "asc")
+		result, err := inst.FlSvc.ListFilesWithTotal(t.Context(), "/", false, 1, 100, "name", "asc")
 		if err != nil {
 			t.Errorf("List files from instance %d failed: %v", i, err)
 			continue
@@ -593,16 +593,16 @@ func TestMultiInstance_GRPCDeleteThenVerifyConsistency(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		data := generateGRPCData(100)
 		filePath := fmt.Sprintf("/grpc_del_%d.dat", i)
-		if _, err := inst1.FM.UploadFile(filePath, data); err != nil {
+		if _, err := inst1.FM.UploadFile(t.Context(), filePath, data); err != nil {
 			t.Fatalf("Upload file %d failed: %v", i, err)
 		}
 	}
 
-	inst2.FM.DeleteFile("/grpc_del_2.dat")
-	inst2.FM.DeleteFile("/grpc_del_4.dat")
+	inst2.FM.DeleteFile(t.Context(), "/grpc_del_2.dat")
+	inst2.FM.DeleteFile(t.Context(), "/grpc_del_4.dat")
 
 	for i, inst := range cluster.Instances {
-		result, err := inst.FlSvc.ListFilesWithTotal("/", false, 1, 100, "name", "asc")
+		result, err := inst.FlSvc.ListFilesWithTotal(t.Context(), "/", false, 1, 100, "name", "asc")
 		if err != nil {
 			t.Errorf("Instance %d: list files failed: %v", i, err)
 			continue
@@ -615,7 +615,7 @@ func TestMultiInstance_GRPCDeleteThenVerifyConsistency(t *testing.T) {
 	deletedPaths := []string{"/grpc_del_2.dat", "/grpc_del_4.dat"}
 	for _, p := range deletedPaths {
 		for i, inst := range cluster.Instances {
-			if inst.FM.Exists(p) {
+			if inst.FM.Exists(t.Context(), p) {
 				t.Errorf("Instance %d: deleted file %s should not exist", i, p)
 			}
 		}
@@ -624,7 +624,7 @@ func TestMultiInstance_GRPCDeleteThenVerifyConsistency(t *testing.T) {
 	existingPaths := []string{"/grpc_del_0.dat", "/grpc_del_1.dat", "/grpc_del_3.dat"}
 	for _, p := range existingPaths {
 		for i, inst := range cluster.Instances {
-			if !inst.FM.Exists(p) {
+			if !inst.FM.Exists(t.Context(), p) {
 				t.Errorf("Instance %d: existing file %s should exist", i, p)
 			}
 		}
@@ -644,7 +644,7 @@ func TestMultiInstance_GRPCCrossInstanceStreamingUploadDownload(t *testing.T) {
 	filePath := "/grpc_cross_stream_test.dat"
 	chunkSize := int64(1024 * 5)
 
-	sessionID, err := inst1.TransferSvc.CreateUploadSession(filePath, "grpc_cross_stream_test.dat", int64(len(data)), "test", hash)
+	sessionID, err := inst1.TransferSvc.CreateUploadSession(t.Context(), filePath, "grpc_cross_stream_test.dat", int64(len(data)), "test", hash)
 	if err != nil {
 		t.Fatalf("Create upload session on instance 1 failed: %v", err)
 	}
@@ -656,18 +656,18 @@ func TestMultiInstance_GRPCCrossInstanceStreamingUploadDownload(t *testing.T) {
 			end = int64(len(data))
 		}
 		chunk := data[offset:end]
-		if err := inst1.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := inst1.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("Chunk upload at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := inst1.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := inst1.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("Complete upload failed: %v", err)
 	}
 
 	for i, inst := range []*GRPCInstance{inst2, inst3} {
-		dlSessionID, err := inst.TransferSvc.CreateDownloadSession(filePath, "test")
+		dlSessionID, err := inst.TransferSvc.CreateDownloadSession(t.Context(), filePath, "test")
 		if err != nil {
 			t.Errorf("Instance %d: create download session failed: %v", i+1, err)
 			continue
@@ -681,7 +681,7 @@ func TestMultiInstance_GRPCCrossInstanceStreamingUploadDownload(t *testing.T) {
 			if remaining < chunkSize {
 				readSize = int(remaining)
 			}
-			chunk, err := inst.TransferSvc.DownloadChunk(dlSessionID, readSize, dlOffset)
+			chunk, err := inst.TransferSvc.DownloadChunk(t.Context(), dlSessionID, readSize, dlOffset)
 			if err != nil {
 				t.Errorf("Instance %d: download chunk at offset %d failed: %v", i+1, dlOffset, err)
 				break
@@ -690,7 +690,7 @@ func TestMultiInstance_GRPCCrossInstanceStreamingUploadDownload(t *testing.T) {
 			dlOffset += int64(readSize)
 		}
 
-		inst.TransferSvc.CompleteDownload(dlSessionID)
+		inst.TransferSvc.CompleteDownload(t.Context(), dlSessionID)
 
 		if len(downloaded) != len(data) {
 			t.Errorf("Instance %d: size mismatch, expected %d, got %d", i+1, len(data), len(downloaded))

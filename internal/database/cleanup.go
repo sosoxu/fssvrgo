@@ -14,18 +14,23 @@ type CleanupService struct {
 	interval         time.Duration
 	retention        time.Duration
 	stopCh           chan struct{}
+	ctx              context.Context
+	cancel           context.CancelFunc
 	reconciler       *Reconciler
 	reconcileEnabled bool
 	reconcileRepair  bool
 }
 
 func NewCleanupService(db *DB, store storage.StorageAdapter, intervalMinutes, retentionDays int) *CleanupService {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &CleanupService{
 		db:        db,
 		store:     store,
 		interval:  time.Duration(intervalMinutes) * time.Minute,
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
 		stopCh:    make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
@@ -74,6 +79,9 @@ func (s *CleanupService) ReconcileNow(ctx context.Context) (*ReconcileReport, er
 
 func (s *CleanupService) Stop() {
 	close(s.stopCh)
+	// Cancel the service-lifetime context so an in-flight cleanup pass stops
+	// instead of racing process shutdown.
+	s.cancel()
 	logger.Info("Cleanup service stopped")
 }
 
@@ -92,8 +100,9 @@ func (s *CleanupService) run() {
 }
 
 func (s *CleanupService) cleanup() {
+	ctx := s.ctx
 	if s.reconcileEnabled {
-		if _, err := s.ReconcileNow(context.Background()); err != nil {
+		if _, err := s.ReconcileNow(ctx); err != nil {
 			logger.Error("Reconciliation failed: %v", err)
 		}
 	}
@@ -101,7 +110,7 @@ func (s *CleanupService) cleanup() {
 	cutoff := time.Now().Add(-s.retention)
 
 	// Clean up soft-deleted files
-	files, err := s.getDeletedFiles(cutoff)
+	files, err := s.getDeletedFiles(ctx, cutoff)
 	if err != nil {
 		logger.Error("Failed to get deleted files for cleanup: %v", err)
 		return
@@ -111,13 +120,13 @@ func (s *CleanupService) cleanup() {
 		// Delete storage file. storage.IsNotExist works for both local
 		// (os.ErrNotExist) and MinIO (NoSuchKey) backends; using os.IsNotExist
 		// here would only handle the local filesystem backend.
-		if err := s.store.Remove(file.Path); err != nil && !storage.IsNotExist(err) {
+		if err := s.store.Remove(ctx, file.Path); err != nil && !storage.IsNotExist(err) {
 			logger.Error("Failed to remove storage file %s: %v", file.Path, err)
 			continue
 		}
 
 		// Permanently delete from database
-		if err := s.permanentlyDeleteFile(file.ID); err != nil {
+		if err := s.permanentlyDeleteFile(ctx, file.ID); err != nil {
 			logger.Error("Failed to permanently delete file record %s: %v", file.ID, err)
 			continue
 		}
@@ -126,14 +135,14 @@ func (s *CleanupService) cleanup() {
 	}
 
 	// Clean up soft-deleted directories
-	dirs, err := s.getDeletedDirectories(cutoff)
+	dirs, err := s.getDeletedDirectories(ctx, cutoff)
 	if err != nil {
 		logger.Error("Failed to get deleted directories for cleanup: %v", err)
 		return
 	}
 
 	for _, dir := range dirs {
-		if err := s.permanentlyDeleteDirectory(dir.ID); err != nil {
+		if err := s.permanentlyDeleteDirectory(ctx, dir.ID); err != nil {
 			logger.Error("Failed to permanently delete directory record %s: %v", dir.ID, err)
 			continue
 		}
@@ -156,10 +165,10 @@ type deletedDirectory struct {
 	Path string
 }
 
-func (s *CleanupService) getDeletedFiles(cutoff time.Time) ([]deletedFile, error) {
+func (s *CleanupService) getDeletedFiles(ctx context.Context, cutoff time.Time) ([]deletedFile, error) {
 	query := "SELECT id, path FROM files WHERE is_deleted = TRUE AND updated_at < ?"
 
-	rows, err := s.db.Query(query, cutoff.Format("2006-01-02 15:04:05"))
+	rows, err := s.db.QueryContext(ctx, query, cutoff.Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}
@@ -176,10 +185,10 @@ func (s *CleanupService) getDeletedFiles(cutoff time.Time) ([]deletedFile, error
 	return files, nil
 }
 
-func (s *CleanupService) getDeletedDirectories(cutoff time.Time) ([]deletedDirectory, error) {
+func (s *CleanupService) getDeletedDirectories(ctx context.Context, cutoff time.Time) ([]deletedDirectory, error) {
 	query := "SELECT id, path FROM directories WHERE is_deleted = TRUE AND updated_at < ?"
 
-	rows, err := s.db.Query(query, cutoff.Format("2006-01-02 15:04:05"))
+	rows, err := s.db.QueryContext(ctx, query, cutoff.Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}
@@ -196,14 +205,14 @@ func (s *CleanupService) getDeletedDirectories(cutoff time.Time) ([]deletedDirec
 	return dirs, nil
 }
 
-func (s *CleanupService) permanentlyDeleteFile(id string) error {
+func (s *CleanupService) permanentlyDeleteFile(ctx context.Context, id string) error {
 	query := "DELETE FROM files WHERE id = ?"
-	_, err := s.db.Exec(query, id)
+	_, err := s.db.ExecContext(ctx, query, id)
 	return err
 }
 
-func (s *CleanupService) permanentlyDeleteDirectory(id string) error {
+func (s *CleanupService) permanentlyDeleteDirectory(ctx context.Context, id string) error {
 	query := "DELETE FROM directories WHERE id = ?"
-	_, err := s.db.Exec(query, id)
+	_, err := s.db.ExecContext(ctx, query, id)
 	return err
 }

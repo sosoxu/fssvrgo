@@ -36,12 +36,24 @@ func (t *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
 	return t.tx.Exec(t.dialect.Translate(query), args...)
 }
 
+func (t *Tx) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return t.tx.ExecContext(ctx, t.dialect.Translate(query), args...)
+}
+
 func (t *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	return t.tx.Query(t.dialect.Translate(query), args...)
 }
 
+func (t *Tx) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return t.tx.QueryContext(ctx, t.dialect.Translate(query), args...)
+}
+
 func (t *Tx) QueryRow(query string, args ...interface{}) *sql.Row {
 	return t.tx.QueryRow(t.dialect.Translate(query), args...)
+}
+
+func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return t.tx.QueryRowContext(ctx, t.dialect.Translate(query), args...)
 }
 
 func (t *Tx) Commit() error { return t.tx.Commit() }
@@ -60,6 +72,17 @@ func (d *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
 	return stmt.Exec(args...)
 }
 
+// ExecContext is Exec with a request context: the driver aborts the statement
+// when ctx is cancelled, so a client disconnect does not leave a write running
+// to completion.
+func (d *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	stmt, err := d.prepareStmt(query)
+	if err != nil {
+		return d.db.ExecContext(ctx, d.dialect.Translate(query), args...)
+	}
+	return stmt.ExecContext(ctx, args...)
+}
+
 func (d *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	stmt, err := d.prepareStmt(query)
 	if err != nil {
@@ -76,12 +99,37 @@ func (d *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	return rows, nil
 }
 
+// QueryContext is Query with a request context. Cancellation surfaces through
+// (*sql.Rows).Err(), so callers that iterate rows already observe the abort.
+func (d *DB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	stmt, err := d.prepareStmt(query)
+	if err != nil {
+		return d.db.QueryContext(ctx, d.dialect.Translate(query), args...)
+	}
+	rows, err := stmt.QueryContext(ctx, args...)
+	if err != nil {
+		d.discardStmt(d.dialect.Translate(query))
+		return d.db.QueryContext(ctx, d.dialect.Translate(query), args...)
+	}
+	return rows, nil
+}
+
 func (d *DB) QueryRow(query string, args ...interface{}) *sql.Row {
 	stmt, err := d.prepareStmt(query)
 	if err != nil {
 		return d.db.QueryRow(d.dialect.Translate(query), args...)
 	}
 	return stmt.QueryRow(args...)
+}
+
+// QueryRowContext is QueryRow with a request context; the error surfaces from
+// Row.Scan as usual.
+func (d *DB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	stmt, err := d.prepareStmt(query)
+	if err != nil {
+		return d.db.QueryRowContext(ctx, d.dialect.Translate(query), args...)
+	}
+	return stmt.QueryRowContext(ctx, args...)
 }
 
 func (d *DB) prepareStmt(query string) (*sql.Stmt, error) {
@@ -128,6 +176,12 @@ func (d *DB) GetDialect() Dialect {
 
 func (d *DB) Ping() error {
 	return d.db.Ping()
+}
+
+// PingContext is Ping with a caller-supplied deadline, which is what the HTTP
+// health probe uses to bound its database round-trip.
+func (d *DB) PingContext(ctx context.Context) error {
+	return d.db.PingContext(ctx)
 }
 
 func (d *DB) Close() error {

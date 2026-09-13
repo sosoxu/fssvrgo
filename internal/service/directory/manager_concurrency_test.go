@@ -59,7 +59,7 @@ func TestDirectoryManager_AcquiresLockOnCreate(t *testing.T) {
 	cl := &countingLock{inner: distributed.NewLocalDistributedLock()}
 	dm := NewDirectoryManagerWithDistLock(db, nil, cl)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	if got := cl.lockCountFor("dir:foo"); got != 1 {
@@ -74,10 +74,10 @@ func TestDirectoryManager_RenameAcquiresLock(t *testing.T) {
 	cl := &countingLock{inner: distributed.NewLocalDistributedLock()}
 	dm := NewDirectoryManagerWithDistLock(db, nil, cl)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if err := dm.RenameDirectory("foo", "bar"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "bar"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
 	// One lock for Create (dir:foo) + one for Rename (dir:foo).
@@ -102,14 +102,14 @@ func TestDirectoryManager_ConcurrentRenamesSerialize(t *testing.T) {
 	dm := NewDirectoryManagerWithDistLock(db, store, cl)
 
 	// Seed: foo/ with two child files.
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory foo: %v", err)
 	}
-	if err := store.Write("foo/a.txt", []byte("a")); err != nil {
+	if err := store.Write(t.Context(), "foo/a.txt", []byte("a")); err != nil {
 		t.Fatalf("store.Write a: %v", err)
 	}
 	createFileRecord(t, db, "foo/a.txt", 1)
-	if err := store.Write("foo/b.txt", []byte("b")); err != nil {
+	if err := store.Write(t.Context(), "foo/b.txt", []byte("b")); err != nil {
 		t.Fatalf("store.Write b: %v", err)
 	}
 	createFileRecord(t, db, "foo/b.txt", 1)
@@ -131,7 +131,7 @@ func TestDirectoryManager_ConcurrentRenamesSerialize(t *testing.T) {
 			defer wg.Done()
 			<-start
 			target := fmt.Sprintf("tgt%d", i)
-			if err := dm.RenameDirectory("foo", target); err != nil {
+			if err := dm.RenameDirectory(t.Context(), "foo", target); err != nil {
 				// Errors are expected once the source "foo" is renamed away by
 				// the first winner. Only unexpected error types are fatal.
 				errs <- err
@@ -181,7 +181,7 @@ func containsMsg(err error, msg string) bool {
 // "foo/" — i.e. the rename fully moved (or fully failed) and did not leave
 // children stranded under the old prefix.
 func assertNoSplitChildren(db *database.DB, oldPrefix string) error {
-	rows, err := db.Query("SELECT path FROM files WHERE path LIKE ? AND is_deleted = FALSE", oldPrefix+"/%")
+	rows, err := db.QueryContext(context.Background(), "SELECT path FROM files WHERE path LIKE ? AND is_deleted = FALSE", oldPrefix+"/%")
 	if err != nil {
 		return fmt.Errorf("query stranded children: %w", err)
 	}
@@ -207,10 +207,10 @@ func TestDirectoryManager_DeleteAcquiresLock(t *testing.T) {
 	cl := &countingLock{inner: distributed.NewLocalDistributedLock()}
 	dm := NewDirectoryManagerWithDistLock(db, nil, cl)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if err := dm.DeleteDirectory("foo", true); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", true); err != nil {
 		t.Fatalf("DeleteDirectory failed: %v", err)
 	}
 	// One for Create + one for Delete.
@@ -228,13 +228,13 @@ func TestDirectoryManager_NilDistLockStillWorks(t *testing.T) {
 	store := setupTestStore(t)
 	dm := NewDirectoryManagerWithStore(db, store)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if err := dm.RenameDirectory("foo", "bar"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "bar"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
-	if !dm.Exists("bar") {
+	if !dm.Exists(t.Context(), "bar") {
 		t.Errorf("expected bar to exist after rename with nil distLock")
 	}
 }
@@ -249,19 +249,19 @@ func TestDirectoryManager_RenameAtomicOnStorageFailure(t *testing.T) {
 	store := setupTestStore(t)
 	dm := NewDirectoryManagerWithDistLock(db, store, distributed.NewLocalDistributedLock())
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	createFileRecord(t, db, "foo/a.txt", 1)
 	createFileRecord(t, db, "foo/b.txt", 1)
 
-	if err := dm.RenameDirectory("foo", "bar"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "bar"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
 
 	// Both children must be at bar/ in the DB, regardless of storage state.
 	for _, p := range []string{"bar/a.txt", "bar/b.txt"} {
-		meta, err := database.NewFileMetadataService(db).GetByPath(p)
+		meta, err := database.NewFileMetadataService(db).GetByPath(t.Context(), p)
 		if err != nil {
 			t.Fatalf("GetByPath %s: %v", p, err)
 		}

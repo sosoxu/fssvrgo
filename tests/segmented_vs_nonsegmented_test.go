@@ -25,6 +25,8 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/crypto"
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/pgtest"
+	"github.com/sosoxu/fssvrgo/internal/service/apikey"
+	"github.com/sosoxu/fssvrgo/internal/service/auditlog"
 	"github.com/sosoxu/fssvrgo/internal/service/directory"
 	"github.com/sosoxu/fssvrgo/internal/service/filelist"
 	"github.com/sosoxu/fssvrgo/internal/service/filemanager"
@@ -45,15 +47,15 @@ type CompareTestEnv struct {
 }
 
 type CompareResult struct {
-	Mode       string
-	Protocol   string
-	Operation  string
-	FileSize   string
-	FileSizeB  int64
+	Mode        string
+	Protocol    string
+	Operation   string
+	FileSize    string
+	FileSizeB   int64
 	Concurrency int
-	Duration   time.Duration
-	Throughput float64
-	Error      string
+	Duration    time.Duration
+	Throughput  float64
+	Error       string
 }
 
 func setupCompareEnv(t *testing.T) *CompareTestEnv {
@@ -108,7 +110,23 @@ func setupCompareEnv(t *testing.T) *CompareTestEnv {
 		CORSAllowedOrigins: "*",
 	}
 
-	srv := httpserver.NewServer(serverCfg, config.TLSConfig{}, fm, dirSvc, flSvc, transferSvc, authSvc, cryptoSvc, store, cacheSvc, nil, qdb)
+	srv := httpserver.NewServer(httpserver.Deps{
+		Config:      serverCfg,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(qdb),
+			database.NewAuditWriter(qdb, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(database.NewApiKeyService(qdb), authSvc.GenerateApiKey),
+		DB:      qdb,
+	})
 
 	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -395,11 +413,11 @@ func httpParallelDownload(baseURL, filePath string, totalSize int64, concurrency
 	return totalData, nil
 }
 
-func grpcSequentialUpload(svc *transfer.FileTransferService, filePath string, data []byte, chunkSize int) error {
+func grpcSequentialUpload(ctx context.Context, svc *transfer.FileTransferService, filePath string, data []byte, chunkSize int) error {
 	totalSize := int64(len(data))
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	sessionID, err := svc.CreateUploadSession(filePath, filepath.Base(filePath), totalSize, "perf", hash)
+	sessionID, err := svc.CreateUploadSession(ctx, filePath, filepath.Base(filePath), totalSize, "perf", hash)
 	if err != nil {
 		return err
 	}
@@ -409,20 +427,20 @@ func grpcSequentialUpload(svc *transfer.FileTransferService, filePath string, da
 		if end > len(data) {
 			end = len(data)
 		}
-		if err := svc.UploadChunk(sessionID, data[offset:end], int64(offset)); err != nil {
+		if err := svc.UploadChunk(ctx, sessionID, data[offset:end], int64(offset)); err != nil {
 			return err
 		}
 	}
 
-	_, err = svc.CompleteUpload(sessionID)
+	_, err = svc.CompleteUpload(ctx, sessionID)
 	return err
 }
 
-func grpcMultipartUpload(svc *transfer.FileTransferService, filePath string, data []byte, concurrency int) error {
+func grpcMultipartUpload(ctx context.Context, svc *transfer.FileTransferService, filePath string, data []byte, concurrency int) error {
 	totalSize := int64(len(data))
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	sessionID, partSize, err := svc.CreateMultipartUpload(filePath, filepath.Base(filePath), totalSize, "perf", hash)
+	sessionID, partSize, err := svc.CreateMultipartUpload(ctx, filePath, filepath.Base(filePath), totalSize, "perf", hash)
 	if err != nil {
 		return err
 	}
@@ -449,7 +467,7 @@ func grpcMultipartUpload(svc *transfer.FileTransferService, filePath string, dat
 				end = totalSize
 			}
 			chunk := data[offset:end]
-			if err := svc.UploadPartData(sessionID, partNum+1, offset, chunk); err != nil {
+			if err := svc.UploadPartData(ctx, sessionID, partNum+1, offset, chunk); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -465,11 +483,11 @@ func grpcMultipartUpload(svc *transfer.FileTransferService, filePath string, dat
 		return err
 	}
 
-	return svc.CompleteMultipartUpload(sessionID)
+	return svc.CompleteMultipartUpload(ctx, sessionID)
 }
 
-func grpcSequentialDownload(svc *transfer.FileTransferService, filePath string, totalSize int64, chunkSize int) ([]byte, error) {
-	sessionID, err := svc.CreateDownloadSession(filePath, "perf")
+func grpcSequentialDownload(ctx context.Context, svc *transfer.FileTransferService, filePath string, totalSize int64, chunkSize int) ([]byte, error) {
+	sessionID, err := svc.CreateDownloadSession(ctx, filePath, "perf")
 	if err != nil {
 		return nil, err
 	}
@@ -481,7 +499,7 @@ func grpcSequentialDownload(svc *transfer.FileTransferService, filePath string, 
 		if totalSize-offset < sz {
 			sz = totalSize - offset
 		}
-		chunk, err := svc.DownloadChunk(sessionID, int(sz), offset)
+		chunk, err := svc.DownloadChunk(ctx, sessionID, int(sz), offset)
 		if err != nil {
 			return nil, err
 		}
@@ -489,12 +507,12 @@ func grpcSequentialDownload(svc *transfer.FileTransferService, filePath string, 
 		offset += int64(len(chunk))
 	}
 
-	svc.CompleteDownload(sessionID)
+	svc.CompleteDownload(ctx, sessionID)
 	return result, nil
 }
 
-func grpcParallelDownload(svc *transfer.FileTransferService, filePath string, totalSize int64, concurrency int) ([]byte, error) {
-	sessionID, err := svc.CreateDownloadSession(filePath, "perf")
+func grpcParallelDownload(ctx context.Context, svc *transfer.FileTransferService, filePath string, totalSize int64, concurrency int) ([]byte, error) {
+	sessionID, err := svc.CreateDownloadSession(ctx, filePath, "perf")
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +528,7 @@ func grpcParallelDownload(svc *transfer.FileTransferService, filePath string, to
 		segments[i] = transfer.DownloadSegment{Offset: offset, Size: size}
 	}
 
-	results := svc.ParallelDownloadChunks(sessionID, segments)
+	results := svc.ParallelDownloadChunks(ctx, sessionID, segments)
 
 	var totalData []byte
 	for _, r := range results {
@@ -520,7 +538,7 @@ func grpcParallelDownload(svc *transfer.FileTransferService, filePath string, to
 		totalData = append(totalData, r.Data...)
 	}
 
-	svc.CompleteDownload(sessionID)
+	svc.CompleteDownload(ctx, sessionID)
 	return totalData, nil
 }
 
@@ -615,7 +633,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				path := fmt.Sprintf("/compare/grpc/seq_upload/%s/c%d/%d", sizeLabel, concurrency, i)
 				start := time.Now()
-				err := grpcSequentialUpload(env.TransferSvc, path, data, chunkSize)
+				err := grpcSequentialUpload(t.Context(), env.TransferSvc, path, data, chunkSize)
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
@@ -642,7 +660,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				path := fmt.Sprintf("/compare/grpc/mp_upload/%s/c%d/%d", sizeLabel, concurrency, i)
 				start := time.Now()
-				err := grpcMultipartUpload(env.TransferSvc, path, data, concurrency)
+				err := grpcMultipartUpload(t.Context(), env.TransferSvc, path, data, concurrency)
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
@@ -668,15 +686,15 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 		}
 
 		uploadPath := fmt.Sprintf("/compare/dl_setup/%s/file.bin", sizeLabel)
-		sessionID, _ := env.TransferSvc.CreateUploadSession(uploadPath, fmt.Sprintf("test_%s.bin", sizeLabel), fileSize, "perf", "")
+		sessionID, _ := env.TransferSvc.CreateUploadSession(t.Context(), uploadPath, fmt.Sprintf("test_%s.bin", sizeLabel), fileSize, "perf", "")
 		for offset := 0; offset < len(data); offset += chunkSize {
 			end := offset + chunkSize
 			if end > len(data) {
 				end = len(data)
 			}
-			env.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
+			env.TransferSvc.UploadChunk(t.Context(), sessionID, data[offset:end], int64(offset))
 		}
-		_, _ = env.TransferSvc.CompleteUpload(sessionID)
+		_, _ = env.TransferSvc.CompleteUpload(t.Context(), sessionID)
 
 		for _, concurrency := range concurrencyLevels {
 			var durations []time.Duration
@@ -749,7 +767,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 
 			for i := 0; i < iterations; i++ {
 				start := time.Now()
-				downloaded, err := grpcSequentialDownload(env.TransferSvc, uploadPath, fileSize, chunkSize)
+				downloaded, err := grpcSequentialDownload(t.Context(), env.TransferSvc, uploadPath, fileSize, chunkSize)
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
@@ -782,7 +800,7 @@ func TestSegmentedVsNonSegmented_Comparison(t *testing.T) {
 
 			for i := 0; i < iterations; i++ {
 				start := time.Now()
-				downloaded, err := grpcParallelDownload(env.TransferSvc, uploadPath, fileSize, concurrency)
+				downloaded, err := grpcParallelDownload(t.Context(), env.TransferSvc, uploadPath, fileSize, concurrency)
 				dur := time.Since(start)
 				if err != nil {
 					results = append(results, CompareResult{
@@ -1056,7 +1074,23 @@ func createCompareBenchEnv(b *testing.B) *CompareTestEnv {
 		HTTPPort: 0, MaxUploadSizeMB: 4096, MaxChunkSizeMB: 256,
 		MaxPageSize: 1000, CORSAllowedOrigins: "*",
 	}
-	srv := httpserver.NewServer(serverCfg, config.TLSConfig{}, fm, dirSvc, flSvc, transferSvc, authSvc, cryptoSvc, store, cacheSvc, nil, qdb)
+	srv := httpserver.NewServer(httpserver.Deps{
+		Config:      serverCfg,
+		Files:       fm,
+		Directories: dirSvc,
+		Lists:       flSvc,
+		Transfers:   transferSvc,
+		Auth:        authSvc,
+		Crypto:      cryptoSvc,
+		Storage:     store,
+		Cache:       cacheSvc,
+		Audit: auditlog.NewService(
+			database.NewAuditLogService(qdb),
+			database.NewAuditWriter(qdb, 100, time.Second),
+		),
+		ApiKeys: apikey.NewService(database.NewApiKeyService(qdb), authSvc.GenerateApiKey),
+		DB:      qdb,
+	})
 	ln, _ := net.Listen("tcp", ":0")
 	port := ln.Addr().(*net.TCPAddr).Port
 
@@ -1119,15 +1153,15 @@ func benchmarkCompareHTTPDownload(b *testing.B, fileSize int64, segmented bool, 
 	chunkSize := 4 * 1024 * 1024
 
 	uploadPath := fmt.Sprintf("/bench/http/dl_setup/%d/file.bin", fileSize)
-	sessionID, _ := env.TransferSvc.CreateUploadSession(uploadPath, "bench.bin", fileSize, "bench", "")
+	sessionID, _ := env.TransferSvc.CreateUploadSession(b.Context(), uploadPath, "bench.bin", fileSize, "bench", "")
 	for offset := 0; offset < len(data); offset += chunkSize {
 		end := offset + chunkSize
 		if end > len(data) {
 			end = len(data)
 		}
-		env.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
+		env.TransferSvc.UploadChunk(b.Context(), sessionID, data[offset:end], int64(offset))
 	}
-	_, _ = env.TransferSvc.CompleteUpload(sessionID)
+	_, _ = env.TransferSvc.CompleteUpload(b.Context(), sessionID)
 
 	b.ResetTimer()
 	b.SetBytes(fileSize)
@@ -1164,9 +1198,9 @@ func benchmarkCompareGRPCUpload(b *testing.B, fileSize int64, segmented bool, co
 		path := fmt.Sprintf("/bench/grpc/upload/%d/%d", fileSize, i)
 		var err error
 		if segmented {
-			err = grpcMultipartUpload(env.TransferSvc, path, data, concurrency)
+			err = grpcMultipartUpload(b.Context(), env.TransferSvc, path, data, concurrency)
 		} else {
-			err = grpcSequentialUpload(env.TransferSvc, path, data, chunkSize)
+			err = grpcSequentialUpload(b.Context(), env.TransferSvc, path, data, chunkSize)
 		}
 		if err != nil {
 			b.Fatalf("upload failed: %v", err)
@@ -1182,15 +1216,15 @@ func benchmarkCompareGRPCDownload(b *testing.B, fileSize int64, segmented bool, 
 	chunkSize := 4 * 1024 * 1024
 
 	uploadPath := fmt.Sprintf("/bench/grpc/dl_setup/%d/file.bin", fileSize)
-	sessionID, _ := env.TransferSvc.CreateUploadSession(uploadPath, "bench.bin", fileSize, "bench", "")
+	sessionID, _ := env.TransferSvc.CreateUploadSession(b.Context(), uploadPath, "bench.bin", fileSize, "bench", "")
 	for offset := 0; offset < len(data); offset += chunkSize {
 		end := offset + chunkSize
 		if end > len(data) {
 			end = len(data)
 		}
-		env.TransferSvc.UploadChunk(sessionID, data[offset:end], int64(offset))
+		env.TransferSvc.UploadChunk(b.Context(), sessionID, data[offset:end], int64(offset))
 	}
-	_, _ = env.TransferSvc.CompleteUpload(sessionID)
+	_, _ = env.TransferSvc.CompleteUpload(b.Context(), sessionID)
 
 	b.ResetTimer()
 	b.SetBytes(fileSize)
@@ -1200,9 +1234,9 @@ func benchmarkCompareGRPCDownload(b *testing.B, fileSize int64, segmented bool, 
 		var downloaded []byte
 		var err error
 		if segmented {
-			downloaded, err = grpcParallelDownload(env.TransferSvc, uploadPath, fileSize, concurrency)
+			downloaded, err = grpcParallelDownload(b.Context(), env.TransferSvc, uploadPath, fileSize, concurrency)
 		} else {
-			downloaded, err = grpcSequentialDownload(env.TransferSvc, uploadPath, fileSize, chunkSize)
+			downloaded, err = grpcSequentialDownload(b.Context(), env.TransferSvc, uploadPath, fileSize, chunkSize)
 		}
 		if err != nil {
 			b.Fatalf("download failed: %v", err)

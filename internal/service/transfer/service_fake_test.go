@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -20,20 +21,20 @@ func newFakeMetadata() *fakeMetadata {
 	return &fakeMetadata{byPath: map[string]*database.FileMetadata{}}
 }
 
-func (f *fakeMetadata) GetByPath(path string) (*database.FileMetadata, error) {
+func (f *fakeMetadata) GetByPath(_ context.Context, path string) (*database.FileMetadata, error) {
 	if meta, ok := f.byPath[path]; ok {
 		return meta, nil
 	}
 	return nil, sql.ErrNoRows
 }
 
-func (f *fakeMetadata) Create(meta *database.FileMetadata) error {
+func (f *fakeMetadata) Create(_ context.Context, meta *database.FileMetadata) error {
 	f.created++
 	f.byPath[meta.Path] = meta
 	return nil
 }
 
-func (f *fakeMetadata) Update(meta *database.FileMetadata) error {
+func (f *fakeMetadata) Update(_ context.Context, meta *database.FileMetadata) error {
 	f.updated++
 	f.byPath[meta.Path] = meta
 	return nil
@@ -46,20 +47,20 @@ func TestSequentialUploadCompletesWithoutDatabase(t *testing.T) {
 	t.Cleanup(svc.StopCleanupThread)
 
 	payload := []byte("chunk-one|chunk-two")
-	sessionID, err := svc.CreateUploadSession("/fake/upload.bin", "upload.bin", int64(len(payload)), "client-1", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "/fake/upload.bin", "upload.bin", int64(len(payload)), "client-1", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession: %v", err)
 	}
 
 	split := 10
-	if err := svc.UploadChunk(sessionID, payload[:split], 0); err != nil {
+	if err := svc.UploadChunk(t.Context(), sessionID, payload[:split], 0); err != nil {
 		t.Fatalf("UploadChunk(first): %v", err)
 	}
-	if err := svc.UploadChunk(sessionID, payload[split:], int64(split)); err != nil {
+	if err := svc.UploadChunk(t.Context(), sessionID, payload[split:], int64(split)); err != nil {
 		t.Fatalf("UploadChunk(second): %v", err)
 	}
 
-	result, err := svc.CompleteUpload(sessionID)
+	result, err := svc.CompleteUpload(t.Context(), sessionID)
 	if err != nil {
 		t.Fatalf("CompleteUpload: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestSequentialUploadCompletesWithoutDatabase(t *testing.T) {
 	if meta.created != 1 {
 		t.Errorf("metadata Create called %d times, want 1", meta.created)
 	}
-	stored, err := store.Read("/fake/upload.bin")
+	stored, err := store.Read(t.Context(), "/fake/upload.bin")
 	if err != nil {
 		t.Fatalf("stored object missing: %v", err)
 	}

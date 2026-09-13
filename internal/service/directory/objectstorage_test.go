@@ -2,6 +2,7 @@ package directory
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -25,12 +26,12 @@ import (
 type mockObjectStorage struct {
 	mu sync.Mutex
 
-	createDirCalls    []string
-	removeDirCalls    []string
-	renameCalls       []renameCall
-	removeCalls       []string
-	storageType       string
-	objects           map[string][]byte // in-memory object store for per-file Remove verification
+	createDirCalls []string
+	removeDirCalls []string
+	renameCalls    []renameCall
+	removeCalls    []string
+	storageType    string
+	objects        map[string][]byte // in-memory object store for per-file Remove verification
 }
 
 type renameCall struct {
@@ -47,28 +48,28 @@ func newMockObjectStorage() *mockObjectStorage {
 
 func (m *mockObjectStorage) StorageType() string { return m.storageType }
 
-func (m *mockObjectStorage) CreateDirectory(path string) error {
+func (m *mockObjectStorage) CreateDirectory(_ context.Context, path string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createDirCalls = append(m.createDirCalls, path)
 	return nil
 }
 
-func (m *mockObjectStorage) RemoveDirectory(path string) error {
+func (m *mockObjectStorage) RemoveDirectory(_ context.Context, path string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.removeDirCalls = append(m.removeDirCalls, path)
 	return nil
 }
 
-func (m *mockObjectStorage) Rename(oldPath, newPath string) error {
+func (m *mockObjectStorage) Rename(_ context.Context, oldPath, newPath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.renameCalls = append(m.renameCalls, renameCall{oldPath, newPath})
 	return nil
 }
 
-func (m *mockObjectStorage) Remove(path string) error {
+func (m *mockObjectStorage) Remove(_ context.Context, path string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.removeCalls = append(m.removeCalls, path)
@@ -77,7 +78,7 @@ func (m *mockObjectStorage) Remove(path string) error {
 }
 
 // Write stores an object in-memory so that per-file Remove can be observed.
-func (m *mockObjectStorage) Write(path string, data []byte) error {
+func (m *mockObjectStorage) Write(_ context.Context, path string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.objects[path] = append([]byte(nil), data...)
@@ -86,16 +87,16 @@ func (m *mockObjectStorage) Write(path string, data []byte) error {
 
 // --- stubs for the rest of the StorageAdapter interface ---
 
-func (m *mockObjectStorage) WriteAt(path string, data []byte, offset int64) error {
+func (m *mockObjectStorage) WriteAt(_ context.Context, path string, data []byte, offset int64) error {
 	return fmt.Errorf("not supported")
 }
-func (m *mockObjectStorage) WriteFromTempFile(path string, tempFilePath string) error {
+func (m *mockObjectStorage) WriteFromTempFile(_ context.Context, path string, tempFilePath string) error {
 	return fmt.Errorf("not supported")
 }
-func (m *mockObjectStorage) WriteFromReader(path string, reader io.Reader) error {
+func (m *mockObjectStorage) WriteFromReader(_ context.Context, path string, reader io.Reader) error {
 	return fmt.Errorf("not supported")
 }
-func (m *mockObjectStorage) Read(path string) ([]byte, error) {
+func (m *mockObjectStorage) Read(_ context.Context, path string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if data, ok := m.objects[path]; ok {
@@ -103,10 +104,10 @@ func (m *mockObjectStorage) Read(path string) ([]byte, error) {
 	}
 	return nil, fmt.Errorf("not found")
 }
-func (m *mockObjectStorage) ReadAt(path string, size int, offset int64) ([]byte, error) {
+func (m *mockObjectStorage) ReadAt(_ context.Context, path string, size int, offset int64) ([]byte, error) {
 	return nil, fmt.Errorf("not supported")
 }
-func (m *mockObjectStorage) OpenReader(path string) (io.ReadCloser, error) {
+func (m *mockObjectStorage) OpenReader(_ context.Context, path string) (io.ReadCloser, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if data, ok := m.objects[path]; ok {
@@ -114,16 +115,16 @@ func (m *mockObjectStorage) OpenReader(path string) (io.ReadCloser, error) {
 	}
 	return nil, fmt.Errorf("not found")
 }
-func (m *mockObjectStorage) Exists(path string) (bool, error) {
+func (m *mockObjectStorage) Exists(_ context.Context, path string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.objects[path]
 	return ok, nil
 }
-func (m *mockObjectStorage) List(directory string) ([]string, error) {
+func (m *mockObjectStorage) List(_ context.Context, directory string) ([]string, error) {
 	return nil, nil
 }
-func (m *mockObjectStorage) GetSize(path string) (int64, error) {
+func (m *mockObjectStorage) GetSize(_ context.Context, path string) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if data, ok := m.objects[path]; ok {
@@ -144,14 +145,14 @@ func TestDirectoryManager_ObjectStorage_SkipsCreateDirectoryMarker(t *testing.T)
 	store := newMockObjectStorage()
 	dm := NewDirectoryManagerWithDistLock(db, store, distributed.NewLocalDistributedLock())
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 
 	if got := len(store.createDirCalls); got != 0 {
 		t.Errorf("expected 0 CreateDirectory storage calls on object storage, got %d (%v)", got, store.createDirCalls)
 	}
-	if !dm.Exists("foo") {
+	if !dm.Exists(t.Context(), "foo") {
 		t.Errorf("expected DB record for foo to exist")
 	}
 }
@@ -165,11 +166,11 @@ func TestDirectoryManager_ObjectStorage_RenameRejected(t *testing.T) {
 	store := newMockObjectStorage()
 	dm := NewDirectoryManagerWithDistLock(db, store, distributed.NewLocalDistributedLock())
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 
-	err := dm.RenameDirectory("foo", "bar")
+	err := dm.RenameDirectory(t.Context(), "foo", "bar")
 	if err == nil {
 		t.Fatalf("expected RenameDirectory to fail on object storage, got nil")
 	}
@@ -190,18 +191,18 @@ func TestDirectoryManager_ObjectStorage_RecursiveDeleteSkipsRemoveDirectory(t *t
 	store := newMockObjectStorage()
 	dm := NewDirectoryManagerWithDistLock(db, store, distributed.NewLocalDistributedLock())
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory foo: %v", err)
 	}
 	// Seed two child files in the mock object store + DB.
 	for _, p := range []string{"foo/a.txt", "foo/b.txt"} {
-		if err := store.Write(p, []byte("x")); err != nil {
+		if err := store.Write(t.Context(), p, []byte("x")); err != nil {
 			t.Fatalf("store.Write %s: %v", p, err)
 		}
 		createFileRecord(t, db, p, 1)
 	}
 
-	if err := dm.DeleteDirectory("foo", true); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", true); err != nil {
 		t.Fatalf("DeleteDirectory recursive failed: %v", err)
 	}
 
@@ -229,7 +230,7 @@ func TestDirectoryManager_LocalStorage_StillCallsDirectoryStorageOps(t *testing.
 	store := setupTestStore(t)
 	dm := NewDirectoryManagerWithDistLock(db, store, distributed.NewLocalDistributedLock())
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	if !mustExist(t, store, "foo") {
@@ -238,12 +239,12 @@ func TestDirectoryManager_LocalStorage_StillCallsDirectoryStorageOps(t *testing.
 		t.Errorf("expected local backend to have created the directory marker")
 	}
 
-	if err := dm.RenameDirectory("foo", "bar"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "bar"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
 
 	// Recursive delete should remove the directory on the local backend.
-	if err := dm.DeleteDirectory("bar", true); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "bar", true); err != nil {
 		t.Fatalf("DeleteDirectory failed: %v", err)
 	}
 }
@@ -283,16 +284,16 @@ func TestDirectoryManager_ObjectStorage_NonRecursiveDeleteOnlySoftDeletesDB(t *t
 	store := newMockObjectStorage()
 	dm := NewDirectoryManagerWithDistLock(db, store, distributed.NewLocalDistributedLock())
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if err := dm.DeleteDirectory("foo", false); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", false); err != nil {
 		t.Fatalf("DeleteDirectory non-recursive failed: %v", err)
 	}
 	if got := len(store.removeDirCalls); got != 0 {
 		t.Errorf("expected 0 RemoveDirectory calls on object storage, got %d", got)
 	}
-	if dm.Exists("foo") {
+	if dm.Exists(t.Context(), "foo") {
 		t.Errorf("expected foo to be soft-deleted in DB")
 	}
 }

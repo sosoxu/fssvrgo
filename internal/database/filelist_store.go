@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -39,7 +40,7 @@ func NewFileListStore(db *DB) *FileListStore {
 }
 
 // List returns up to query.Limit rows starting at query.Offset.
-func (s *FileListStore) List(query FileListQuery) ([]FileListRow, error) {
+func (s *FileListStore) List(ctx context.Context, query FileListQuery) ([]FileListRow, error) {
 	whereClause, args, err := fileListWhere(query)
 	if err != nil {
 		return nil, err
@@ -58,7 +59,7 @@ func (s *FileListStore) List(query FileListQuery) ([]FileListRow, error) {
 	itemsArgs = append(itemsArgs, args...)
 	itemsArgs = append(itemsArgs, query.Limit, query.Offset)
 
-	rows, err := s.db.Query(itemsQuery, itemsArgs...)
+	rows, err := s.db.QueryContext(ctx, itemsQuery, itemsArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list items: %w", err)
 	}
@@ -80,7 +81,7 @@ func (s *FileListStore) List(query FileListQuery) ([]FileListRow, error) {
 
 // Count returns the exact number of rows matching the query, ignoring
 // Limit/Offset.
-func (s *FileListStore) Count(query FileListQuery) (int, error) {
+func (s *FileListStore) Count(ctx context.Context, query FileListQuery) (int, error) {
 	whereClause, args, err := fileListWhere(query)
 	if err != nil {
 		return 0, err
@@ -95,7 +96,7 @@ func (s *FileListStore) Count(query FileListQuery) (int, error) {
 	countArgs = append(countArgs, args...)
 
 	var total int
-	if err := s.db.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("failed to count items: %w", err)
 	}
 	return total, nil

@@ -52,7 +52,7 @@ func createFileRecord(t *testing.T, db *database.DB, path string, size int64) {
 		UpdatedAt:       now,
 		IsDeleted:       false,
 	}
-	if err := database.NewFileMetadataService(db).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("failed to create file metadata for %q: %v", path, err)
 	}
 }
@@ -62,15 +62,15 @@ func TestCreateDirectory(t *testing.T) {
 	dm := NewDirectoryManager(db)
 
 	// 正常创建
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if !dm.Exists("foo") {
+	if !dm.Exists(t.Context(), "foo") {
 		t.Errorf("Exists should return true for created directory")
 	}
 
 	// 重复创建报错
-	err := dm.CreateDirectory("foo")
+	err := dm.CreateDirectory(t.Context(), "foo")
 	if err == nil {
 		t.Errorf("CreateDirectory should fail on duplicate")
 	}
@@ -80,15 +80,15 @@ func TestDeleteDirectory_NonRecursive_Empty(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 
 	// 非递归删除空目录
-	if err := dm.DeleteDirectory("foo", false); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", false); err != nil {
 		t.Fatalf("DeleteDirectory non-recursive failed: %v", err)
 	}
-	if dm.Exists("foo") {
+	if dm.Exists(t.Context(), "foo") {
 		t.Errorf("Exists should return false after deletion")
 	}
 }
@@ -97,17 +97,17 @@ func TestDeleteDirectory_NonRecursive_NotEmpty(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	createFileRecord(t, db, "foo/bar.txt", 10)
 
 	// 非递归删除非空目录报错
-	err := dm.DeleteDirectory("foo", false)
+	err := dm.DeleteDirectory(t.Context(), "foo", false)
 	if err == nil {
 		t.Errorf("DeleteDirectory non-recursive should fail on non-empty directory")
 	}
-	if !dm.Exists("foo") {
+	if !dm.Exists(t.Context(), "foo") {
 		t.Errorf("Exists should still return true when delete failed")
 	}
 }
@@ -116,31 +116,31 @@ func TestDeleteDirectory_Recursive_WithFiles(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if err := dm.CreateDirectory("foo/sub"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo/sub"); err != nil {
 		t.Fatalf("CreateDirectory sub failed: %v", err)
 	}
 	createFileRecord(t, db, "foo/bar.txt", 10)
 	createFileRecord(t, db, "foo/sub/nested.txt", 5)
 
 	// 递归删除含文件的目录
-	if err := dm.DeleteDirectory("foo", true); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", true); err != nil {
 		t.Fatalf("DeleteDirectory recursive failed: %v", err)
 	}
-	if dm.Exists("foo") {
+	if dm.Exists(t.Context(), "foo") {
 		t.Errorf("Exists should return false after recursive deletion")
 	}
 	// 子目录与文件的元数据都应该被软删除
-	subMeta, err := database.NewDirectoryMetadataService(db).GetByPath("foo/sub")
+	subMeta, err := database.NewDirectoryMetadataService(db).GetByPath(t.Context(), "foo/sub")
 	if err != nil {
 		t.Fatalf("GetByPath failed: %v", err)
 	}
 	if subMeta != nil {
 		t.Errorf("sub-directory metadata should be soft-deleted")
 	}
-	fileMeta, err := database.NewFileMetadataService(db).GetByPath("foo/bar.txt")
+	fileMeta, err := database.NewFileMetadataService(db).GetByPath(t.Context(), "foo/bar.txt")
 	if err != nil {
 		t.Fatalf("GetByPath failed: %v", err)
 	}
@@ -153,21 +153,21 @@ func TestRenameDirectory(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	// 正常重命名
-	if err := dm.RenameDirectory("foo", "bar"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "bar"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
-	if !dm.Exists("bar") {
+	if !dm.Exists(t.Context(), "bar") {
 		t.Errorf("Exists should return true for renamed directory")
 	}
-	if dm.Exists("foo") {
+	if dm.Exists(t.Context(), "foo") {
 		t.Errorf("Exists should return false for old directory name")
 	}
 
-	meta, err := dm.GetDirectoryMetadata("bar")
+	meta, err := dm.GetDirectoryMetadata(t.Context(), "bar")
 	if err != nil {
 		t.Fatalf("GetDirectoryMetadata failed: %v", err)
 	}
@@ -183,14 +183,14 @@ func TestRenameDirectory_TargetExists(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory foo failed: %v", err)
 	}
-	if err := dm.CreateDirectory("bar"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "bar"); err != nil {
 		t.Fatalf("CreateDirectory bar failed: %v", err)
 	}
 	// 目标已存在报错
-	err := dm.RenameDirectory("foo", "bar")
+	err := dm.RenameDirectory(t.Context(), "foo", "bar")
 	if err == nil {
 		t.Errorf("RenameDirectory should fail when target exists")
 	}
@@ -200,24 +200,24 @@ func TestRenameDirectory_WithChildren(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
-	if err := dm.CreateDirectory("foo/sub"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo/sub"); err != nil {
 		t.Fatalf("CreateDirectory sub failed: %v", err)
 	}
 	createFileRecord(t, db, "foo/bar.txt", 10)
 
-	if err := dm.RenameDirectory("foo", "baz"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "baz"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
-	if !dm.Exists("baz") {
+	if !dm.Exists(t.Context(), "baz") {
 		t.Errorf("Exists should return true for renamed directory")
 	}
-	if !dm.Exists("baz/sub") {
+	if !dm.Exists(t.Context(), "baz/sub") {
 		t.Errorf("Exists should return true for renamed child directory")
 	}
-	fileMeta, err := database.NewFileMetadataService(db).GetByPath("baz/bar.txt")
+	fileMeta, err := database.NewFileMetadataService(db).GetByPath(t.Context(), "baz/bar.txt")
 	if err != nil {
 		t.Fatalf("GetByPath failed: %v", err)
 	}
@@ -230,11 +230,11 @@ func TestGetDirectoryMetadata_Exists(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	// 获取存在的目录
-	meta, err := dm.GetDirectoryMetadata("foo")
+	meta, err := dm.GetDirectoryMetadata(t.Context(), "foo")
 	if err != nil {
 		t.Fatalf("GetDirectoryMetadata failed: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestGetDirectoryMetadata_NotExists(t *testing.T) {
 	dm := NewDirectoryManager(db)
 
 	// 获取不存在的目录
-	_, err := dm.GetDirectoryMetadata("nonexistent")
+	_, err := dm.GetDirectoryMetadata(t.Context(), "nonexistent")
 	if err == nil {
 		t.Errorf("GetDirectoryMetadata should fail for non-existent directory")
 	}
@@ -264,15 +264,15 @@ func TestExists(t *testing.T) {
 	db := setupTestDB(t)
 	dm := NewDirectoryManager(db)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	// 目录存在
-	if !dm.Exists("foo") {
+	if !dm.Exists(t.Context(), "foo") {
 		t.Errorf("Exists should return true for existing directory")
 	}
 	// 目录不存在
-	if dm.Exists("nonexistent") {
+	if dm.Exists(t.Context(), "nonexistent") {
 		t.Errorf("Exists should return false for non-existent directory")
 	}
 }
@@ -282,11 +282,11 @@ func TestDirectoryManagerWithStore_DeleteRemovesStorageObject(t *testing.T) {
 	store := setupTestStore(t)
 	dm := NewDirectoryManagerWithStore(db, store)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	// 在存储中写入文件并插入 DB 记录
-	if err := store.Write("foo/bar.txt", []byte("hello")); err != nil {
+	if err := store.Write(t.Context(), "foo/bar.txt", []byte("hello")); err != nil {
 		t.Fatalf("store.Write failed: %v", err)
 	}
 	if !mustExist(t, store, "foo/bar.txt") {
@@ -295,7 +295,7 @@ func TestDirectoryManagerWithStore_DeleteRemovesStorageObject(t *testing.T) {
 	createFileRecord(t, db, "foo/bar.txt", 5)
 
 	// 递归删除应同时删除存储对象
-	if err := dm.DeleteDirectory("foo", true); err != nil {
+	if err := dm.DeleteDirectory(t.Context(), "foo", true); err != nil {
 		t.Fatalf("DeleteDirectory recursive failed: %v", err)
 	}
 	if mustExist(t, store, "foo/bar.txt") {
@@ -308,11 +308,11 @@ func TestDirectoryManagerWithStore_RenameMovesStorageObject(t *testing.T) {
 	store := setupTestStore(t)
 	dm := NewDirectoryManagerWithStore(db, store)
 
-	if err := dm.CreateDirectory("foo"); err != nil {
+	if err := dm.CreateDirectory(t.Context(), "foo"); err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 	// 在存储中写入文件并插入 DB 记录
-	if err := store.Write("foo/bar.txt", []byte("hello")); err != nil {
+	if err := store.Write(t.Context(), "foo/bar.txt", []byte("hello")); err != nil {
 		t.Fatalf("store.Write failed: %v", err)
 	}
 	if !mustExist(t, store, "foo/bar.txt") {
@@ -321,7 +321,7 @@ func TestDirectoryManagerWithStore_RenameMovesStorageObject(t *testing.T) {
 	createFileRecord(t, db, "foo/bar.txt", 5)
 
 	// 重命名应同时移动存储对象
-	if err := dm.RenameDirectory("foo", "baz"); err != nil {
+	if err := dm.RenameDirectory(t.Context(), "foo", "baz"); err != nil {
 		t.Fatalf("RenameDirectory failed: %v", err)
 	}
 	if mustExist(t, store, "foo/bar.txt") {
@@ -331,7 +331,7 @@ func TestDirectoryManagerWithStore_RenameMovesStorageObject(t *testing.T) {
 		t.Errorf("storage file should exist at new path after rename")
 	}
 	// DB 元数据也应更新
-	fileMeta, err := database.NewFileMetadataService(db).GetByPath("baz/bar.txt")
+	fileMeta, err := database.NewFileMetadataService(db).GetByPath(t.Context(), "baz/bar.txt")
 	if err != nil {
 		t.Fatalf("GetByPath failed: %v", err)
 	}

@@ -86,7 +86,7 @@ func TestMultipartUpload_Basic(t *testing.T) {
 	data := generateTestData(totalSize)
 	expectedHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload("multipart_basic.bin", "multipart_basic.bin", totalSize, "test_client", expectedHash)
+	sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload(t.Context(), "multipart_basic.bin", "multipart_basic.bin", totalSize, "test_client", expectedHash)
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload failed: %v", err)
 	}
@@ -107,16 +107,16 @@ func TestMultipartUpload_Basic(t *testing.T) {
 			end = totalSize
 		}
 		chunk := data[offset:end]
-		if err := env.TransferSvc.UploadPartData(sessionID, i+1, offset, chunk); err != nil {
+		if err := env.TransferSvc.UploadPartData(t.Context(), sessionID, i+1, offset, chunk); err != nil {
 			t.Fatalf("UploadPartData part %d failed: %v", i+1, err)
 		}
 	}
 
-	if err := env.TransferSvc.CompleteMultipartUpload(sessionID); err != nil {
+	if err := env.TransferSvc.CompleteMultipartUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteMultipartUpload failed: %v", err)
 	}
 
-	result, err := env.Storage.Read("multipart_basic.bin")
+	result, err := env.Storage.Read(t.Context(), "multipart_basic.bin")
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestMultipartUpload_ConcurrentParts(t *testing.T) {
 	data := generateTestData(totalSize)
 	expectedHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload("multipart_concurrent.bin", "multipart_concurrent.bin", totalSize, "test_client", expectedHash)
+	sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload(t.Context(), "multipart_concurrent.bin", "multipart_concurrent.bin", totalSize, "test_client", expectedHash)
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload failed: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestMultipartUpload_ConcurrentParts(t *testing.T) {
 				end = totalSize
 			}
 			chunk := data[offset:end]
-			if err := env.TransferSvc.UploadPartData(sessionID, partNum+1, offset, chunk); err != nil {
+			if err := env.TransferSvc.UploadPartData(t.Context(), sessionID, partNum+1, offset, chunk); err != nil {
 				errCh <- fmt.Errorf("part %d: %w", partNum+1, err)
 			}
 		}(i)
@@ -169,11 +169,11 @@ func TestMultipartUpload_ConcurrentParts(t *testing.T) {
 		t.Errorf("concurrent upload error: %v", err)
 	}
 
-	if err := env.TransferSvc.CompleteMultipartUpload(sessionID); err != nil {
+	if err := env.TransferSvc.CompleteMultipartUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteMultipartUpload failed: %v", err)
 	}
 
-	result, err := env.Storage.Read("multipart_concurrent.bin")
+	result, err := env.Storage.Read(t.Context(), "multipart_concurrent.bin")
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -194,16 +194,16 @@ func TestMultipartUpload_Abort(t *testing.T) {
 	env := setupParallelTestEnv(t)
 
 	totalSize := int64(10 * 1024 * 1024)
-	sessionID, _, err := env.TransferSvc.CreateMultipartUpload("multipart_abort.bin", "multipart_abort.bin", totalSize, "test_client", "")
+	sessionID, _, err := env.TransferSvc.CreateMultipartUpload(t.Context(), "multipart_abort.bin", "multipart_abort.bin", totalSize, "test_client", "")
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload failed: %v", err)
 	}
 
-	if err := env.TransferSvc.AbortMultipartUpload(sessionID); err != nil {
+	if err := env.TransferSvc.AbortMultipartUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("AbortMultipartUpload failed: %v", err)
 	}
 
-	_, err = env.TransferSvc.GetMultipartUploadSession(sessionID)
+	_, err = env.TransferSvc.GetMultipartUploadSession(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected error getting aborted session, got nil")
 	}
@@ -215,7 +215,7 @@ func TestMultipartUpload_Progress(t *testing.T) {
 	totalSize := int64(10 * 1024 * 1024)
 	data := generateTestData(totalSize)
 
-	sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload("multipart_progress.bin", "multipart_progress.bin", totalSize, "test_client", "")
+	sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload(t.Context(), "multipart_progress.bin", "multipart_progress.bin", totalSize, "test_client", "")
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload failed: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestMultipartUpload_Progress(t *testing.T) {
 	}
 
 	chunk := data[:partSize]
-	if err := env.TransferSvc.UploadPartData(sessionID, 1, 0, chunk); err != nil {
+	if err := env.TransferSvc.UploadPartData(t.Context(), sessionID, 1, 0, chunk); err != nil {
 		t.Fatalf("UploadPartData failed: %v", err)
 	}
 
@@ -245,7 +245,7 @@ func TestParallelDownload_Basic(t *testing.T) {
 	totalSize := int64(10 * 1024 * 1024)
 	data := generateTestData(totalSize)
 
-	if err := env.Storage.Write("parallel_dl.bin", data); err != nil {
+	if err := env.Storage.Write(t.Context(), "parallel_dl.bin", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -261,11 +261,11 @@ func TestParallelDownload_Basic(t *testing.T) {
 		UpdatedAt:   now,
 		IsDeleted:   false,
 	}
-	if err := database.NewFileMetadataService(env.DB).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(env.DB).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
-	sessionID, err := env.TransferSvc.CreateDownloadSession("parallel_dl.bin", "test_client")
+	sessionID, err := env.TransferSvc.CreateDownloadSession(t.Context(), "parallel_dl.bin", "test_client")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestParallelDownload_Basic(t *testing.T) {
 		segments[i] = transfer.DownloadSegment{Offset: offset, Size: size}
 	}
 
-	results := env.TransferSvc.ParallelDownloadChunks(sessionID, segments)
+	results := env.TransferSvc.ParallelDownloadChunks(t.Context(), sessionID, segments)
 
 	var totalDownloaded int64
 	for i, result := range results {
@@ -312,7 +312,7 @@ func TestParallelDownload_HighConcurrency(t *testing.T) {
 	totalSize := int64(50 * 1024 * 1024)
 	data := generateTestData(totalSize)
 
-	if err := env.Storage.Write("parallel_dl_high.bin", data); err != nil {
+	if err := env.Storage.Write(t.Context(), "parallel_dl_high.bin", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -328,11 +328,11 @@ func TestParallelDownload_HighConcurrency(t *testing.T) {
 		UpdatedAt:   now,
 		IsDeleted:   false,
 	}
-	if err := database.NewFileMetadataService(env.DB).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(env.DB).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
-	sessionID, err := env.TransferSvc.CreateDownloadSession("parallel_dl_high.bin", "test_client")
+	sessionID, err := env.TransferSvc.CreateDownloadSession(t.Context(), "parallel_dl_high.bin", "test_client")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestParallelDownload_HighConcurrency(t *testing.T) {
 		segments[i] = transfer.DownloadSegment{Offset: offset, Size: size}
 	}
 
-	results := env.TransferSvc.ParallelDownloadChunks(sessionID, segments)
+	results := env.TransferSvc.ParallelDownloadChunks(t.Context(), sessionID, segments)
 
 	var totalDownloaded int64
 	for i, result := range results {
@@ -372,7 +372,7 @@ func TestIncrementalHash_SequentialUpload(t *testing.T) {
 	data := generateTestData(totalSize)
 	expectedHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	sessionID, err := env.TransferSvc.CreateUploadSession("incr_hash.bin", "incr_hash.bin", totalSize, "test_client", expectedHash)
+	sessionID, err := env.TransferSvc.CreateUploadSession(t.Context(), "incr_hash.bin", "incr_hash.bin", totalSize, "test_client", expectedHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
@@ -385,14 +385,14 @@ func TestIncrementalHash_SequentialUpload(t *testing.T) {
 			end = totalSize
 		}
 		chunk := data[offset:end]
-		if err := env.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := env.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("UploadChunk at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
 	start := time.Now()
-	if _, err := env.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := env.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 	completeDuration := time.Since(start)
@@ -421,7 +421,7 @@ func TestLargeFileParallelPerformance(t *testing.T) {
 		data := generateTestData(fileSize)
 		expectedHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-		if err := env.Storage.Write(fmt.Sprintf("perf_%d.bin", fileSize), data); err != nil {
+		if err := env.Storage.Write(t.Context(), fmt.Sprintf("perf_%d.bin", fileSize), data); err != nil {
 			t.Fatalf("Write failed for size %d: %v", fileSize, err)
 		}
 
@@ -437,14 +437,14 @@ func TestLargeFileParallelPerformance(t *testing.T) {
 			UpdatedAt:   now,
 			IsDeleted:   false,
 		}
-		if err := database.NewFileMetadataService(env.DB).Create(meta); err != nil {
+		if err := database.NewFileMetadataService(env.DB).Create(t.Context(), meta); err != nil {
 			t.Fatalf("Create metadata failed: %v", err)
 		}
 
 		for _, concurrency := range concurrencyLevels {
 			t.Run(fmt.Sprintf("Upload_%dMB_conc%d", fileSize/(1024*1024), concurrency), func(t *testing.T) {
 				fileName := fmt.Sprintf("perf_upload_%d_c%d.bin", fileSize, concurrency)
-				sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload(fileName, fileName, fileSize, "perf_client", expectedHash)
+				sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload(t.Context(), fileName, fileName, fileSize, "perf_client", expectedHash)
 				if err != nil {
 					t.Fatalf("CreateMultipartUpload failed: %v", err)
 				}
@@ -473,7 +473,7 @@ func TestLargeFileParallelPerformance(t *testing.T) {
 							end = fileSize
 						}
 						chunk := data[offset:end]
-						if err := env.TransferSvc.UploadPartData(sessionID, partNum+1, offset, chunk); err != nil {
+						if err := env.TransferSvc.UploadPartData(t.Context(), sessionID, partNum+1, offset, chunk); err != nil {
 							select {
 							case errCh <- fmt.Errorf("part %d: %w", partNum+1, err):
 							default:
@@ -491,7 +491,7 @@ func TestLargeFileParallelPerformance(t *testing.T) {
 					t.Errorf("upload error: %v", err)
 				}
 
-				if err := env.TransferSvc.CompleteMultipartUpload(sessionID); err != nil {
+				if err := env.TransferSvc.CompleteMultipartUpload(t.Context(), sessionID); err != nil {
 					t.Fatalf("CompleteMultipartUpload failed: %v", err)
 				}
 
@@ -502,7 +502,7 @@ func TestLargeFileParallelPerformance(t *testing.T) {
 
 			t.Run(fmt.Sprintf("Download_%dMB_conc%d", fileSize/(1024*1024), concurrency), func(t *testing.T) {
 				dlFileName := fmt.Sprintf("perf_%d.bin", fileSize)
-				sessionID, err := env.TransferSvc.CreateDownloadSession(dlFileName, "perf_client")
+				sessionID, err := env.TransferSvc.CreateDownloadSession(t.Context(), dlFileName, "perf_client")
 				if err != nil {
 					t.Fatalf("CreateDownloadSession failed: %v", err)
 				}
@@ -519,7 +519,7 @@ func TestLargeFileParallelPerformance(t *testing.T) {
 				}
 
 				start := time.Now()
-				results := env.TransferSvc.ParallelDownloadChunks(sessionID, segments)
+				results := env.TransferSvc.ParallelDownloadChunks(t.Context(), sessionID, segments)
 				downloadDuration := time.Since(start)
 
 				var totalDownloaded int64
@@ -541,7 +541,7 @@ func TestLargeFileParallelPerformance(t *testing.T) {
 			})
 		}
 
-		env.Storage.Remove(fmt.Sprintf("perf_%d.bin", fileSize))
+		env.Storage.Remove(t.Context(), fmt.Sprintf("perf_%d.bin", fileSize))
 	}
 }
 
@@ -557,7 +557,7 @@ func TestSequentialVsParallel_Upload(t *testing.T) {
 	expectedHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
 	t.Run("Sequential", func(t *testing.T) {
-		sessionID, err := env.TransferSvc.CreateUploadSession("seq_vs_par_seq.bin", "seq_vs_par_seq.bin", totalSize, "perf_client", expectedHash)
+		sessionID, err := env.TransferSvc.CreateUploadSession(t.Context(), "seq_vs_par_seq.bin", "seq_vs_par_seq.bin", totalSize, "perf_client", expectedHash)
 		if err != nil {
 			t.Fatalf("CreateUploadSession failed: %v", err)
 		}
@@ -571,14 +571,14 @@ func TestSequentialVsParallel_Upload(t *testing.T) {
 				end = totalSize
 			}
 			chunk := data[offset:end]
-			if err := env.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+			if err := env.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 				t.Fatalf("UploadChunk failed: %v", err)
 			}
 			offset = end
 		}
 		uploadDuration := time.Since(start)
 
-		if _, err := env.TransferSvc.CompleteUpload(sessionID); err != nil {
+		if _, err := env.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 			t.Fatalf("CompleteUpload failed: %v", err)
 		}
 
@@ -588,7 +588,7 @@ func TestSequentialVsParallel_Upload(t *testing.T) {
 	})
 
 	t.Run("Parallel_4Parts", func(t *testing.T) {
-		sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload("seq_vs_par_par.bin", "seq_vs_par_par.bin", totalSize, "perf_client", expectedHash)
+		sessionID, partSize, err := env.TransferSvc.CreateMultipartUpload(t.Context(), "seq_vs_par_par.bin", "seq_vs_par_par.bin", totalSize, "perf_client", expectedHash)
 		if err != nil {
 			t.Fatalf("CreateMultipartUpload failed: %v", err)
 		}
@@ -617,7 +617,7 @@ func TestSequentialVsParallel_Upload(t *testing.T) {
 					end = totalSize
 				}
 				chunk := data[offset:end]
-				if err := env.TransferSvc.UploadPartData(sessionID, partNum+1, offset, chunk); err != nil {
+				if err := env.TransferSvc.UploadPartData(t.Context(), sessionID, partNum+1, offset, chunk); err != nil {
 					select {
 					case errCh <- fmt.Errorf("part %d: %w", partNum+1, err):
 					default:
@@ -634,7 +634,7 @@ func TestSequentialVsParallel_Upload(t *testing.T) {
 			t.Errorf("upload error: %v", err)
 		}
 
-		if err := env.TransferSvc.CompleteMultipartUpload(sessionID); err != nil {
+		if err := env.TransferSvc.CompleteMultipartUpload(t.Context(), sessionID); err != nil {
 			t.Fatalf("CompleteMultipartUpload failed: %v", err)
 		}
 
@@ -654,7 +654,7 @@ func TestSequentialVsParallel_Download(t *testing.T) {
 	totalSize := int64(100 * 1024 * 1024)
 	data := generateTestData(totalSize)
 
-	if err := env.Storage.Write("seq_vs_par_dl.bin", data); err != nil {
+	if err := env.Storage.Write(t.Context(), "seq_vs_par_dl.bin", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -670,12 +670,12 @@ func TestSequentialVsParallel_Download(t *testing.T) {
 		UpdatedAt:   now,
 		IsDeleted:   false,
 	}
-	if err := database.NewFileMetadataService(env.DB).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(env.DB).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
 	t.Run("Sequential", func(t *testing.T) {
-		sessionID, err := env.TransferSvc.CreateDownloadSession("seq_vs_par_dl.bin", "perf_client")
+		sessionID, err := env.TransferSvc.CreateDownloadSession(t.Context(), "seq_vs_par_dl.bin", "perf_client")
 		if err != nil {
 			t.Fatalf("CreateDownloadSession failed: %v", err)
 		}
@@ -690,7 +690,7 @@ func TestSequentialVsParallel_Download(t *testing.T) {
 			if remaining < sz {
 				sz = remaining
 			}
-			chunk, err := env.TransferSvc.DownloadChunk(sessionID, int(sz), offset)
+			chunk, err := env.TransferSvc.DownloadChunk(t.Context(), sessionID, int(sz), offset)
 			if err != nil {
 				t.Fatalf("DownloadChunk failed: %v", err)
 			}
@@ -709,7 +709,7 @@ func TestSequentialVsParallel_Download(t *testing.T) {
 	})
 
 	t.Run("Parallel_4Segments", func(t *testing.T) {
-		sessionID, err := env.TransferSvc.CreateDownloadSession("seq_vs_par_dl.bin", "perf_client")
+		sessionID, err := env.TransferSvc.CreateDownloadSession(t.Context(), "seq_vs_par_dl.bin", "perf_client")
 		if err != nil {
 			t.Fatalf("CreateDownloadSession failed: %v", err)
 		}
@@ -727,7 +727,7 @@ func TestSequentialVsParallel_Download(t *testing.T) {
 		}
 
 		start := time.Now()
-		results := env.TransferSvc.ParallelDownloadChunks(sessionID, segments)
+		results := env.TransferSvc.ParallelDownloadChunks(t.Context(), sessionID, segments)
 		downloadDuration := time.Since(start)
 
 		var totalDownloaded int64
@@ -833,7 +833,7 @@ func benchmarkMultipartUpload(b *testing.B, fileSize int64, concurrency int) {
 
 	for i := 0; i < b.N; i++ {
 		fileName := fmt.Sprintf("bench_upload_%d.bin", i)
-		sessionID, partSize, err := svc.CreateMultipartUpload(fileName, fileName, fileSize, "bench", "")
+		sessionID, partSize, err := svc.CreateMultipartUpload(b.Context(), fileName, fileName, fileSize, "bench", "")
 		if err != nil {
 			b.Fatalf("CreateMultipartUpload failed: %v", err)
 		}
@@ -859,13 +859,13 @@ func benchmarkMultipartUpload(b *testing.B, fileSize int64, concurrency int) {
 					end = fileSize
 				}
 				chunk := data[offset:end]
-				svc.UploadPartData(sessionID, partNum+1, offset, chunk)
+				svc.UploadPartData(b.Context(), sessionID, partNum+1, offset, chunk)
 			}(p)
 		}
 
 		wg.Wait()
 
-		if err := svc.CompleteMultipartUpload(sessionID); err != nil {
+		if err := svc.CompleteMultipartUpload(b.Context(), sessionID); err != nil {
 			b.Fatalf("CompleteMultipartUpload failed: %v", err)
 		}
 	}
@@ -902,7 +902,7 @@ func benchmarkParallelDownload(b *testing.B, fileSize int64, concurrency int) {
 
 	data := generateTestData(fileSize)
 	fileName := "bench_download.bin"
-	if err := ls.Write(fileName, data); err != nil {
+	if err := ls.Write(b.Context(), fileName, data); err != nil {
 		b.Fatalf("Write failed: %v", err)
 	}
 
@@ -918,7 +918,7 @@ func benchmarkParallelDownload(b *testing.B, fileSize int64, concurrency int) {
 		UpdatedAt:   now,
 		IsDeleted:   false,
 	}
-	if err := database.NewFileMetadataService(qdb).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(qdb).Create(b.Context(), meta); err != nil {
 		b.Fatalf("Create metadata failed: %v", err)
 	}
 
@@ -937,8 +937,8 @@ func benchmarkParallelDownload(b *testing.B, fileSize int64, concurrency int) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		sessionID, _ := svc.CreateDownloadSession(fileName, "bench")
-		svc.ParallelDownloadChunks(sessionID, segments)
-		svc.CompleteDownload(sessionID)
+		sessionID, _ := svc.CreateDownloadSession(b.Context(), fileName, "bench")
+		svc.ParallelDownloadChunks(b.Context(), sessionID, segments)
+		svc.CompleteDownload(b.Context(), sessionID)
 	}
 }

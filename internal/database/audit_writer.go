@@ -211,14 +211,13 @@ func (w *AuditWriter) flushLocked(ctx context.Context) {
 // defeat that cache. A per-row loop under one logical "batch" still avoids the
 // per-request round-trip and lets the DB batch the writes internally.
 //
-// The context is intentionally not used to abort the loop: AuditLogService.Create
-// takes no context, so it cannot be cancelled mid-write anyway. Aborting here on
-// a cancelled context would silently drop an already-collected batch, and the
-// writer's shutdown path (Close) relies on draining pending rather than
-// discarding it.
-func (w *AuditWriter) writeBatch(_ context.Context, batch []*AuditLog) error {
+// Callers only invoke this with a live context (the loop checks ctx.Err()
+// before flushing, and Close passes the caller's bounded shutdown context),
+// so a batch is never started under an already-cancelled context. Once a batch
+// is in flight the per-row context does bound the individual writes.
+func (w *AuditWriter) writeBatch(ctx context.Context, batch []*AuditLog) error {
 	for _, entry := range batch {
-		if err := w.svc.Create(entry); err != nil {
+		if err := w.svc.Create(ctx, entry); err != nil {
 			// Keep going on a single-row failure so one bad row does not drop
 			// the rest of the batch; the per-row error is logged for triage.
 			logger.Warn("audit row write failed (op=%s resource=%s): %v", entry.Operation, entry.ResourcePath, err)

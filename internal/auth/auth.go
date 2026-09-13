@@ -82,7 +82,7 @@ func (as *AuthService) GetJWTService() *JWTService {
 	return as.jwtService
 }
 
-func (as *AuthService) ValidateApiKey(apiKey string) bool {
+func (as *AuthService) ValidateApiKey(ctx context.Context, apiKey string) bool {
 	if !as.authEnabled {
 		return true
 	}
@@ -111,7 +111,7 @@ func (as *AuthService) ValidateApiKey(apiKey string) bool {
 
 	// Query the database for API keys created via the management API.
 	if lookupFn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		if key, err := lookupFn(ctx, hashedKey); err == nil && key != nil && key.IsActive {
 			return true
@@ -121,7 +121,7 @@ func (as *AuthService) ValidateApiKey(apiKey string) bool {
 	return false
 }
 
-func (as *AuthService) GetUserByApiKey(apiKey string) *User {
+func (as *AuthService) GetUserByApiKey(ctx context.Context, apiKey string) *User {
 	if !as.authEnabled {
 		return nil
 	}
@@ -173,7 +173,7 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 
 	// Query the database for API keys created via the management API.
 	if lookupFn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		if key, err := lookupFn(ctx, hashedKey); err == nil && key != nil && key.IsActive {
 			role := "user"
@@ -201,12 +201,12 @@ func (as *AuthService) GetUserByApiKey(apiKey string) *User {
 	return nil
 }
 
-func (as *AuthService) HasPermission(apiKey, resource, action string) bool {
+func (as *AuthService) HasPermission(ctx context.Context, apiKey, resource, action string) bool {
 	if !as.authEnabled {
 		return true
 	}
 
-	user := as.GetUserByApiKey(apiKey)
+	user := as.GetUserByApiKey(ctx, apiKey)
 	if user == nil || !user.Enabled {
 		return false
 	}

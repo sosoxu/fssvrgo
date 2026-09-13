@@ -22,12 +22,15 @@ import (
 // needs to know about persisted file metadata, expressed in domain terms.
 // database.FileMetadataService satisfies it, and tests can supply an in-memory
 // fake instead of a PostgreSQL instance.
+//
+// Every method takes the caller's context so a cancelled request aborts the
+// query instead of running it to completion.
 type metadataStore interface {
-	GetByPath(path string) (*database.FileMetadata, error)
-	Create(meta *database.FileMetadata) error
-	Update(meta *database.FileMetadata) error
-	Remove(id string) error
-	Exists(path string) (bool, error)
+	GetByPath(ctx context.Context, path string) (*database.FileMetadata, error)
+	Create(ctx context.Context, meta *database.FileMetadata) error
+	Update(ctx context.Context, meta *database.FileMetadata) error
+	Remove(ctx context.Context, id string) error
+	Exists(ctx context.Context, path string) (bool, error)
 }
 
 type FileManager struct {
@@ -72,11 +75,11 @@ func (fm *FileManager) unlockFile(path string) {
 	mu.Unlock()
 }
 
-func (fm *FileManager) distLockFile(path string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (fm *FileManager) distLockFile(ctx context.Context, path string) (string, error) {
+	lockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	token, err := distributed.AcquireLock(ctx, fm.distLock, "file:"+path, 10*time.Second, 30, 50*time.Millisecond)
+	token, err := distributed.AcquireLock(lockCtx, fm.distLock, "file:"+path, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire distributed lock for %s: %w", path, err)
 	}
@@ -95,35 +98,39 @@ func (fm *FileManager) distLockFileWithRenewal(ctx context.Context, path string)
 	return token, cancel, nil
 }
 
-func (fm *FileManager) distUnlockFile(path string, token string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// distUnlockFile releases a lock. The release runs on a context derived with
+// WithoutCancel: if the caller's context is already cancelled (client
+// disconnect, timeout) the lock must still be released, otherwise it would
+// linger until its TTL expires and block other writers.
+func (fm *FileManager) distUnlockFile(ctx context.Context, path string, token string) {
+	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 
-	if err := fm.distLock.Unlock(ctx, "file:"+path, token); err != nil {
+	if err := fm.distLock.Unlock(unlockCtx, "file:"+path, token); err != nil {
 		logger.Warn("failed to release distributed lock for %s: %v", path, err)
 	}
 }
 
-func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetadata, error) {
+func (fm *FileManager) UploadFile(ctx context.Context, path string, data []byte) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
-	token, cancelRenew, err := fm.distLockFileWithRenewal(context.Background(), path)
+	token, cancelRenew, err := fm.distLockFileWithRenewal(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	defer fm.distUnlockFile(path, token)
+	defer fm.distUnlockFile(ctx, path, token)
 	defer cancelRenew()
 
-	if fm.Exists(path) {
-		existingMeta, err := fm.meta.GetByPath(path)
+	if fm.Exists(ctx, path) {
+		existingMeta, err := fm.meta.GetByPath(ctx, path)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			// Log the error but continue - treat as new file
 			logger.Error("Failed to query existing metadata: %v", err)
 		}
 		if existingMeta != nil {
-			if err := fm.storage.Write(path, data); err != nil {
+			if err := fm.storage.Write(ctx, path, data); err != nil {
 				return nil, fmt.Errorf("failed to overwrite file: %w", err)
 			}
 			hash := fmt.Sprintf("%x", sha256.Sum256(data))
@@ -132,14 +139,14 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 			existingMeta.Hash = hash
 			existingMeta.UpdatedAt = now
 			existingMeta.IsDeleted = false
-			if err := fm.meta.Update(existingMeta); err != nil {
+			if err := fm.meta.Update(ctx, existingMeta); err != nil {
 				return nil, fmt.Errorf("failed to update file metadata: %w", err)
 			}
 			return existingMeta, nil
 		}
 	}
 
-	if err := fm.storage.Write(path, data); err != nil {
+	if err := fm.storage.Write(ctx, path, data); err != nil {
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -160,8 +167,8 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 		IsDeleted:       false,
 	}
 
-	if err := fm.meta.Create(meta); err != nil {
-		fm.storage.Remove(path)
+	if err := fm.meta.Create(ctx, meta); err != nil {
+		fm.storage.Remove(ctx, path)
 		return nil, fmt.Errorf("failed to create file metadata: %w", err)
 	}
 
@@ -178,16 +185,16 @@ func (fm *FileManager) UploadFile(path string, data []byte) (*database.FileMetad
 //
 // Unlike UploadFile, this path does NOT re-hash the existing file on overwrite;
 // the hash is computed once from the incoming stream.
-func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*database.FileMetadata, error) {
+func (fm *FileManager) UploadFileFromReader(ctx context.Context, path string, reader io.Reader) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
-	token, cancelRenew, err := fm.distLockFileWithRenewal(context.Background(), path)
+	token, cancelRenew, err := fm.distLockFileWithRenewal(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	defer fm.distUnlockFile(path, token)
+	defer fm.distUnlockFile(ctx, path, token)
 	defer cancelRenew()
 
 	// Tee the stream through a SHA-256 writer so we compute the hash as bytes
@@ -195,13 +202,13 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 	hashWriter := sha256.New()
 	teeReader := io.TeeReader(reader, hashWriter)
 
-	if err := fm.storage.WriteFromReader(path, teeReader); err != nil {
+	if err := fm.storage.WriteFromReader(ctx, path, teeReader); err != nil {
 		return nil, fmt.Errorf("failed to write file from reader: %w", err)
 	}
 
 	// storage.WriteFromReader does not report bytes written, so re-stat the
 	// object to get its size rather than trusting the caller's size hint.
-	size, err := fm.storage.GetSize(path)
+	size, err := fm.storage.GetSize(ctx, path)
 	if err != nil {
 		// Fall back to a best-effort unknown size rather than failing the
 		// already-completed upload.
@@ -214,7 +221,7 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 
 	// Overwrite existing metadata if present (same overwrite semantics as
 	// UploadFile), otherwise create a new record.
-	existingMeta, err := fm.meta.GetByPath(path)
+	existingMeta, err := fm.meta.GetByPath(ctx, path)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		logger.Error("Failed to query existing metadata: %v", err)
 	}
@@ -225,7 +232,7 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 		existingMeta.Hash = hash
 		existingMeta.UpdatedAt = now
 		existingMeta.IsDeleted = false
-		if err := fm.meta.Update(existingMeta); err != nil {
+		if err := fm.meta.Update(ctx, existingMeta); err != nil {
 			return nil, fmt.Errorf("failed to update file metadata: %w", err)
 		}
 		meta = existingMeta
@@ -242,8 +249,8 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 			UpdatedAt:       now,
 			IsDeleted:       false,
 		}
-		if err := fm.meta.Create(meta); err != nil {
-			fm.storage.Remove(path)
+		if err := fm.meta.Create(ctx, meta); err != nil {
+			fm.storage.Remove(ctx, path)
 			return nil, fmt.Errorf("failed to create file metadata: %w", err)
 		}
 	}
@@ -251,14 +258,14 @@ func (fm *FileManager) UploadFileFromReader(path string, reader io.Reader) (*dat
 	return meta, nil
 }
 
-func (fm *FileManager) DownloadFile(path string) ([]byte, error) {
+func (fm *FileManager) DownloadFile(ctx context.Context, path string) ([]byte, error) {
 	path = utils.NormalizePath(path)
-	_, err := fm.GetFileMetadata(path)
+	_, err := fm.GetFileMetadata(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := fm.storage.Read(path)
+	data, err := fm.storage.Read(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -266,14 +273,14 @@ func (fm *FileManager) DownloadFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-func (fm *FileManager) DownloadFileAt(path string, size int, offset int64) ([]byte, error) {
+func (fm *FileManager) DownloadFileAt(ctx context.Context, path string, size int, offset int64) ([]byte, error) {
 	path = utils.NormalizePath(path)
-	_, err := fm.GetFileMetadata(path)
+	_, err := fm.GetFileMetadata(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := fm.storage.ReadAt(path, size, offset)
+	data, err := fm.storage.ReadAt(ctx, path, size, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file at offset: %w", err)
 	}
@@ -284,12 +291,12 @@ func (fm *FileManager) DownloadFileAt(path string, size int, offset int64) ([]by
 // DownloadFileData 读取文件内容，复用调用方已查询的 meta，避免 DownloadFile 内部
 // 重复执行 GetFileMetadata 的 DB 查询。meta 必须是 GetFileMetadata 的返回值（或
 // 等价的有效元数据）。
-func (fm *FileManager) DownloadFileData(meta *database.FileMetadata) ([]byte, error) {
+func (fm *FileManager) DownloadFileData(ctx context.Context, meta *database.FileMetadata) ([]byte, error) {
 	if meta == nil {
 		return nil, fmt.Errorf("metadata is required")
 	}
 	path := utils.NormalizePath(meta.Path)
-	data, err := fm.storage.Read(path)
+	data, err := fm.storage.Read(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -299,68 +306,68 @@ func (fm *FileManager) DownloadFileData(meta *database.FileMetadata) ([]byte, er
 // DownloadFileDataAt 读取文件指定 offset 起的 size 字节，复用调用方已查询的
 // meta。gRPC/HTTP 下载路径在循环或分块读取时调用本方法，可消除每个 chunk 的
 // 冗余 GetFileMetadata 查询。
-func (fm *FileManager) DownloadFileDataAt(meta *database.FileMetadata, size int, offset int64) ([]byte, error) {
+func (fm *FileManager) DownloadFileDataAt(ctx context.Context, meta *database.FileMetadata, size int, offset int64) ([]byte, error) {
 	if meta == nil {
 		return nil, fmt.Errorf("metadata is required")
 	}
 	path := utils.NormalizePath(meta.Path)
-	data, err := fm.storage.ReadAt(path, size, offset)
+	data, err := fm.storage.ReadAt(ctx, path, size, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file at offset: %w", err)
 	}
 	return data, nil
 }
 
-func (fm *FileManager) DeleteFile(path string) error {
+func (fm *FileManager) DeleteFile(ctx context.Context, path string) error {
 	path = utils.NormalizePath(path)
 	fm.lockFile(path)
 	defer fm.unlockFile(path)
 
-	token, err := fm.distLockFile(path)
+	token, err := fm.distLockFile(ctx, path)
 	if err != nil {
 		return err
 	}
-	defer fm.distUnlockFile(path, token)
+	defer fm.distUnlockFile(ctx, path, token)
 
-	meta, err := fm.GetFileMetadata(path)
+	meta, err := fm.GetFileMetadata(ctx, path)
 	if err != nil {
 		return err
 	}
 
-	if err := fm.storage.Remove(path); err != nil {
+	if err := fm.storage.Remove(ctx, path); err != nil {
 		return fmt.Errorf("failed to delete file from storage: %w", err)
 	}
 
-	if err := fm.meta.Remove(meta.ID); err != nil {
+	if err := fm.meta.Remove(ctx, meta.ID); err != nil {
 		return fmt.Errorf("failed to delete file metadata: %w", err)
 	}
 
 	return nil
 }
 
-func (fm *FileManager) RenameFile(oldPath, newName string) error {
+func (fm *FileManager) RenameFile(ctx context.Context, oldPath, newName string) error {
 	oldPath = utils.NormalizePath(oldPath)
 	fm.lockFile(oldPath)
 	defer fm.unlockFile(oldPath)
 
-	token, err := fm.distLockFile(oldPath)
+	token, err := fm.distLockFile(ctx, oldPath)
 	if err != nil {
 		return err
 	}
-	defer fm.distUnlockFile(oldPath, token)
+	defer fm.distUnlockFile(ctx, oldPath, token)
 
-	meta, err := fm.GetFileMetadata(oldPath)
+	meta, err := fm.GetFileMetadata(ctx, oldPath)
 	if err != nil {
 		return err
 	}
 
 	newPath := utils.NormalizePath(utils.GetDirectory(oldPath) + "/" + newName)
 
-	if fm.Exists(newPath) {
+	if fm.Exists(ctx, newPath) {
 		return fmt.Errorf("target path already exists: %s", newPath)
 	}
 
-	if err := fm.storage.Rename(oldPath, newPath); err != nil {
+	if err := fm.storage.Rename(ctx, oldPath, newPath); err != nil {
 		return fmt.Errorf("failed to rename file in storage: %w", err)
 	}
 
@@ -368,9 +375,9 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	meta.Name = newName
 	meta.UpdatedAt = utils.GetCurrentTimestamp()
 
-	if err := fm.meta.Update(meta); err != nil {
+	if err := fm.meta.Update(ctx, meta); err != nil {
 		// 回滚存储层重命名：若回滚也失败则记录日志，避免静默丢失文件。
-		if rbErr := fm.storage.Rename(newPath, oldPath); rbErr != nil {
+		if rbErr := fm.storage.Rename(ctx, newPath, oldPath); rbErr != nil {
 			logger.Error("failed to rollback storage rename %s -> %s: %v", newPath, oldPath, rbErr)
 		}
 		return fmt.Errorf("failed to update file metadata: %w", err)
@@ -379,9 +386,9 @@ func (fm *FileManager) RenameFile(oldPath, newName string) error {
 	return nil
 }
 
-func (fm *FileManager) GetFileMetadata(path string) (*database.FileMetadata, error) {
+func (fm *FileManager) GetFileMetadata(ctx context.Context, path string) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
-	meta, err := fm.meta.GetByPath(path)
+	meta, err := fm.meta.GetByPath(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("file metadata not found: %w", err)
 	}
@@ -391,25 +398,28 @@ func (fm *FileManager) GetFileMetadata(path string) (*database.FileMetadata, err
 	return meta, nil
 }
 
-func (fm *FileManager) Exists(path string) bool {
+func (fm *FileManager) Exists(ctx context.Context, path string) bool {
 	path = utils.NormalizePath(path)
-	exists, err := fm.meta.Exists(path)
+	exists, err := fm.meta.Exists(ctx, path)
 	if err != nil {
 		return false
 	}
 	return exists
 }
 
-func (fm *FileManager) GetFileSize(path string) int64 {
+func (fm *FileManager) GetFileSize(ctx context.Context, path string) int64 {
 	path = utils.NormalizePath(path)
-	meta, err := fm.meta.GetByPath(path)
+	meta, err := fm.meta.GetByPath(ctx, path)
 	if err != nil || meta == nil {
 		return 0
 	}
 	return meta.Size
 }
 
-func (fm *FileManager) CleanFileLocks() {
+// CleanFileLocks drops lock entries for paths that no longer exist. ctx is the
+// janitor's lifetime context (not a request context); it bounds the existence
+// checks performed while iterating.
+func (fm *FileManager) CleanFileLocks(ctx context.Context) {
 	fm.fileLocks.Range(func(key, value interface{}) bool {
 		path := key.(string)
 		mu := value.(*sync.Mutex)
@@ -419,7 +429,7 @@ func (fm *FileManager) CleanFileLocks() {
 			return true
 		}
 		mu.Unlock()
-		if !fm.Exists(path) {
+		if !fm.Exists(ctx, path) {
 			fm.fileLocks.Delete(key)
 		}
 		return true

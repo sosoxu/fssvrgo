@@ -15,8 +15,8 @@ import (
 )
 
 type MinIOStorage struct {
-	client   *minio.Client
-	bucket   string
+	client    *minio.Client
+	bucket    string
 	pathLocks sync.Map
 }
 
@@ -28,7 +28,9 @@ type MinIOConfig struct {
 	UseSSL    bool
 }
 
-func NewMinIOStorage(cfg MinIOConfig) (*MinIOStorage, error) {
+// NewMinIOStorage connects to the endpoint and ensures the bucket exists. The
+// context bounds the connection and bucket-provisioning round-trips.
+func NewMinIOStorage(ctx context.Context, cfg MinIOConfig) (*MinIOStorage, error) {
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: cfg.UseSSL,
@@ -37,7 +39,6 @@ func NewMinIOStorage(cfg MinIOConfig) (*MinIOStorage, error) {
 		return nil, fmt.Errorf("failed to create minio client: %w", err)
 	}
 
-	ctx := context.Background()
 	exists, err := client.BucketExists(ctx, cfg.Bucket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check bucket existence: %w", err)
@@ -95,7 +96,7 @@ func (ms *MinIOStorage) normalizeKey(objectKey string) string {
 	return path.Clean(objectKey)
 }
 
-func (ms *MinIOStorage) Write(objectKey string, data []byte) error {
+func (ms *MinIOStorage) Write(ctx context.Context, objectKey string, data []byte) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
@@ -104,7 +105,6 @@ func (ms *MinIOStorage) Write(objectKey string, data []byte) error {
 	defer mu.Unlock()
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 	reader := bytes.NewReader(data)
 	_, err := ms.client.PutObject(ctx, ms.bucket, key, reader, int64(len(data)), minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
@@ -123,7 +123,7 @@ var ErrWriteAtUnsupported = errors.New("storage: WriteAt is not supported on obj
 // WriteAt always fails with ErrWriteAtUnsupported: object storage cannot do
 // in-place random writes. The method is kept as an explicit, tested statement
 // of that limitation even though StorageAdapter no longer carries it.
-func (ms *MinIOStorage) WriteAt(objectKey string, data []byte, offset int64) error {
+func (ms *MinIOStorage) WriteAt(ctx context.Context, objectKey string, data []byte, offset int64) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (ms *MinIOStorage) WriteAt(objectKey string, data []byte, offset int64) err
 	return ErrWriteAtUnsupported
 }
 
-func (ms *MinIOStorage) WriteFromTempFile(objectKey string, tempFilePath string) error {
+func (ms *MinIOStorage) WriteFromTempFile(ctx context.Context, objectKey string, tempFilePath string) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
@@ -151,7 +151,6 @@ func (ms *MinIOStorage) WriteFromTempFile(objectKey string, tempFilePath string)
 	defer mu.Unlock()
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	_, err := ms.client.FPutObject(ctx, ms.bucket, key, tempFilePath, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
@@ -162,7 +161,7 @@ func (ms *MinIOStorage) WriteFromTempFile(objectKey string, tempFilePath string)
 	return nil
 }
 
-func (ms *MinIOStorage) WriteFromReader(objectKey string, reader io.Reader) error {
+func (ms *MinIOStorage) WriteFromReader(ctx context.Context, objectKey string, reader io.Reader) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
@@ -171,7 +170,6 @@ func (ms *MinIOStorage) WriteFromReader(objectKey string, reader io.Reader) erro
 	defer mu.Unlock()
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	var size int64 = -1
 	if seeker, ok := reader.(io.Seeker); ok {
@@ -198,13 +196,12 @@ func (ms *MinIOStorage) WriteFromReader(objectKey string, reader io.Reader) erro
 	return nil
 }
 
-func (ms *MinIOStorage) Read(objectKey string) ([]byte, error) {
+func (ms *MinIOStorage) Read(ctx context.Context, objectKey string) ([]byte, error) {
 	if err := ms.validatePath(objectKey); err != nil {
 		return nil, err
 	}
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	obj, err := ms.client.GetObject(ctx, ms.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
@@ -219,7 +216,7 @@ func (ms *MinIOStorage) Read(objectKey string) ([]byte, error) {
 	return data, nil
 }
 
-func (ms *MinIOStorage) ReadAt(objectKey string, size int, offset int64) ([]byte, error) {
+func (ms *MinIOStorage) ReadAt(ctx context.Context, objectKey string, size int, offset int64) ([]byte, error) {
 	if err := ms.validatePath(objectKey); err != nil {
 		return nil, err
 	}
@@ -231,7 +228,6 @@ func (ms *MinIOStorage) ReadAt(objectKey string, size int, offset int64) ([]byte
 	}
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	opts := minio.GetObjectOptions{}
 	if err := opts.SetRange(offset, offset+int64(size)-1); err != nil {
@@ -251,13 +247,12 @@ func (ms *MinIOStorage) ReadAt(objectKey string, size int, offset int64) ([]byte
 	return data, nil
 }
 
-func (ms *MinIOStorage) OpenReader(objectKey string) (io.ReadCloser, error) {
+func (ms *MinIOStorage) OpenReader(ctx context.Context, objectKey string) (io.ReadCloser, error) {
 	if err := ms.validatePath(objectKey); err != nil {
 		return nil, err
 	}
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	obj, err := ms.client.GetObject(ctx, ms.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
@@ -266,7 +261,7 @@ func (ms *MinIOStorage) OpenReader(objectKey string) (io.ReadCloser, error) {
 	return obj, nil
 }
 
-func (ms *MinIOStorage) Remove(objectKey string) error {
+func (ms *MinIOStorage) Remove(ctx context.Context, objectKey string) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
@@ -275,7 +270,6 @@ func (ms *MinIOStorage) Remove(objectKey string) error {
 	defer mu.Unlock()
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	err := ms.client.RemoveObject(ctx, ms.bucket, key, minio.RemoveObjectOptions{})
 	if err != nil {
@@ -288,13 +282,12 @@ func (ms *MinIOStorage) Remove(objectKey string) error {
 // Exists reports whether objectKey (an object, or a directory-like prefix that
 // has children) exists. Backend failures such as network errors are returned
 // rather than being collapsed into "absent".
-func (ms *MinIOStorage) Exists(objectKey string) (bool, error) {
+func (ms *MinIOStorage) Exists(ctx context.Context, objectKey string) (bool, error) {
 	if err := ms.validatePath(objectKey); err != nil {
 		return false, err
 	}
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	// Try exact object match first (covers both leaf objects and explicit
 	// directory markers written as "<key>/").
@@ -333,13 +326,12 @@ func (ms *MinIOStorage) Exists(objectKey string) (bool, error) {
 	return false, nil
 }
 
-func (ms *MinIOStorage) List(prefix string) ([]string, error) {
+func (ms *MinIOStorage) List(ctx context.Context, prefix string) ([]string, error) {
 	if err := ms.validatePath(prefix); err != nil {
 		return nil, err
 	}
 
 	key := ms.normalizeKey(prefix)
-	ctx := context.Background()
 
 	var names []string
 	objectCh := ms.client.ListObjects(ctx, ms.bucket, minio.ListObjectsOptions{
@@ -390,13 +382,12 @@ func (ms *MinIOStorage) ListObjects(ctx context.Context) ([]string, error) {
 	return objects, nil
 }
 
-func (ms *MinIOStorage) GetSize(objectKey string) (int64, error) {
+func (ms *MinIOStorage) GetSize(ctx context.Context, objectKey string) (int64, error) {
 	if err := ms.validatePath(objectKey); err != nil {
 		return 0, err
 	}
 
 	key := ms.normalizeKey(objectKey)
-	ctx := context.Background()
 
 	info, err := ms.client.StatObject(ctx, ms.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
@@ -405,7 +396,7 @@ func (ms *MinIOStorage) GetSize(objectKey string) (int64, error) {
 	return info.Size, nil
 }
 
-func (ms *MinIOStorage) Rename(oldKey, newKey string) error {
+func (ms *MinIOStorage) Rename(ctx context.Context, oldKey, newKey string) error {
 	if err := ms.validatePath(oldKey); err != nil {
 		return err
 	}
@@ -432,7 +423,6 @@ func (ms *MinIOStorage) Rename(oldKey, newKey string) error {
 
 	src := ms.normalizeKey(oldKey)
 	dst := ms.normalizeKey(newKey)
-	ctx := context.Background()
 
 	srcObj, err := ms.client.GetObject(ctx, ms.bucket, src, minio.GetObjectOptions{})
 	if err != nil {
@@ -460,7 +450,7 @@ func (ms *MinIOStorage) Rename(oldKey, newKey string) error {
 	return nil
 }
 
-func (ms *MinIOStorage) CreateDirectory(prefix string) error {
+func (ms *MinIOStorage) CreateDirectory(ctx context.Context, prefix string) error {
 	if err := ms.validatePath(prefix); err != nil {
 		return err
 	}
@@ -470,7 +460,6 @@ func (ms *MinIOStorage) CreateDirectory(prefix string) error {
 		key = key + "/"
 	}
 
-	ctx := context.Background()
 	emptyBody := bytes.NewReader(make([]byte, 0))
 	_, err := ms.client.PutObject(ctx, ms.bucket, key, emptyBody, 0, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
@@ -481,7 +470,7 @@ func (ms *MinIOStorage) CreateDirectory(prefix string) error {
 	return nil
 }
 
-func (ms *MinIOStorage) RemoveDirectory(prefix string) error {
+func (ms *MinIOStorage) RemoveDirectory(ctx context.Context, prefix string) error {
 	if err := ms.validatePath(prefix); err != nil {
 		return err
 	}
@@ -490,8 +479,6 @@ func (ms *MinIOStorage) RemoveDirectory(prefix string) error {
 	if !strings.HasSuffix(key, "/") {
 		key = key + "/"
 	}
-
-	ctx := context.Background()
 
 	objectsCh := ms.client.ListObjects(ctx, ms.bucket, minio.ListObjectsOptions{
 		Prefix:    key,
@@ -511,7 +498,7 @@ func (ms *MinIOStorage) RemoveDirectory(prefix string) error {
 	return nil
 }
 
-func (ms *MinIOStorage) CleanPathLocks() {
+func (ms *MinIOStorage) CleanPathLocks(ctx context.Context) {
 	ms.pathLocks.Range(func(key, value interface{}) bool {
 		objectKey := key.(string)
 		mu := value.(*sync.Mutex)
@@ -521,7 +508,7 @@ func (ms *MinIOStorage) CleanPathLocks() {
 			return true
 		}
 		mu.Unlock()
-		exists, err := ms.Exists(objectKey)
+		exists, err := ms.Exists(ctx, objectKey)
 		if err != nil {
 			// Keep the lock entry when existence cannot be determined; dropping
 			// it here could let a concurrent writer race on the same key.

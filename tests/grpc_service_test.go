@@ -18,7 +18,7 @@ func TestGRPCUploadFile(t *testing.T) {
 	defer ts.Cleanup()
 
 	data := []byte("hello world")
-	meta, err := ts.FM.UploadFile("test.txt", data)
+	meta, err := ts.FM.UploadFile(t.Context(), "test.txt", data)
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestGRPCUploadLargeFile(t *testing.T) {
 		data[i] = byte(i % 256)
 	}
 
-	meta, err := ts.FM.UploadFile("large.bin", data)
+	meta, err := ts.FM.UploadFile(t.Context(), "large.bin", data)
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
@@ -83,12 +83,12 @@ func TestGRPCDownloadFile(t *testing.T) {
 	defer ts.Cleanup()
 
 	original := []byte("download me")
-	_, err = ts.FM.UploadFile("dl.txt", original)
+	_, err = ts.FM.UploadFile(t.Context(), "dl.txt", original)
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	downloaded, err := ts.FM.DownloadFile("dl.txt")
+	downloaded, err := ts.FM.DownloadFile(t.Context(), "dl.txt")
 	if err != nil {
 		t.Fatalf("DownloadFile failed: %v", err)
 	}
@@ -110,14 +110,14 @@ func TestGRPCDownloadFileAt(t *testing.T) {
 		data[i] = byte(i % 256)
 	}
 
-	_, err = ts.FM.UploadFile("offset.bin", data)
+	_, err = ts.FM.UploadFile(t.Context(), "offset.bin", data)
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
 	offset := int64(500)
 	size := 100
-	result, err := ts.FM.DownloadFileAt("offset.bin", size, offset)
+	result, err := ts.FM.DownloadFileAt(t.Context(), "offset.bin", size, offset)
 	if err != nil {
 		t.Fatalf("DownloadFileAt failed: %v", err)
 	}
@@ -135,12 +135,12 @@ func TestGRPCListFiles(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	ts.FM.UploadFile("file1.txt", []byte("a"))
-	ts.FM.UploadFile("file2.txt", []byte("b"))
-	ts.FM.UploadFile("file3.txt", []byte("c"))
-	ts.DirSvc.CreateDirectory("subdir")
+	ts.FM.UploadFile(t.Context(), "file1.txt", []byte("a"))
+	ts.FM.UploadFile(t.Context(), "file2.txt", []byte("b"))
+	ts.FM.UploadFile(t.Context(), "file3.txt", []byte("c"))
+	ts.DirSvc.CreateDirectory(t.Context(), "subdir")
 
-	result, err := ts.FlSvc.ListFilesWithTotal("", false, 1, 2, "name", "asc")
+	result, err := ts.FlSvc.ListFilesWithTotal(t.Context(), "", false, 1, 2, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles failed: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestGRPCListFiles(t *testing.T) {
 		t.Errorf("expected at most 2 items on page 1, got %d", len(result.Items))
 	}
 
-	result2, err := ts.FlSvc.ListFiles("", false, 2, 2, "name", "asc")
+	result2, err := ts.FlSvc.ListFiles(t.Context(), "", false, 2, 2, "name", "asc")
 	if err != nil {
 		t.Fatalf("ListFiles page 2 failed: %v", err)
 	}
@@ -174,17 +174,17 @@ func TestGRPCDeleteFile(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	_, err = ts.FM.UploadFile("del.txt", []byte("delete me"))
+	_, err = ts.FM.UploadFile(t.Context(), "del.txt", []byte("delete me"))
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	err = ts.FM.DeleteFile("del.txt")
+	err = ts.FM.DeleteFile(t.Context(), "del.txt")
 	if err != nil {
 		t.Fatalf("DeleteFile failed: %v", err)
 	}
 
-	_, err = ts.FM.GetFileMetadata("del.txt")
+	_, err = ts.FM.GetFileMetadata(t.Context(), "del.txt")
 	if err == nil {
 		t.Errorf("expected error after deleting file, got nil")
 	}
@@ -197,22 +197,22 @@ func TestGRPCRenameFile(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	_, err = ts.FM.UploadFile("old.txt", []byte("rename me"))
+	_, err = ts.FM.UploadFile(t.Context(), "old.txt", []byte("rename me"))
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	err = ts.FM.RenameFile("old.txt", "new.txt")
+	err = ts.FM.RenameFile(t.Context(), "old.txt", "new.txt")
 	if err != nil {
 		t.Fatalf("RenameFile failed: %v", err)
 	}
 
-	_, err = ts.FM.GetFileMetadata("new.txt")
+	_, err = ts.FM.GetFileMetadata(t.Context(), "new.txt")
 	if err != nil {
 		t.Errorf("file not accessible at new path: %v", err)
 	}
 
-	_, err = ts.FM.GetFileMetadata("old.txt")
+	_, err = ts.FM.GetFileMetadata(t.Context(), "old.txt")
 	if err == nil {
 		t.Errorf("expected error accessing old path, got nil")
 	}
@@ -225,12 +225,12 @@ func TestGRPCCreateDirectory(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	err = ts.DirSvc.CreateDirectory("mydir")
+	err = ts.DirSvc.CreateDirectory(t.Context(), "mydir")
 	if err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 
-	if !ts.DirSvc.Exists("mydir") {
+	if !ts.DirSvc.Exists(t.Context(), "mydir") {
 		t.Errorf("directory does not exist after creation")
 	}
 }
@@ -242,22 +242,22 @@ func TestGRPCDeleteDirectoryRecursive(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	ts.DirSvc.CreateDirectory("rmdir")
-	ts.FM.UploadFile("rmdir/a.txt", []byte("a"))
-	ts.FM.UploadFile("rmdir/b.txt", []byte("b"))
+	ts.DirSvc.CreateDirectory(t.Context(), "rmdir")
+	ts.FM.UploadFile(t.Context(), "rmdir/a.txt", []byte("a"))
+	ts.FM.UploadFile(t.Context(), "rmdir/b.txt", []byte("b"))
 
-	err = ts.DirSvc.DeleteDirectory("rmdir", true)
+	err = ts.DirSvc.DeleteDirectory(t.Context(), "rmdir", true)
 	if err != nil {
 		t.Fatalf("DeleteDirectory recursive failed: %v", err)
 	}
 
-	if ts.DirSvc.Exists("rmdir") {
+	if ts.DirSvc.Exists(t.Context(), "rmdir") {
 		t.Errorf("directory still exists after recursive delete")
 	}
-	if ts.FM.Exists("rmdir/a.txt") {
+	if ts.FM.Exists(t.Context(), "rmdir/a.txt") {
 		t.Errorf("file inside directory still exists after recursive delete")
 	}
-	if ts.FM.Exists("rmdir/b.txt") {
+	if ts.FM.Exists(t.Context(), "rmdir/b.txt") {
 		t.Errorf("file inside directory still exists after recursive delete")
 	}
 }
@@ -270,12 +270,12 @@ func TestGRPCGetMetadata(t *testing.T) {
 	defer ts.Cleanup()
 
 	data := []byte("metadata test")
-	uploadMeta, err := ts.FM.UploadFile("meta.txt", data)
+	uploadMeta, err := ts.FM.UploadFile(t.Context(), "meta.txt", data)
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	meta, err := ts.FM.GetFileMetadata("meta.txt")
+	meta, err := ts.FM.GetFileMetadata(t.Context(), "meta.txt")
 	if err != nil {
 		t.Fatalf("GetFileMetadata failed: %v", err)
 	}
@@ -316,12 +316,12 @@ func TestGRPCGetDirectoryMetadata(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	err = ts.DirSvc.CreateDirectory("dirmeta")
+	err = ts.DirSvc.CreateDirectory(t.Context(), "dirmeta")
 	if err != nil {
 		t.Fatalf("CreateDirectory failed: %v", err)
 	}
 
-	meta, err := ts.DirSvc.GetDirectoryMetadata("dirmeta")
+	meta, err := ts.DirSvc.GetDirectoryMetadata(t.Context(), "dirmeta")
 	if err != nil {
 		t.Fatalf("GetDirectoryMetadata failed: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestGRPCStreamingUpload(t *testing.T) {
 	}
 	expectedHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	sessionID, err := ts.TransferSvc.CreateUploadSession("stream_upload.bin", "stream_upload.bin", totalSize, "test-client", expectedHash)
+	sessionID, err := ts.TransferSvc.CreateUploadSession(t.Context(), "stream_upload.bin", "stream_upload.bin", totalSize, "test-client", expectedHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
@@ -373,17 +373,17 @@ func TestGRPCStreamingUpload(t *testing.T) {
 			end = totalSize
 		}
 		chunk := data[offset:end]
-		if err := ts.TransferSvc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := ts.TransferSvc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("UploadChunk at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := ts.TransferSvc.CompleteUpload(sessionID); err != nil {
+	if _, err := ts.TransferSvc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
-	downloaded, err := ts.FM.DownloadFile("stream_upload.bin")
+	downloaded, err := ts.FM.DownloadFile(t.Context(), "stream_upload.bin")
 	if err != nil {
 		t.Fatalf("DownloadFile after streaming upload failed: %v", err)
 	}
@@ -406,12 +406,12 @@ func TestGRPCStreamingDownload(t *testing.T) {
 		data[i] = byte(i % 256)
 	}
 
-	_, err = ts.FM.UploadFile("stream_dl.bin", data)
+	_, err = ts.FM.UploadFile(t.Context(), "stream_dl.bin", data)
 	if err != nil {
 		t.Fatalf("UploadFile failed: %v", err)
 	}
 
-	sessionID, err := ts.TransferSvc.CreateDownloadSession("stream_dl.bin", "test-client")
+	sessionID, err := ts.TransferSvc.CreateDownloadSession(t.Context(), "stream_dl.bin", "test-client")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestGRPCStreamingDownload(t *testing.T) {
 		if remaining < sz {
 			sz = remaining
 		}
-		chunk, err := ts.TransferSvc.DownloadChunk(sessionID, int(sz), offset)
+		chunk, err := ts.TransferSvc.DownloadChunk(t.Context(), sessionID, int(sz), offset)
 		if err != nil {
 			t.Fatalf("DownloadChunk at offset %d failed: %v", offset, err)
 		}
@@ -434,7 +434,7 @@ func TestGRPCStreamingDownload(t *testing.T) {
 		offset += int64(len(chunk))
 	}
 
-	if err := ts.TransferSvc.CompleteDownload(sessionID); err != nil {
+	if err := ts.TransferSvc.CompleteDownload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteDownload failed: %v", err)
 	}
 
@@ -454,30 +454,30 @@ func TestGRPCUploadHashVerification(t *testing.T) {
 	correctHash := fmt.Sprintf("%x", sha256.Sum256(data))
 	wrongHash := utils.SHA256("wrong data")
 
-	sessionID, err := ts.TransferSvc.CreateUploadSession("hashverify.txt", "hashverify.txt", int64(len(data)), "test-client", wrongHash)
+	sessionID, err := ts.TransferSvc.CreateUploadSession(t.Context(), "hashverify.txt", "hashverify.txt", int64(len(data)), "test-client", wrongHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	if err := ts.TransferSvc.UploadChunk(sessionID, data, 0); err != nil {
+	if err := ts.TransferSvc.UploadChunk(t.Context(), sessionID, data, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	_, err = ts.TransferSvc.CompleteUpload(sessionID)
+	_, err = ts.TransferSvc.CompleteUpload(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected hash mismatch error, got nil")
 	}
 
-	sessionID2, err := ts.TransferSvc.CreateUploadSession("hashverify2.txt", "hashverify2.txt", int64(len(data)), "test-client", correctHash)
+	sessionID2, err := ts.TransferSvc.CreateUploadSession(t.Context(), "hashverify2.txt", "hashverify2.txt", int64(len(data)), "test-client", correctHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession with correct hash failed: %v", err)
 	}
 
-	if err := ts.TransferSvc.UploadChunk(sessionID2, data, 0); err != nil {
+	if err := ts.TransferSvc.UploadChunk(t.Context(), sessionID2, data, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	if _, err := ts.TransferSvc.CompleteUpload(sessionID2); err != nil {
+	if _, err := ts.TransferSvc.CompleteUpload(t.Context(), sessionID2); err != nil {
 		t.Fatalf("CompleteUpload with correct hash failed: %v", err)
 	}
 }
@@ -489,16 +489,16 @@ func TestGRPCUploadAbort(t *testing.T) {
 	}
 	defer ts.Cleanup()
 
-	sessionID, err := ts.TransferSvc.CreateUploadSession("abort.txt", "abort.txt", 1024, "test-client", "")
+	sessionID, err := ts.TransferSvc.CreateUploadSession(t.Context(), "abort.txt", "abort.txt", 1024, "test-client", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	if err := ts.TransferSvc.AbortUpload(sessionID); err != nil {
+	if err := ts.TransferSvc.AbortUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("AbortUpload failed: %v", err)
 	}
 
-	_, err = ts.TransferSvc.GetUploadSession(sessionID)
+	_, err = ts.TransferSvc.GetUploadSession(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected error getting aborted session, got nil")
 	}

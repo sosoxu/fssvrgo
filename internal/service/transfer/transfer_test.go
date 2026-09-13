@@ -58,7 +58,7 @@ func setupTestEnv(t *testing.T) (*FileTransferService, *storage.LocalStorage, *d
 func TestCreateUploadSession(t *testing.T) {
 	svc, _, _ := setupTestEnv(t)
 
-	sessionID, err := svc.CreateUploadSession("test.txt", "test.txt", 1024, "client1", "abc123")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "test.txt", "test.txt", 1024, "client1", "abc123")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestCreateUploadSession(t *testing.T) {
 		t.Errorf("expected non-empty session ID")
 	}
 
-	session, err := svc.GetUploadSession(sessionID)
+	session, err := svc.GetUploadSession(t.Context(), sessionID)
 	if err != nil {
 		t.Fatalf("GetUploadSession failed: %v", err)
 	}
@@ -98,17 +98,17 @@ func TestCreateUploadSession(t *testing.T) {
 func TestUploadChunk(t *testing.T) {
 	svc, _, _ := setupTestEnv(t)
 
-	sessionID, err := svc.CreateUploadSession("chunk.txt", "chunk.txt", 100, "client1", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "chunk.txt", "chunk.txt", 100, "client1", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
 	chunk := []byte("hello world")
-	if err := svc.UploadChunk(sessionID, chunk, 0); err != nil {
+	if err := svc.UploadChunk(t.Context(), sessionID, chunk, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	session, err := svc.GetUploadSession(sessionID)
+	session, err := svc.GetUploadSession(t.Context(), sessionID)
 	if err != nil {
 		t.Fatalf("GetUploadSession failed: %v", err)
 	}
@@ -122,20 +122,20 @@ func TestCompleteUpload(t *testing.T) {
 	svc, _, db := setupTestEnv(t)
 
 	data := []byte("complete upload test")
-	sessionID, err := svc.CreateUploadSession("complete.txt", "complete.txt", int64(len(data)), "client1", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "complete.txt", "complete.txt", int64(len(data)), "client1", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	if err := svc.UploadChunk(sessionID, data, 0); err != nil {
+	if err := svc.UploadChunk(t.Context(), sessionID, data, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	if _, err := svc.CompleteUpload(sessionID); err != nil {
+	if _, err := svc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
-	meta, err := database.NewFileMetadataService(db).GetByPath("complete.txt")
+	meta, err := database.NewFileMetadataService(db).GetByPath(t.Context(), "complete.txt")
 	if err != nil {
 		t.Fatalf("GetByPath failed: %v", err)
 	}
@@ -150,17 +150,17 @@ func TestCompleteUpload(t *testing.T) {
 func TestCompleteUploadSizeMismatch(t *testing.T) {
 	svc, _, _ := setupTestEnv(t)
 
-	sessionID, err := svc.CreateUploadSession("mismatch.txt", "mismatch.txt", 1024, "client1", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "mismatch.txt", "mismatch.txt", 1024, "client1", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
 	smallData := []byte("too small")
-	if err := svc.UploadChunk(sessionID, smallData, 0); err != nil {
+	if err := svc.UploadChunk(t.Context(), sessionID, smallData, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	_, err = svc.CompleteUpload(sessionID)
+	_, err = svc.CompleteUpload(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected size mismatch error, got nil")
 	}
@@ -172,16 +172,16 @@ func TestCompleteUploadHashMismatch(t *testing.T) {
 	data := []byte("hash test data")
 	wrongHash := utils.SHA256("wrong")
 
-	sessionID, err := svc.CreateUploadSession("hashmismatch.txt", "hashmismatch.txt", int64(len(data)), "client1", wrongHash)
+	sessionID, err := svc.CreateUploadSession(t.Context(), "hashmismatch.txt", "hashmismatch.txt", int64(len(data)), "client1", wrongHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	if err := svc.UploadChunk(sessionID, data, 0); err != nil {
+	if err := svc.UploadChunk(t.Context(), sessionID, data, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
-	_, err = svc.CompleteUpload(sessionID)
+	_, err = svc.CompleteUpload(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected hash mismatch error, got nil")
 	}
@@ -190,16 +190,16 @@ func TestCompleteUploadHashMismatch(t *testing.T) {
 func TestAbortUpload(t *testing.T) {
 	svc, _, _ := setupTestEnv(t)
 
-	sessionID, err := svc.CreateUploadSession("abort.txt", "abort.txt", 1024, "client1", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "abort.txt", "abort.txt", 1024, "client1", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	if err := svc.AbortUpload(sessionID); err != nil {
+	if err := svc.AbortUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("AbortUpload failed: %v", err)
 	}
 
-	_, err = svc.GetUploadSession(sessionID)
+	_, err = svc.GetUploadSession(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected error getting aborted session, got nil")
 	}
@@ -208,7 +208,7 @@ func TestAbortUpload(t *testing.T) {
 func TestGetUploadProgress(t *testing.T) {
 	svc, _, _ := setupTestEnv(t)
 
-	sessionID, err := svc.CreateUploadSession("progress.txt", "progress.txt", 1000, "client1", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "progress.txt", "progress.txt", 1000, "client1", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestGetUploadProgress(t *testing.T) {
 	}
 
 	chunk := []byte("partial data here")
-	if err := svc.UploadChunk(sessionID, chunk, 0); err != nil {
+	if err := svc.UploadChunk(t.Context(), sessionID, chunk, 0); err != nil {
 		t.Fatalf("UploadChunk failed: %v", err)
 	}
 
@@ -246,11 +246,11 @@ func TestCreateDownloadSession(t *testing.T) {
 		UpdatedAt:       now,
 		IsDeleted:       false,
 	}
-	if err := database.NewFileMetadataService(db).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
-	sessionID, err := svc.CreateDownloadSession("dlsession.txt", "client1")
+	sessionID, err := svc.CreateDownloadSession(t.Context(), "dlsession.txt", "client1")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestDownloadChunk(t *testing.T) {
 	svc, ls, db := setupTestEnv(t)
 
 	data := []byte("chunk download test data")
-	if err := ls.Write("dlchunk.txt", data); err != nil {
+	if err := ls.Write(t.Context(), "dlchunk.txt", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -281,16 +281,16 @@ func TestDownloadChunk(t *testing.T) {
 		UpdatedAt:       now,
 		IsDeleted:       false,
 	}
-	if err := database.NewFileMetadataService(db).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
-	sessionID, err := svc.CreateDownloadSession("dlchunk.txt", "client1")
+	sessionID, err := svc.CreateDownloadSession(t.Context(), "dlchunk.txt", "client1")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
 
-	chunk, err := svc.DownloadChunk(sessionID, 6, 0)
+	chunk, err := svc.DownloadChunk(t.Context(), sessionID, 6, 0)
 	if err != nil {
 		t.Fatalf("DownloadChunk failed: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestCompleteDownload(t *testing.T) {
 	svc, ls, db := setupTestEnv(t)
 
 	data := []byte("complete download cycle")
-	if err := ls.Write("cycledl.txt", data); err != nil {
+	if err := ls.Write(t.Context(), "cycledl.txt", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -321,11 +321,11 @@ func TestCompleteDownload(t *testing.T) {
 		UpdatedAt:       now,
 		IsDeleted:       false,
 	}
-	if err := database.NewFileMetadataService(db).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
-	sessionID, err := svc.CreateDownloadSession("cycledl.txt", "client1")
+	sessionID, err := svc.CreateDownloadSession(t.Context(), "cycledl.txt", "client1")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestCompleteDownload(t *testing.T) {
 		if int64(sz) > int64(len(data))-offset {
 			sz = int(int64(len(data)) - offset)
 		}
-		chunk, err := svc.DownloadChunk(sessionID, sz, offset)
+		chunk, err := svc.DownloadChunk(t.Context(), sessionID, sz, offset)
 		if err != nil {
 			t.Fatalf("DownloadChunk failed: %v", err)
 		}
@@ -345,7 +345,7 @@ func TestCompleteDownload(t *testing.T) {
 		offset += int64(len(chunk))
 	}
 
-	if err := svc.CompleteDownload(sessionID); err != nil {
+	if err := svc.CompleteDownload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteDownload failed: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestAbortDownload(t *testing.T) {
 	svc, ls, db := setupTestEnv(t)
 
 	data := []byte("abort download")
-	if err := ls.Write("abortdl.txt", data); err != nil {
+	if err := ls.Write(t.Context(), "abortdl.txt", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -375,20 +375,20 @@ func TestAbortDownload(t *testing.T) {
 		UpdatedAt:       now,
 		IsDeleted:       false,
 	}
-	if err := database.NewFileMetadataService(db).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
-	sessionID, err := svc.CreateDownloadSession("abortdl.txt", "client1")
+	sessionID, err := svc.CreateDownloadSession(t.Context(), "abortdl.txt", "client1")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
 
-	if err := svc.AbortDownload(sessionID); err != nil {
+	if err := svc.AbortDownload(t.Context(), sessionID); err != nil {
 		t.Fatalf("AbortDownload failed: %v", err)
 	}
 
-	_, err = svc.DownloadChunk(sessionID, 5, 0)
+	_, err = svc.DownloadChunk(t.Context(), sessionID, 5, 0)
 	if err == nil {
 		t.Errorf("expected error downloading from aborted session, got nil")
 	}
@@ -397,17 +397,17 @@ func TestAbortDownload(t *testing.T) {
 func TestCleanupExpiredSessions(t *testing.T) {
 	svc, _, _ := setupTestEnv(t)
 
-	sessionID, err := svc.CreateUploadSession("expired.txt", "expired.txt", 1024, "client1", "")
+	sessionID, err := svc.CreateUploadSession(t.Context(), "expired.txt", "expired.txt", 1024, "client1", "")
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
 
-	session, _ := svc.GetUploadSession(sessionID)
+	session, _ := svc.GetUploadSession(t.Context(), sessionID)
 	session.CreatedAt = utils.FormatTimestamp(time.Now().Add(-2 * time.Hour))
 
-	svc.CleanupExpiredSessions(3600)
+	svc.CleanupExpiredSessions(t.Context(), 3600)
 
-	_, err = svc.GetUploadSession(sessionID)
+	_, err = svc.GetUploadSession(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected expired session to be cleaned up, got nil")
 	}
@@ -424,7 +424,7 @@ func TestLargeFileStreamingUpload(t *testing.T) {
 	}
 	expectedHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	sessionID, err := svc.CreateUploadSession("large_stream.bin", "large_stream.bin", totalSize, "client1", expectedHash)
+	sessionID, err := svc.CreateUploadSession(t.Context(), "large_stream.bin", "large_stream.bin", totalSize, "client1", expectedHash)
 	if err != nil {
 		t.Fatalf("CreateUploadSession failed: %v", err)
 	}
@@ -436,22 +436,22 @@ func TestLargeFileStreamingUpload(t *testing.T) {
 			end = totalSize
 		}
 		chunk := data[offset:end]
-		if err := svc.UploadChunk(sessionID, chunk, offset); err != nil {
+		if err := svc.UploadChunk(t.Context(), sessionID, chunk, offset); err != nil {
 			t.Fatalf("UploadChunk at offset %d failed: %v", offset, err)
 		}
 		offset = end
 	}
 
-	if _, err := svc.CompleteUpload(sessionID); err != nil {
+	if _, err := svc.CompleteUpload(t.Context(), sessionID); err != nil {
 		t.Fatalf("CompleteUpload failed: %v", err)
 	}
 
-	_, err = svc.GetUploadSession(sessionID)
+	_, err = svc.GetUploadSession(t.Context(), sessionID)
 	if err == nil {
 		t.Errorf("expected session to be deleted after completion")
 	}
 
-	result, err := svc.storage.Read("large_stream.bin")
+	result, err := svc.storage.Read(t.Context(), "large_stream.bin")
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestLargeFileStreamingDownload(t *testing.T) {
 		data[i] = byte(i % 256)
 	}
 
-	if err := ls.Write("large_dl.bin", data); err != nil {
+	if err := ls.Write(t.Context(), "large_dl.bin", data); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
@@ -487,11 +487,11 @@ func TestLargeFileStreamingDownload(t *testing.T) {
 		UpdatedAt:       now,
 		IsDeleted:       false,
 	}
-	if err := database.NewFileMetadataService(db).Create(meta); err != nil {
+	if err := database.NewFileMetadataService(db).Create(t.Context(), meta); err != nil {
 		t.Fatalf("Create metadata failed: %v", err)
 	}
 
-	sessionID, err := svc.CreateDownloadSession("large_dl.bin", "client1")
+	sessionID, err := svc.CreateDownloadSession(t.Context(), "large_dl.bin", "client1")
 	if err != nil {
 		t.Fatalf("CreateDownloadSession failed: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestLargeFileStreamingDownload(t *testing.T) {
 		if remaining < sz {
 			sz = remaining
 		}
-		chunk, err := svc.DownloadChunk(sessionID, int(sz), offset)
+		chunk, err := svc.DownloadChunk(t.Context(), sessionID, int(sz), offset)
 		if err != nil {
 			t.Fatalf("DownloadChunk at offset %d failed: %v", offset, err)
 		}
