@@ -64,6 +64,10 @@ func NewDB(db *sql.DB, dialect Dialect) *DB {
 	return &DB{db: db, dialect: dialect}
 }
 
+// Exec runs a statement without a caller context. Request paths must use
+// ExecContext; the context-less form remains for boot-time work (schema
+// creation, migrations) and test helpers, where there is no request deadline
+// to honour.
 func (d *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
 	stmt, err := d.prepareStmt(query)
 	if err != nil {
@@ -83,6 +87,8 @@ func (d *DB) ExecContext(ctx context.Context, query string, args ...interface{})
 	return stmt.ExecContext(ctx, args...)
 }
 
+// Query is Exec's read-side counterpart: no caller context. Request paths must
+// use QueryContext.
 func (d *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	stmt, err := d.prepareStmt(query)
 	if err != nil {
@@ -114,6 +120,8 @@ func (d *DB) QueryContext(ctx context.Context, query string, args ...interface{}
 	return rows, nil
 }
 
+// QueryRow is Exec's single-row counterpart: no caller context. Request paths
+// must use QueryRowContext.
 func (d *DB) QueryRow(query string, args ...interface{}) *sql.Row {
 	stmt, err := d.prepareStmt(query)
 	if err != nil {
