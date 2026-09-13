@@ -128,7 +128,7 @@
 | R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | `internal/database/dialect.go:40` | [#116](https://github.com/sosoxu/fssvrgo/issues/116) | 已修复 `762e3e3` |
 | R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 | `internal/pathlock/pathlock.go`（唯一锁表 + 锁序 + 回收） | [#117](https://github.com/sosoxu/fssvrgo/issues/117) | 已修复 `a4b65d6` |
 | R13 | P2 | 数据库 schema 定义重复两份 | `cmd/fsserver/main.go:74`、`internal/database/metadata.go:104` | [#118](https://github.com/sosoxu/fssvrgo/issues/118) | 已修复 `b298f18` |
-| R14 | P3 | 加密路径全量入内存，并发下有内存放大 | `internal/crypto/crypto.go`（分块流式 FSSGCM v1） | [#119](https://github.com/sosoxu/fssvrgo/issues/119) | 已修复 `PENDING` |
+| R14 | P3 | 加密路径全量入内存，并发下有内存放大 | `internal/crypto/crypto.go`（分块流式 FSSGCM v1） | [#119](https://github.com/sosoxu/fssvrgo/issues/119) | 已修复 `0c24127` |
 | R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 | `cmd/fsserver/main.go:183` | [#120](https://github.com/sosoxu/fssvrgo/issues/120) | 已修复 `adb88cf` |
 | R16 | P3 | 预编译语句缓存错误路径泄漏 | `internal/database/db.go:66` | [#121](https://github.com/sosoxu/fssvrgo/issues/121) | 已修复 `f59f017` |
 | R17 | P3 | 审计日志异步批写的可见性窗口 | `internal/database/audit_writer.go:15` | [#122](https://github.com/sosoxu/fssvrgo/issues/122) | 已修复 `8ba910c` |
