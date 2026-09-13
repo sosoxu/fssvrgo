@@ -7,6 +7,7 @@ import (
 
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
+	"github.com/sosoxu/fssvrgo/internal/pathlock"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 )
 
@@ -63,6 +64,30 @@ func newFakeBackedManager(t *testing.T) (*FileManager, *fakeMetadata, storage.St
 	store := storage.NewLocalStorage(t.TempDir())
 	fm := NewFileManagerWithStore(store, meta, distributed.NewLocalDistributedLock())
 	return fm, meta, store
+}
+
+// TestFileManagerSharesStorageLockTable pins the structural half of R12: the
+// service and its backend must use one table, and that table is the process's
+// single reclamation point (main's janitor sweeps it).
+func TestFileManagerSharesStorageLockTable(t *testing.T) {
+	fm, _, store := newFakeBackedManager(t)
+
+	if fm.Locks() != store.ProcessLock() {
+		t.Fatal("FileManager must use the storage backend's lock table, not a second one")
+	}
+
+	release := fm.Locks().Lock(pathlock.LevelFile, "/shared.txt")
+	release()
+
+	if got := store.ProcessLock().Len(); got != 1 {
+		t.Fatalf("table holds %d entries, want 1 (the file-level entry)", got)
+	}
+	if dropped := store.ProcessLock().Reclaim(); dropped != 1 {
+		t.Errorf("Reclaim dropped %d entries, want 1", dropped)
+	}
+	if got := store.ProcessLock().Len(); got != 0 {
+		t.Errorf("table holds %d entries after Reclaim, want 0", got)
+	}
 }
 
 func TestUploadFileCreatesMetadataWithoutDatabase(t *testing.T) {

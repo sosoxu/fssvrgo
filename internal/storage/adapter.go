@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"io"
+
+	"github.com/sosoxu/fssvrgo/internal/pathlock"
 )
 
 // StorageAdapter is the seam between the service layer and a storage backend.
@@ -35,6 +37,11 @@ import (
 // pass it to the SDK so a cancelled request stops an in-flight upload or
 // download; local backends accept it for signature uniformity (their
 // operations are non-blocking local syscalls).
+//
+// Implementations are safe for concurrent use: single-object calls serialize on
+// ProcessLock's object level. Callers that need a wider section (a service's
+// check-then-act, a recursive directory operation) take a lower level key from
+// the same table — see internal/pathlock for the ordering contract.
 type StorageAdapter interface {
 	Write(ctx context.Context, path string, data []byte) error
 	WriteFromTempFile(ctx context.Context, path string, tempFilePath string) error
@@ -54,4 +61,22 @@ type StorageAdapter interface {
 	CreateDirectory(ctx context.Context, path string) error
 	RemoveDirectory(ctx context.Context, path string) error
 	StorageType() string
+	// ProcessLock returns the process-local path-lock table this backend uses.
+	// Sharing it is what lets a service hold a file-level lock across the
+	// storage calls it makes, and what gives the process a single place to
+	// reclaim idle lock entries (see cmd/fsserver/main.go's janitor).
+	ProcessLock() *pathlock.Locker
+}
+
+// ProcessLockOf returns the lock table of store, or a fresh table when store is
+// nil or does not provide one. Services use it to share the backend's table
+// without each of them special-casing nil backends (DB-only tests construct a
+// service with no storage at all).
+func ProcessLockOf(store StorageAdapter) *pathlock.Locker {
+	if store != nil {
+		if locks := store.ProcessLock(); locks != nil {
+			return locks
+		}
+	}
+	return pathlock.New()
 }

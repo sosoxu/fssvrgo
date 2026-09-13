@@ -59,8 +59,10 @@
 文件管理的核心服务，负责文件的上传、下载、删除、重命名和元数据查询。
 
 **设计要点**：
-- 双层锁机制：本地 `sync.Mutex`（进程内互斥）+ 分布式锁（跨实例互斥）
-- 写操作流程：获取本地锁 → 获取分布式锁 → 执行操作 → 释放分布式锁 → 释放本地锁
+- 进程内锁 + 分布式锁：进程内走 `internal/pathlock` 的**全进程唯一**按路径锁表
+  （引用计数、可回收），跨实例走 Redis 分布式锁
+- 写操作流程：取 file 级路径锁 → 取分布式锁 → 执行操作（存储调用再取 object 级
+  路径锁）→ 释放分布式锁 → 释放 file 级路径锁
 - 幂等上传：文件已存在时覆盖更新而非报错
 
 #### FileTransferService (`internal/service/transfer/`)
@@ -176,7 +178,10 @@ type StorageAdapter interface {
 - 需要枚举全部对象的场景（如元数据/存储对账）通过**可选能力接口** `ObjectLister`
   （`ListObjects(ctx) ([]string, error)`）获得，而不是把枚举塞进 `StorageAdapter`；
   不支持枚举的后端只是不实现该接口。
-- 存储路径锁表（`CleanPathLocks`）同样不属于接口，它是本地实现细节，只对测试开放。
+- 路径锁表通过 `ProcessLock() *pathlock.Locker` 暴露给上层：服务与后端必须共用同一张表，
+  否则同一路径会被两把不同的互斥量保护。`internal/pathlock` 用 `(level, path)` 定义全局锁序
+  （directory < file < object），多路径操作一律走 `LockMany`（内部排序）以保证不死锁；
+  空闲条目由 `Reclaim()` 回收，进程启动时把它挂进后台 janitor（`cmd/fsserver/main.go`）。
 - `Exists` 返回 `(bool, error)`：只有确认不存在才返回 `(false, nil)`，后端故障
   （网络错误、权限问题、路径非法等）必须以 error 形式上抛，避免调用方把基础设施故障
   误判为"文件不存在"从而走覆盖/新建分支。
@@ -186,7 +191,7 @@ type StorageAdapter interface {
 本地文件系统存储实现。
 
 **设计要点**：
-- `sync.Map` 实现细粒度路径锁，不同文件并发无阻塞
+- 路径锁来自与上层共享的 `pathlock` 表（object 级），不同文件并发无阻塞
 - `WriteAt` 支持文件预分配和偏移写入
 - `WriteFromTempFile` 使用 `os.Rename` 原子移动
 - 路径安全：禁止 `..` 路径遍历

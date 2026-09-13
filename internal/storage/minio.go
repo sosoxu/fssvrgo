@@ -8,16 +8,20 @@ import (
 	"io"
 	"path"
 	"strings"
-	"sync"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+
+	"github.com/sosoxu/fssvrgo/internal/pathlock"
 )
 
 type MinIOStorage struct {
-	client    *minio.Client
-	bucket    string
-	pathLocks sync.Map
+	client *minio.Client
+	bucket string
+	// locks is the process-local path-lock table shared with the services above
+	// this backend (see internal/pathlock). A value, not a pointer, so a
+	// struct-literal backend still gets a usable, zero-value table.
+	locks pathlock.Locker
 }
 
 type MinIOConfig struct {
@@ -87,9 +91,11 @@ func (ms *MinIOStorage) validatePath(objectKey string) error {
 	return ms.ValidatePath(objectKey)
 }
 
-func (ms *MinIOStorage) getLock(objectKey string) *sync.Mutex {
-	val, _ := ms.pathLocks.LoadOrStore(objectKey, &sync.Mutex{})
-	return val.(*sync.Mutex)
+// ProcessLock returns the shared table so services and background jobs can
+// serialize their sections with this backend. See internal/pathlock for the
+// level ordering contract.
+func (ms *MinIOStorage) ProcessLock() *pathlock.Locker {
+	return &ms.locks
 }
 
 func (ms *MinIOStorage) normalizeKey(objectKey string) string {
@@ -100,9 +106,8 @@ func (ms *MinIOStorage) Write(ctx context.Context, objectKey string, data []byte
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
-	mu := ms.getLock(objectKey)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ms.locks.Lock(pathlock.LevelObject, objectKey)
+	defer release()
 
 	key := ms.normalizeKey(objectKey)
 	reader := bytes.NewReader(data)
@@ -146,9 +151,8 @@ func (ms *MinIOStorage) WriteFromTempFile(ctx context.Context, objectKey string,
 		return err
 	}
 
-	mu := ms.getLock(objectKey)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ms.locks.Lock(pathlock.LevelObject, objectKey)
+	defer release()
 
 	key := ms.normalizeKey(objectKey)
 
@@ -165,9 +169,8 @@ func (ms *MinIOStorage) WriteFromReader(ctx context.Context, objectKey string, r
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
-	mu := ms.getLock(objectKey)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ms.locks.Lock(pathlock.LevelObject, objectKey)
+	defer release()
 
 	key := ms.normalizeKey(objectKey)
 
@@ -265,9 +268,8 @@ func (ms *MinIOStorage) Remove(ctx context.Context, objectKey string) error {
 	if err := ms.validatePath(objectKey); err != nil {
 		return err
 	}
-	mu := ms.getLock(objectKey)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ms.locks.Lock(pathlock.LevelObject, objectKey)
+	defer release()
 
 	key := ms.normalizeKey(objectKey)
 
@@ -275,7 +277,7 @@ func (ms *MinIOStorage) Remove(ctx context.Context, objectKey string) error {
 	if err != nil {
 		return fmt.Errorf("failed to remove object: %w", err)
 	}
-	// 不在此处删除 pathLocks 中的锁条目，避免锁逃逸（见 local.go Remove 注释）。
+	// 不在此处删除锁条目，避免锁逃逸（见 local.go Remove 注释）。
 	return nil
 }
 
@@ -408,18 +410,13 @@ func (ms *MinIOStorage) Rename(ctx context.Context, oldKey, newKey string) error
 		return nil
 	}
 
-	oldMu := ms.getLock(oldKey)
-	newMu := ms.getLock(newKey)
-
-	if oldKey < newKey {
-		oldMu.Lock()
-		newMu.Lock()
-	} else {
-		newMu.Lock()
-		oldMu.Lock()
-	}
-	defer oldMu.Unlock()
-	defer newMu.Unlock()
+	// Rename touches two keys. LockMany sorts them into the table-wide
+	// (level, path) order, so two renames that cross cannot deadlock.
+	release := ms.locks.LockMany(
+		pathlock.K(pathlock.LevelObject, oldKey),
+		pathlock.K(pathlock.LevelObject, newKey),
+	)
+	defer release()
 
 	src := ms.normalizeKey(oldKey)
 	dst := ms.normalizeKey(newKey)
@@ -496,27 +493,4 @@ func (ms *MinIOStorage) RemoveDirectory(ctx context.Context, prefix string) erro
 
 	// 不在此处删除 prefix 的锁条目，避免锁逃逸（见 local.go Remove 注释）。
 	return nil
-}
-
-func (ms *MinIOStorage) CleanPathLocks(ctx context.Context) {
-	ms.pathLocks.Range(func(key, value interface{}) bool {
-		objectKey := key.(string)
-		mu := value.(*sync.Mutex)
-		// TryLock 成功说明当前无 goroutine 持有该锁，可安全删除；
-		// 失败则跳过，避免删除正在使用的锁条目导致锁逃逸。
-		if !mu.TryLock() {
-			return true
-		}
-		mu.Unlock()
-		exists, err := ms.Exists(ctx, objectKey)
-		if err != nil {
-			// Keep the lock entry when existence cannot be determined; dropping
-			// it here could let a concurrent writer race on the same key.
-			return true
-		}
-		if !exists {
-			ms.pathLocks.Delete(key)
-		}
-		return true
-	})
 }

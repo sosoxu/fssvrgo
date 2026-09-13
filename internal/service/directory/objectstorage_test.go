@@ -11,6 +11,7 @@ import (
 
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
+	"github.com/sosoxu/fssvrgo/internal/pathlock"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 )
 
@@ -32,6 +33,7 @@ type mockObjectStorage struct {
 	removeCalls    []string
 	storageType    string
 	objects        map[string][]byte // in-memory object store for per-file Remove verification
+	locks          pathlock.Locker
 }
 
 type renameCall struct {
@@ -133,6 +135,10 @@ func (m *mockObjectStorage) GetSize(_ context.Context, path string) (int64, erro
 	return 0, fmt.Errorf("not found")
 }
 func (m *mockObjectStorage) ValidatePath(path string) error { return nil }
+
+// ProcessLock satisfies StorageAdapter; this fake does not model the shared
+// lock table because the directory-manager tests it drives are single-goroutine.
+func (m *mockObjectStorage) ProcessLock() *pathlock.Locker { return &m.locks }
 
 // Compile-time check that mockObjectStorage satisfies StorageAdapter.
 var _ storage.StorageAdapter = (*mockObjectStorage)(nil)

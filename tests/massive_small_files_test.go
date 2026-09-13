@@ -344,17 +344,13 @@ func (c *massiveCluster) cleanState() {
 	resetMassiveDB(c.qdb)
 	flushRedis(c.redisMgr)
 	if c.storageType == "minio" {
-		// MinIO: empty the bucket so each phase starts clean. CleanPathLocks
-		// is a no-op for MinIO (objects removed via API), but call it for
-		// parity with local cleanup of the in-memory path-lock map.
-		if ms, ok := c.store.(*storage.MinIOStorage); ok {
-			ms.CleanPathLocks(context.Background())
-		}
+		// MinIO: empty the bucket so each phase starts clean. Reclaim is a
+		// no-op for the object path (objects are removed via the API), but the
+		// process-local lock table is shared by every backend.
+		c.store.ProcessLock().Reclaim()
 	} else {
 		removeDirContents(c.storageDir)
-		if ls, ok := c.store.(*storage.LocalStorage); ok {
-			ls.CleanPathLocks(context.Background())
-		}
+		c.store.ProcessLock().Reclaim()
 	}
 }
 

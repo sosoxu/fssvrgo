@@ -9,6 +9,7 @@ import (
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/logger"
+	"github.com/sosoxu/fssvrgo/internal/pathlock"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
@@ -37,9 +38,15 @@ type treeStore interface {
 }
 
 type DirectoryManager struct {
-	meta     metadataStore
-	tree     treeStore
-	store    storage.StorageAdapter
+	meta  metadataStore
+	tree  treeStore
+	store storage.StorageAdapter
+	// locks is the process-local table shared with the storage backend, at the
+	// directory level. Directory operations used to be guarded only by the
+	// distributed dir: lock, so a same-process file operation on a path inside
+	// the directory and a directory operation on its parent had no common
+	// lock; the level ordering in internal/pathlock now gives them one.
+	locks    *pathlock.Locker
 	distLock distributed.DistributedLock
 }
 
@@ -64,19 +71,42 @@ func NewDirectoryManagerWithDistLock(db *database.DB, store storage.StorageAdapt
 // NewDirectoryManagerWithStores wires explicit metadata and tree stores. Unit
 // tests use it to run without a database.
 func NewDirectoryManagerWithStores(meta metadataStore, tree treeStore, store storage.StorageAdapter, distLock distributed.DistributedLock) *DirectoryManager {
-	return &DirectoryManager{meta: meta, tree: tree, store: store, distLock: distLock}
+	return &DirectoryManager{
+		meta:     meta,
+		tree:     tree,
+		store:    store,
+		locks:    storage.ProcessLockOf(store),
+		distLock: distLock,
+	}
 }
 
-// lockDirectory acquires a distributed lock for directory-level operations.
-// It returns a release function that must be called (typically via defer) and
-// an error if the lock could not be acquired. When no distLock is configured
-// the release function is a no-op.
+// lockDirectory acquires the process-local directory-level locks for the given
+// paths (sorted into the table's global order) and returns their release
+// function. Every directory operation takes at least its own path, and rename
+// takes the source and target so a concurrent create/rename on the target is
+// serialized too.
+func (dm *DirectoryManager) lockDirectory(paths ...string) func() {
+	keys := make([]pathlock.Key, 0, len(paths))
+	for _, p := range paths {
+		keys = append(keys, pathlock.K(pathlock.LevelDirectory, p))
+	}
+	return dm.locks.LockMany(keys...)
+}
+
+// lockDirectoryDistributed acquires the cross-instance lock for a directory
+// operation. It returns a release function that must be called (typically via
+// defer) and an error if the lock could not be acquired. When no distLock is
+// configured the release function is a no-op.
+//
+// The "dir:" prefix mirrors pathlock's directory level, so the in-process and
+// cross-instance ordering rules agree (directory before file, then path order);
+// see the pathlock package documentation.
 //
 // The lock is acquired with renewal so that long-running directory operations
 // (e.g. recursive delete/rename of large directories) do not lose the lock
 // when the initial TTL expires. This matches the behavior of the upload
 // completion path (see transfer.FileTransferService.CompleteUpload).
-func (dm *DirectoryManager) lockDirectory(ctx context.Context, path string) (func(), error) {
+func (dm *DirectoryManager) lockDirectoryDistributed(ctx context.Context, path string) (func(), error) {
 	if dm.distLock == nil {
 		return func() {}, nil
 	}
@@ -111,7 +141,10 @@ func (dm *DirectoryManager) supportsDirectoryStorageOps() bool {
 func (dm *DirectoryManager) CreateDirectory(ctx context.Context, path string) error {
 	path = utils.NormalizePath(path)
 
-	release, err := dm.lockDirectory(ctx, path)
+	releaseLocal := dm.lockDirectory(path)
+	defer releaseLocal()
+
+	release, err := dm.lockDirectoryDistributed(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -155,7 +188,10 @@ func (dm *DirectoryManager) CreateDirectory(ctx context.Context, path string) er
 func (dm *DirectoryManager) DeleteDirectory(ctx context.Context, path string, recursive bool) error {
 	path = utils.NormalizePath(path)
 
-	release, err := dm.lockDirectory(ctx, path)
+	releaseLocal := dm.lockDirectory(path)
+	defer releaseLocal()
+
+	release, err := dm.lockDirectoryDistributed(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -280,7 +316,16 @@ func (dm *DirectoryManager) RenameDirectory(ctx context.Context, oldPath, newNam
 		return fmt.Errorf("directory rename is not supported for object storage: %s", oldPath)
 	}
 
-	release, err := dm.lockDirectory(ctx, oldPath)
+	// The target path can be computed before locking, so take the local locks
+	// for source and target together (LockMany sorts them) and the
+	// cross-instance lock for the source. A concurrent create/rename on the
+	// target is therefore serialized as well.
+	newPath := utils.NormalizePath(utils.GetDirectory(oldPath) + "/" + newName)
+
+	releaseLocal := dm.lockDirectory(oldPath, newPath)
+	defer releaseLocal()
+
+	release, err := dm.lockDirectoryDistributed(ctx, oldPath)
 	if err != nil {
 		return err
 	}
@@ -290,8 +335,6 @@ func (dm *DirectoryManager) RenameDirectory(ctx context.Context, oldPath, newNam
 	if err != nil {
 		return err
 	}
-
-	newPath := utils.NormalizePath(utils.GetDirectory(oldPath) + "/" + newName)
 
 	if dm.Exists(ctx, newPath) {
 		return fmt.Errorf("target path already exists: %s", newPath)

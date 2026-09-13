@@ -8,12 +8,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+
+	"github.com/sosoxu/fssvrgo/internal/pathlock"
 )
 
 type LocalStorage struct {
-	rootDir   string
-	pathLocks sync.Map
+	rootDir string
+	// locks is the process-local path-lock table shared with the services above
+	// this backend (see internal/pathlock). It replaces the private sync.Map
+	// that used to live here, so a service-level operation and a storage call
+	// cannot end up guarding the same path with two different mutexes. It is a
+	// value (not a pointer) so a struct-literal backend still gets a usable,
+	// zero-value table.
+	locks pathlock.Locker
 }
 
 func NewLocalStorage(rootDir string) *LocalStorage {
@@ -93,9 +100,11 @@ func (ls *LocalStorage) validatePath(path string) error {
 	return ls.ValidatePath(path)
 }
 
-func (ls *LocalStorage) getLock(path string) *sync.Mutex {
-	val, _ := ls.pathLocks.LoadOrStore(path, &sync.Mutex{})
-	return val.(*sync.Mutex)
+// ProcessLock returns the shared table so services and background jobs can
+// serialize their sections with this backend. See internal/pathlock for the
+// level ordering contract.
+func (ls *LocalStorage) ProcessLock() *pathlock.Locker {
+	return &ls.locks
 }
 
 func (ls *LocalStorage) ensureDirectoryExists(dirPath string) error {
@@ -109,9 +118,8 @@ func (ls *LocalStorage) Write(ctx context.Context, path string, data []byte) err
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
-	mu := ls.getLock(path)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ls.locks.Lock(pathlock.LevelObject, path)
+	defer release()
 
 	fullPath := ls.getFullPath(path)
 	dir := filepath.Dir(fullPath)
@@ -133,9 +141,8 @@ func (ls *LocalStorage) WriteAt(path string, data []byte, offset int64) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
-	mu := ls.getLock(path)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ls.locks.Lock(pathlock.LevelObject, path)
+	defer release()
 
 	fullPath := ls.getFullPath(path)
 	dir := filepath.Dir(fullPath)
@@ -162,9 +169,8 @@ func (ls *LocalStorage) WriteFromTempFile(ctx context.Context, path string, temp
 	if err := validateTempFilePath(tempFilePath); err != nil {
 		return err
 	}
-	mu := ls.getLock(path)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ls.locks.Lock(pathlock.LevelObject, path)
+	defer release()
 
 	fullPath := ls.getFullPath(path)
 	dir := filepath.Dir(fullPath)
@@ -228,9 +234,8 @@ func (ls *LocalStorage) WriteFromReader(ctx context.Context, path string, reader
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
-	mu := ls.getLock(path)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ls.locks.Lock(pathlock.LevelObject, path)
+	defer release()
 
 	fullPath := ls.getFullPath(path)
 	dir := filepath.Dir(fullPath)
@@ -280,36 +285,17 @@ func (ls *LocalStorage) Remove(ctx context.Context, path string) error {
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
-	mu := ls.getLock(path)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ls.locks.Lock(pathlock.LevelObject, path)
+	defer release()
 
 	fullPath := ls.getFullPath(path)
 	if err := os.Remove(fullPath); err != nil {
 		return fmt.Errorf("failed to remove file: %w", err)
 	}
-	// 不在此处删除 pathLocks 中的锁条目：若删除后另一个 goroutine 通过
-	// LoadOrStore 存入新 mutex，会导致两个 goroutine 持有不同 mutex 却操作
-	// 同一路径（锁逃逸）。锁条目由 CleanPathLocks 在确认无占用时回收。
+	// 不在此处删除锁条目：条目回收统一交给 pathlock 的引用计数 + 周期回收，
+	// 在持锁方仍在使用的窗口里删条目会让两个 goroutine 各自持有不同 mutex
+	// 却操作同一路径（锁逃逸）。
 	return nil
-}
-
-func (ls *LocalStorage) CleanPathLocks(ctx context.Context) {
-	ls.pathLocks.Range(func(key, value interface{}) bool {
-		path := key.(string)
-		mu := value.(*sync.Mutex)
-		// TryLock 成功说明当前无 goroutine 持有该锁，可安全删除；
-		// 失败则跳过，等下次清理。避免删除正在使用的锁条目导致锁逃逸。
-		if !mu.TryLock() {
-			return true
-		}
-		mu.Unlock()
-		fullPath := ls.getFullPath(path)
-		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-			ls.pathLocks.Delete(key)
-		}
-		return true
-	})
 }
 
 // Exists reports whether path exists. Errors other than "not found" (for
@@ -405,18 +391,13 @@ func (ls *LocalStorage) Rename(ctx context.Context, oldPath, newPath string) err
 		return nil
 	}
 
-	oldMu := ls.getLock(oldPath)
-	newMu := ls.getLock(newPath)
-
-	if oldPath < newPath {
-		oldMu.Lock()
-		newMu.Lock()
-	} else {
-		newMu.Lock()
-		oldMu.Lock()
-	}
-	defer oldMu.Unlock()
-	defer newMu.Unlock()
+	// Rename touches two paths. LockMany sorts them into the table-wide
+	// (level, path) order, so two renames that cross cannot deadlock.
+	release := ls.locks.LockMany(
+		pathlock.K(pathlock.LevelObject, oldPath),
+		pathlock.K(pathlock.LevelObject, newPath),
+	)
+	defer release()
 
 	fullOldPath := ls.getFullPath(oldPath)
 	fullNewPath := ls.getFullPath(newPath)
@@ -437,9 +418,8 @@ func (ls *LocalStorage) CreateDirectory(ctx context.Context, path string) error 
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
-	mu := ls.getLock(path)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ls.locks.Lock(pathlock.LevelObject, path)
+	defer release()
 
 	fullPath := ls.getFullPath(path)
 	if err := os.MkdirAll(fullPath, 0755); err != nil {
@@ -452,14 +432,13 @@ func (ls *LocalStorage) RemoveDirectory(ctx context.Context, path string) error 
 	if err := ls.validatePath(path); err != nil {
 		return err
 	}
-	mu := ls.getLock(path)
-	mu.Lock()
-	defer mu.Unlock()
+	release := ls.locks.Lock(pathlock.LevelObject, path)
+	defer release()
 
 	fullPath := ls.getFullPath(path)
 	if err := os.RemoveAll(fullPath); err != nil {
 		return fmt.Errorf("failed to remove directory: %w", err)
 	}
-	// 不在此处删除 pathLocks 中的锁条目，避免锁逃逸（见 Remove 注释）。
+	// 不在此处删除锁条目，避免锁逃逸（见 Remove 注释）。
 	return nil
 }

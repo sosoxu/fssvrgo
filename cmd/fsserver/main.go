@@ -328,15 +328,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Periodically clean up unused in-memory file locks to prevent unbounded
-	// growth of the fileLocks sync.Map in long-running processes.
+	// Periodically reclaim idle entries from the shared process-local path-lock
+	// table. The table is reference counted, so this only drops entries that no
+	// goroutine holds or waits for; it covers every layer at once (services and
+	// the storage backend share the table) instead of one sync.Map per service.
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				fm.CleanFileLocks(ctx)
+				if dropped := store.ProcessLock().Reclaim(); dropped > 0 {
+					logger.Info("reclaimed %d idle path-lock entries", dropped)
+				}
 			case <-ctx.Done():
 				return
 			}

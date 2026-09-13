@@ -8,12 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
 	"time"
 
 	"github.com/sosoxu/fssvrgo/internal/database"
 	"github.com/sosoxu/fssvrgo/internal/distributed"
 	"github.com/sosoxu/fssvrgo/internal/logger"
+	"github.com/sosoxu/fssvrgo/internal/pathlock"
 	"github.com/sosoxu/fssvrgo/internal/storage"
 	"github.com/sosoxu/fssvrgo/internal/utils"
 )
@@ -37,42 +37,39 @@ type FileManager struct {
 	storage     storage.StorageAdapter
 	meta        metadataStore
 	initialized bool
-	fileLocks   sync.Map
-	distLock    distributed.DistributedLock
+	// locks is the same process-local table the storage backend uses, at the
+	// file level. Sharing it removes the second keyed mutex this type used to
+	// keep, so the process has one lock table and one reclamation point.
+	locks    *pathlock.Locker
+	distLock distributed.DistributedLock
 }
 
-func NewFileManager(storage storage.StorageAdapter, db *database.DB) *FileManager {
-	return NewFileManagerWithStore(storage, database.NewFileMetadataService(db), distributed.NewLocalDistributedLock())
+func NewFileManager(store storage.StorageAdapter, db *database.DB) *FileManager {
+	return NewFileManagerWithStore(store, database.NewFileMetadataService(db), distributed.NewLocalDistributedLock())
 }
 
 // NewFileManagerWithStore builds a FileManager from the narrow metadata store,
 // which is what unit tests use to run without a database.
-func NewFileManagerWithStore(storage storage.StorageAdapter, meta metadataStore, distLock distributed.DistributedLock) *FileManager {
+func NewFileManagerWithStore(store storage.StorageAdapter, meta metadataStore, distLock distributed.DistributedLock) *FileManager {
 	return &FileManager{
-		storage:     storage,
+		storage:     store,
 		meta:        meta,
 		initialized: true,
+		locks:       storage.ProcessLockOf(store),
 		distLock:    distLock,
 	}
 }
 
-func NewFileManagerWithDistLock(storage storage.StorageAdapter, db *database.DB, distLock distributed.DistributedLock) *FileManager {
-	return NewFileManagerWithStore(storage, database.NewFileMetadataService(db), distLock)
+func NewFileManagerWithDistLock(store storage.StorageAdapter, db *database.DB, distLock distributed.DistributedLock) *FileManager {
+	return NewFileManagerWithStore(store, database.NewFileMetadataService(db), distLock)
 }
 
-func (fm *FileManager) lockFile(path string) {
-	val, _ := fm.fileLocks.LoadOrStore(path, &sync.Mutex{})
-	mu := val.(*sync.Mutex)
-	mu.Lock()
-}
-
-func (fm *FileManager) unlockFile(path string) {
-	val, ok := fm.fileLocks.Load(path)
-	if !ok {
-		return
-	}
-	mu := val.(*sync.Mutex)
-	mu.Unlock()
+// lockFile acquires the shared table's file-level lock for path and returns its
+// release function. The file level sits below the backend's object level, so
+// the storage calls made while this lock is held take their own key in the
+// documented order instead of colliding with it.
+func (fm *FileManager) lockFile(path string) func() {
+	return fm.locks.Lock(pathlock.LevelFile, path)
 }
 
 func (fm *FileManager) distLockFile(ctx context.Context, path string) (string, error) {
@@ -90,6 +87,9 @@ func (fm *FileManager) distLockFile(ctx context.Context, path string) (string, e
 // goroutine to periodically renew it. The returned cancel function must be
 // called (typically via defer) to stop renewal when the operation completes.
 // Use this for long-running operations like large file uploads.
+//
+// The "file:" prefix mirrors pathlock's file level, so the in-process and
+// cross-instance ordering rules agree; see the pathlock package documentation.
 func (fm *FileManager) distLockFileWithRenewal(ctx context.Context, path string) (string, context.CancelFunc, error) {
 	token, cancel, err := distributed.AcquireLockWithRenewal(ctx, fm.distLock, "file:"+path, 10*time.Second, 30, 50*time.Millisecond)
 	if err != nil {
@@ -113,8 +113,8 @@ func (fm *FileManager) distUnlockFile(ctx context.Context, path string, token st
 
 func (fm *FileManager) UploadFile(ctx context.Context, path string, data []byte) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
-	fm.lockFile(path)
-	defer fm.unlockFile(path)
+	release := fm.lockFile(path)
+	defer release()
 
 	token, cancelRenew, err := fm.distLockFileWithRenewal(ctx, path)
 	if err != nil {
@@ -187,8 +187,8 @@ func (fm *FileManager) UploadFile(ctx context.Context, path string, data []byte)
 // the hash is computed once from the incoming stream.
 func (fm *FileManager) UploadFileFromReader(ctx context.Context, path string, reader io.Reader) (*database.FileMetadata, error) {
 	path = utils.NormalizePath(path)
-	fm.lockFile(path)
-	defer fm.unlockFile(path)
+	release := fm.lockFile(path)
+	defer release()
 
 	token, cancelRenew, err := fm.distLockFileWithRenewal(ctx, path)
 	if err != nil {
@@ -320,8 +320,8 @@ func (fm *FileManager) DownloadFileDataAt(ctx context.Context, meta *database.Fi
 
 func (fm *FileManager) DeleteFile(ctx context.Context, path string) error {
 	path = utils.NormalizePath(path)
-	fm.lockFile(path)
-	defer fm.unlockFile(path)
+	release := fm.lockFile(path)
+	defer release()
 
 	token, err := fm.distLockFile(ctx, path)
 	if err != nil {
@@ -347,8 +347,8 @@ func (fm *FileManager) DeleteFile(ctx context.Context, path string) error {
 
 func (fm *FileManager) RenameFile(ctx context.Context, oldPath, newName string) error {
 	oldPath = utils.NormalizePath(oldPath)
-	fm.lockFile(oldPath)
-	defer fm.unlockFile(oldPath)
+	release := fm.lockFile(oldPath)
+	defer release()
 
 	token, err := fm.distLockFile(ctx, oldPath)
 	if err != nil {
@@ -416,22 +416,9 @@ func (fm *FileManager) GetFileSize(ctx context.Context, path string) int64 {
 	return meta.Size
 }
 
-// CleanFileLocks drops lock entries for paths that no longer exist. ctx is the
-// janitor's lifetime context (not a request context); it bounds the existence
-// checks performed while iterating.
-func (fm *FileManager) CleanFileLocks(ctx context.Context) {
-	fm.fileLocks.Range(func(key, value interface{}) bool {
-		path := key.(string)
-		mu := value.(*sync.Mutex)
-		// TryLock 成功说明当前无 goroutine 持有该锁，可安全删除；
-		// 失败则跳过，避免删除正在使用的锁条目导致锁逃逸。
-		if !mu.TryLock() {
-			return true
-		}
-		mu.Unlock()
-		if !fm.Exists(ctx, path) {
-			fm.fileLocks.Delete(key)
-		}
-		return true
-	})
+// Locks exposes the shared lock table for the process janitor. Reclamation
+// lives in pathlock, so there is one sweep for the whole process instead of a
+// per-service one that each owner has to remember to run.
+func (fm *FileManager) Locks() *pathlock.Locker {
+	return fm.locks
 }
