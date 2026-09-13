@@ -108,8 +108,7 @@
 
 ## 登记表
 
-> **状态更新（2026-09-13）**：17 条中 16 条已修复并推送到 `origin/review/acceptance-20260911`；
-> 仅剩 R14 待处理。
+> **状态更新（2026-09-13）**：第二轮 17 条已全部修复并推送到 `origin/review/acceptance-20260911`。
 > 验证口径：`go build ./...`、`go vet ./...` 通过；`go test -count=1 ./internal/...`
 > 连 PostgreSQL 12.6 全绿且 `internal/service/*` 无 SKIP；`go test -count=1 ./tests/...`
 > 集成套件通过。
@@ -129,7 +128,7 @@
 | R11 | P2 | SQL 方言翻译采用文本替换，语义不安全 | `internal/database/dialect.go:40` | [#116](https://github.com/sosoxu/fssvrgo/issues/116) | 已修复 `762e3e3` |
 | R12 | P2 | 进程内双层锁与锁序不统一，存储层锁表无回收 | `internal/pathlock/pathlock.go`（唯一锁表 + 锁序 + 回收） | [#117](https://github.com/sosoxu/fssvrgo/issues/117) | 已修复 `a4b65d6` |
 | R13 | P2 | 数据库 schema 定义重复两份 | `cmd/fsserver/main.go:74`、`internal/database/metadata.go:104` | [#118](https://github.com/sosoxu/fssvrgo/issues/118) | 已修复 `b298f18` |
-| R14 | P3 | 加密路径全量入内存，并发下有内存放大 | `internal/api/http/server.go:487` | [#119](https://github.com/sosoxu/fssvrgo/issues/119) | 待处理 |
+| R14 | P3 | 加密路径全量入内存，并发下有内存放大 | `internal/crypto/crypto.go`（分块流式 FSSGCM v1） | [#119](https://github.com/sosoxu/fssvrgo/issues/119) | 已修复 `PENDING` |
 | R15 | P3 | 同机多实例启动清理会误删其它实例临时目录 | `cmd/fsserver/main.go:183` | [#120](https://github.com/sosoxu/fssvrgo/issues/120) | 已修复 `adb88cf` |
 | R16 | P3 | 预编译语句缓存错误路径泄漏 | `internal/database/db.go:66` | [#121](https://github.com/sosoxu/fssvrgo/issues/121) | 已修复 `f59f017` |
 | R17 | P3 | 审计日志异步批写的可见性窗口 | `internal/database/audit_writer.go:15` | [#122](https://github.com/sosoxu/fssvrgo/issues/122) | 已修复 `8ba910c` |

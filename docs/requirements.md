@@ -153,7 +153,7 @@ fssvrgo 是一个高性能分布式文件存储服务，支持 HTTP 和 gRPC 双
 | 目录删除/重命名 HTTP API | 已实现 | `DELETE` / `PATCH /api/v1/directories/*path` |
 | gRPC 认证拦截器 | 已实现 | unary/stream 拦截器 + 方法级 RBAC（#58） |
 | gRPC 指标采集 | 已实现 | `internal/api/grpc/server.go` metrics 拦截器 |
-| 流式上传/下载加密 | 未实现 | 当前 AES-GCM 需整文件入内存，并发下有内存放大（#119） |
+| 流式上传/下载加密 | 已实现 | 分块 AES-256-GCM（FSSGCM v1，每块独立 Nonce + 块内认证 + 认证 trailer），加解密峰值内存为一块；旧整块格式仍可解密（#119） |
 | 缓存自动清理和 Redis 后端 | 已实现 | `internal/cache`：TTL 惰性删除 + 定期清理循环；`NewRedisCache` 可切换后端 |
 | 软删除数据清理机制 | 已实现 | `internal/database/cleanup.go` 按保留期物理清理 + 元数据/存储对账（#108） |
 | 高并发稳定性 | 已修复 | 第一轮 #86-#105；本轮 CI 接入真实数据库后才有回归保障（#111） |

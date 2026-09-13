@@ -1,6 +1,8 @@
 package http
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,30 +58,50 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
-	// Encryption requires the full plaintext in memory (AES-GCM authenticates
-	// the whole message), so for the encrypted path we still read the body —
-	// but bounded by maxUploadSize. For the non-encrypted path we stream the
-	// multipart body straight into storage via UploadFileFromReader so peak
-	// memory stays bounded by the copy buffer instead of the file size,
-	// avoiding OOM under concurrent large uploads (#33).
+	// The encrypted path encrypts in independent authenticated chunks, so peak
+	// memory is one chunk (plus the small in-memory buffer below) instead of the
+	// whole file: N concurrent 1GB encrypted uploads no longer mean N GB of
+	// heap (#119). The plaintext reader is capped at maxUploadSize.
 	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
-		data, err := io.ReadAll(io.LimitReader(file, s.maxUploadSize+1))
-		if err != nil {
-			sendError(c, http.StatusInternalServerError, "Failed to read file data")
+		limited := &maxBytesReader{r: file, remaining: s.maxUploadSize}
+
+		// Small encrypted uploads still buffer, for the same MinIO reason as the
+		// plaintext path: a bytes.Reader lets minio-go issue a single PutObject.
+		// The read is capped at smallUploadThreshold+1 and the actual plaintext
+		// length is verified afterwards, so a forged header.Size cannot turn
+		// this branch into an unbounded in-memory buffer.
+		if header.Size >= 0 && header.Size <= smallUploadThreshold {
+			var ciphertext bytes.Buffer
+			counted := &countingReader{r: io.LimitReader(limited, smallUploadThreshold+1)}
+			if err := s.cryptoSvc.EncryptStream(&ciphertext, counted); err != nil {
+				s.writeUploadError(c, err)
+				return
+			}
+			if counted.n > smallUploadThreshold {
+				sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Inline upload size exceeds %d bytes; use streaming upload for larger files", smallUploadThreshold))
+				return
+			}
+			meta, err := s.fm.UploadFile(ctx, filePath, ciphertext.Bytes())
+			if err != nil {
+				sendInternalError(c, err, "Failed to upload file")
+				return
+			}
+			s.auditLog("upload", filePath, c, true, "")
+			c.JSON(http.StatusCreated, meta)
 			return
 		}
-		if int64(len(data)) > s.maxUploadSize {
-			sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
-			return
-		}
-		encrypted, err := s.cryptoSvc.Encrypt(string(data))
+
+		// Large encrypted uploads: pipe the encryptor into the streaming upload
+		// path, which hashes and stores as bytes arrive.
+		pr, pw := io.Pipe()
+		defer pr.Close()
+		go func() {
+			pw.CloseWithError(s.cryptoSvc.EncryptStream(pw, limited))
+		}()
+
+		meta, err := s.fm.UploadFileFromReader(ctx, filePath, pr)
 		if err != nil {
-			sendError(c, http.StatusInternalServerError, "Failed to encrypt file")
-			return
-		}
-		meta, err := s.fm.UploadFile(ctx, filePath, []byte(encrypted))
-		if err != nil {
-			sendInternalError(c, err, "Failed to upload file")
+			s.writeUploadError(c, err)
 			return
 		}
 		s.auditLog("upload", filePath, c, true, "")
@@ -138,6 +160,55 @@ func (s *Server) handleUpload(c *gin.Context) {
 
 	s.auditLog("upload", filePath, c, true, "")
 	c.JSON(http.StatusCreated, meta)
+}
+
+// maxBytesReader fails with errPlaintextTooLarge once more than remaining
+// bytes have been read. http.MaxBytesReader only wraps server-side responses,
+// and the encrypted path needs the same guard on the plaintext stream so a
+// client cannot push a file past maxUploadSize through the encryptor.
+type maxBytesReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+var errPlaintextTooLarge = errors.New("upload exceeds the configured maximum size")
+
+// countingReader records how many plaintext bytes were consumed, so the
+// buffered encrypted branch can verify the declared size against reality.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func (m *maxBytesReader) Read(p []byte) (int, error) {
+	if m.remaining < 0 {
+		return 0, errPlaintextTooLarge
+	}
+	if int64(len(p)) > m.remaining+1 {
+		p = p[:m.remaining+1]
+	}
+	n, err := m.r.Read(p)
+	m.remaining -= int64(n)
+	if m.remaining < 0 {
+		return n, errPlaintextTooLarge
+	}
+	return n, err
+}
+
+// writeUploadError maps an upload-stream failure to a response: oversize
+// plaintext becomes 413, everything else is an internal error.
+func (s *Server) writeUploadError(c *gin.Context, err error) {
+	if errors.Is(err, errPlaintextTooLarge) {
+		sendError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File size exceeds maximum allowed size of %d MB", s.config.MaxUploadSizeMB))
+		return
+	}
+	sendInternalError(c, err, "Failed to upload file")
 }
 
 func (s *Server) handleList(c *gin.Context) {

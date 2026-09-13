@@ -90,60 +90,52 @@ func (s *Server) handleDownload(c *gin.Context) {
 // handleEncryptedDownload 将加密文件解密到临时文件后通过 http.ServeContent 响应，
 // 正确处理 Content-Length（明文大小）和 Range 请求（基于明文偏移）。
 // 临时文件在响应结束后清理。
+//
+// 解密直接从存储读取流（分块认证），只多一个明文临时文件：峰值内存是一块明文，
+// 不再需要先把整个密文读进内存，也不再需要中间的密文临时文件（#119）。
 func (s *Server) handleEncryptedDownload(c *gin.Context, meta *database.FileMetadata, filePath string) {
 	ctx := c.Request.Context()
 	tempDir := s.transferSvc.TempDir()
 	sessionID := utils.GenerateUUID()
-	encTempPath := filepath.Join(tempDir, sessionID+".enc")
 	decTempPath := filepath.Join(tempDir, sessionID+".dec")
 
-	// 清理临时文件的辅助函数
 	cleanup := func() {
-		os.Remove(encTempPath)
 		os.Remove(decTempPath)
 	}
 
-	// 1. 将加密文件从存储流式写入临时文件
-	encFile, err := os.Create(encTempPath)
+	reader, err := s.store.OpenReader(ctx, filePath)
+	if err != nil {
+		sendError(c, http.StatusInternalServerError, "Failed to open encrypted file")
+		return
+	}
+	defer reader.Close()
+
+	decFile, err := os.Create(decTempPath)
 	if err != nil {
 		sendError(c, http.StatusInternalServerError, "Failed to create temp file")
 		return
 	}
 
-	reader, err := s.store.OpenReader(ctx, filePath)
-	if err != nil {
-		encFile.Close()
-		os.Remove(encTempPath)
-		sendError(c, http.StatusInternalServerError, "Failed to open encrypted file")
-		return
-	}
-
-	if _, err := io.Copy(encFile, reader); err != nil {
-		reader.Close()
-		encFile.Close()
-		cleanup()
-		sendError(c, http.StatusInternalServerError, "Failed to stream encrypted file")
-		return
-	}
-	reader.Close()
-	encFile.Close()
-
-	// 2. 解密到明文临时文件
-	if err := s.cryptoSvc.DecryptFileStreaming(encTempPath, decTempPath); err != nil {
+	if err := s.cryptoSvc.DecryptStream(decFile, reader); err != nil {
+		decFile.Close()
 		cleanup()
 		sendError(c, http.StatusInternalServerError, "Failed to decrypt file")
 		return
 	}
-
-	// 3. 打开明文临时文件，用 http.ServeContent 响应（自动处理 Range 和 Content-Length）
-	decFile, err := os.Open(decTempPath)
-	if err != nil {
+	if err := decFile.Close(); err != nil {
 		cleanup()
+		sendError(c, http.StatusInternalServerError, "Failed to finalize decrypted file")
+		return
+	}
+	defer cleanup()
+
+	// ServeContent 处理 Range 与 Content-Length（基于明文临时文件）。
+	decFile, err = os.Open(decTempPath)
+	if err != nil {
 		sendError(c, http.StatusInternalServerError, "Failed to open decrypted file")
 		return
 	}
 	defer decFile.Close()
-	defer cleanup()
 
 	c.Header("Content-Type", "application/octet-stream")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", meta.Name))

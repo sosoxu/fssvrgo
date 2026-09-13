@@ -626,37 +626,30 @@ func (s *FileTransferService) CreateDownloadSession(ctx context.Context, filePat
 	}
 
 	// If encryption is enabled, decrypt the file to a temp location for reading.
-	// We stream the encrypted file from storage to a local temp file first
-	// (to avoid holding the full ciphertext in memory), then decrypt.
+	// The storage stream is decrypted chunk by chunk straight into the temp
+	// file: peak memory is one chunk, and no intermediate ciphertext temp file
+	// is needed (#119).
 	if s.cryptoSvc != nil && s.cryptoSvc.IsEnabled() {
-		encTempPath := filepath.Join(s.tempDir, sessionID+".enc")
-		encFile, err := os.Create(encTempPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to create temp file for encrypted data: %w", err)
-		}
-
-		// Stream the encrypted file from storage to the local temp file.
 		reader, err := s.storage.OpenReader(ctx, filePath)
 		if err != nil {
-			encFile.Close()
-			os.Remove(encTempPath)
 			return "", fmt.Errorf("failed to open encrypted file from storage: %w", err)
 		}
-		if _, err := io.Copy(encFile, reader); err != nil {
-			reader.Close()
-			encFile.Close()
-			os.Remove(encTempPath)
-			return "", fmt.Errorf("failed to stream encrypted file: %w", err)
-		}
-		reader.Close()
-		encFile.Close()
+		defer reader.Close()
 
 		decTempPath := filepath.Join(s.tempDir, sessionID+".dec")
-		if err := s.cryptoSvc.DecryptFileStreaming(encTempPath, decTempPath); err != nil {
-			os.Remove(encTempPath)
+		decOut, err := os.Create(decTempPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to create temp file for decrypted data: %w", err)
+		}
+		if err := s.cryptoSvc.DecryptStream(decOut, reader); err != nil {
+			decOut.Close()
+			os.Remove(decTempPath)
 			return "", fmt.Errorf("failed to decrypt file: %w", err)
 		}
-		os.Remove(encTempPath)
+		if err := decOut.Close(); err != nil {
+			os.Remove(decTempPath)
+			return "", fmt.Errorf("failed to finalize decrypted file: %w", err)
+		}
 
 		decFile, err := os.Open(decTempPath)
 		if err != nil {

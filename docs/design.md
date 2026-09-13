@@ -260,8 +260,12 @@ MinIO/S3 兼容对象存储实现。
 **CryptoService** 设计：
 - 算法：AES-256-GCM
 - 密钥来源：hex 编码的 32 字节密钥 或 通行短语（自动填充/截断到 32 字节）
-- 加密流程：生成随机 Nonce → GCM Seal → Base64 编码
-- 解密流程：Base64 解码 → 提取 Nonce → GCM Open
+- 加密流程（FSSGCM v1 分块流式）：写 8 字节魔数 + 8 字节随机 Nonce 前缀，然后按 1MiB
+  明文一块、逐块 `GCM Seal`，每块记录 `kind(1B) || 长度(4B) || sealed`，块 Nonce =
+  前缀 || 递增计数；末尾追加一条被认证的 trailer 记录总明文长度，因此截断/追加都会被检出
+- 解密流程：识别魔数后逐块 `GCM Open` 并校验 trailer；峰值内存为一块明文
+- 兼容性：仍能解密旧格式（整条消息 GCM + Base64），旧格式必须整块读入内存，这也是换成
+  分块格式的原因；新写入不再产生旧格式
 
 ### 2.8 缓存模块 (`internal/cache/`)
 

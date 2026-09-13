@@ -34,11 +34,22 @@ type TestServer struct {
 	DirSvc      *directory.DirectoryManager
 	FlSvc       *filelist.FileListService
 	TransferSvc *transfer.FileTransferService
+	CryptoSvc   *crypto.CryptoService
 	cleanup     func()
 	server      *httpserver.Server
 }
 
 func NewTestServer() (*TestServer, error) {
+	return newTestServer(false)
+}
+
+// NewTestServerWithCrypto is NewTestServer with the crypto service enabled
+// under a freshly generated key, for the encrypted upload/download paths.
+func NewTestServerWithCrypto() (*TestServer, error) {
+	return newTestServer(true)
+}
+
+func newTestServer(enableCrypto bool) (*TestServer, error) {
 	tempDir, err := os.MkdirTemp("", "fsserver-test-*")
 	if err != nil {
 		return nil, err
@@ -95,8 +106,19 @@ func NewTestServer() (*TestServer, error) {
 	authSvc := auth.NewAuthService()
 	authSvc.Init(false, "")
 	cryptoSvc := crypto.NewCryptoService()
+	if enableCrypto {
+		if err := cryptoSvc.Init(cryptoSvc.GenerateKey()); err != nil {
+			dbObj.Close()
+			dropSchema()
+			os.RemoveAll(tempDir)
+			return nil, fmt.Errorf("enable crypto: %w", err)
+		}
+	}
 	cacheSvc := cache.NewCache(300, 1000)
 	transferSvc := transfer.NewFileTransferService(store, qdb)
+	// Mirror main.go: the transfer service encrypts on completion and decrypts
+	// download sessions only when it holds the crypto service.
+	transferSvc.SetCryptoService(cryptoSvc)
 
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -154,6 +176,7 @@ func NewTestServer() (*TestServer, error) {
 		DirSvc:      dirSvc,
 		FlSvc:       flSvc,
 		TransferSvc: transferSvc,
+		CryptoSvc:   cryptoSvc,
 		server:      srv,
 		cleanup: func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

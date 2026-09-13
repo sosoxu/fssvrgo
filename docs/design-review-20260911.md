@@ -69,8 +69,8 @@
 | R16 | P3 | 预编译语句缓存错误路径泄漏 | [#121](https://github.com/sosoxu/fssvrgo/issues/121) |
 | R17 | P3 | 审计日志异步批写的可见性窗口 | [#122](https://github.com/sosoxu/fssvrgo/issues/122) |
 
-> 修复进度（2026-09-13）：R1–R13、R15–R17 已修复并推送到
-> `origin/review/acceptance-20260911`；仅 R14 待处理。逐条状态与提交号见
+> 修复进度（2026-09-13）：R1–R17 全部修复并推送到
+> `origin/review/acceptance-20260911`。逐条状态与提交号见
 > [../ISSUES.md](../ISSUES.md) 第二轮登记表。
 >
 > R8 的落地方式：`internal/api/http/server.go` 拆成 11 个按职责划分的文件，审计查询与
@@ -83,6 +83,10 @@
 > `LockMany`，空闲条目由引用计数保护的 `Reclaim()` 回收并接入启动 janitor；原先两套
 > `sync.Map`（`FileManager.fileLocks` 与 `LocalStorage.pathLocks`）和生产路径上从不执行
 > 的 `CleanPathLocks` 一并移除。
+> R14 的落地方式：加密格式改为分块流式 AES-256-GCM（FSSGCM v1，每块独立 Nonce + 块内
+> 认证，末尾带被认证的长度 trailer，截断/追加可检出），HTTP 上传/下载与 transfer 的
+> 分段上传/下载会话都按块处理，峰值内存从"整个文件"降为"一块"；旧整块 Base64 格式仍可
+> 解密，新增的单测直接断言 32MiB 流的加解密分配不超过 8MiB。
 
 ### R1 [P0] filelist 计数查询缺子查询别名
 
