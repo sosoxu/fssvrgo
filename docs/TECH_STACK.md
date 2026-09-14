@@ -39,13 +39,13 @@
 
 ### 1.2 多方言 SQL 数据库抽象
 
-- **技术**：SQLite（纯 Go 无 CGO）+ PostgreSQL 双支持，手写 SQL 无 ORM
-- **库**：`modernc.org/sqlite`、`github.com/lib/pq`
+- **技术**：PostgreSQL（运行时）+ SQLite 方言（仅测试），手写 SQL 无 ORM
+- **库**：`github.com/lib/pq`（运行时）、`modernc.org/sqlite`（测试）
 - **位置**：[internal/database/database.go](../internal/database/database.go)、[internal/database/dialect.go](../internal/database/dialect.go)、[internal/database/db.go](../internal/database/db.go)
 - **原理**：方言翻译层 `Dialect.Translate()` 自动将 `?` 占位符转为 PostgreSQL 的 `$N`
 - **亮点**：
   - 预处理语句缓存（`sync.Map` + `*sql.Stmt`，`LoadOrStore` 防并发重复 prepare）
-  - SQLite WAL 模式优化（`journal_mode=WAL`、`busy_timeout=5000`、`synchronous=NORMAL`）
+  - SQLite WAL 模式优化（仅测试路径：`journal_mode=WAL`、`busy_timeout=5000`、`synchronous=NORMAL`）
   - 连接池管理（`SetMaxOpenConns`/`SetMaxIdleConns`/`SetConnMaxLifetime`/`SetConnMaxIdleTime`）
   - 事务封装 `Tx` 自动应用方言翻译
   - 迁移机制 `MigrationManager` 维护 `schema_migrations` 版本表，按 Version 升序执行
@@ -454,7 +454,7 @@
 ### 11.4 多实例一致性测试
 
 - **位置**：[tests/multi_instance_consistency_test.go](../tests/multi_instance_consistency_test.go)
-- **原理**：`MultiInstanceCluster` 框架，N 实例共享 SQLite DB + LocalStorage + Redis 锁，验证跨实例并发安全
+- **原理**：`MultiInstanceCluster` 框架，N 实例共享 PostgreSQL DB + LocalStorage + Redis 锁，验证跨实例并发安全
 
 ### 11.5 真实后端集成测试
 
@@ -591,7 +591,7 @@
 |------|------|------|
 | Web 框架 | gin | v1.12.0 |
 | RPC | grpc + protobuf | v1.81.1 / v1.36.11 |
-| 数据库 | lib/pq + modernc.org/sqlite | v1.12.3 / v1.50.1 |
+| 数据库 | lib/pq（运行时）/ modernc.org/sqlite（测试） | v1.12.3 / v1.50.1 |
 | 对象存储 | minio-go/v7 | v7.2.0 |
 | 缓存/锁 | redis/go-redis/v9 | v9.20.0 |
 | 协调 | etcd/client/v3 | v3.6.12 |
@@ -607,7 +607,7 @@
 ## 技术亮点总结
 
 1. **统一 Adapter 接口**贯穿存储/缓存/锁/会话四层，后端切换是配置项而非代码改动
-2. **方言翻译层**让同一套 SQL 跑在 SQLite 和 PostgreSQL 上，保留预处理语句缓存
+2. **方言翻译层**让同一套 SQL 跑在 PostgreSQL（运行时）与 SQLite（测试）上，保留预处理语句缓存
 3. **分块/断点续传 + Multipart 字节覆盖追踪**的完整传输实现
 4. **锁逃逸/恢复竞态**等并发边界场景的针对性设计（TryLock 回收、LoadOrStore 竞态处理）
 5. **异步批写审计日志**通过 channel + 后台 goroutine 解耦持久化与请求路径

@@ -7,7 +7,7 @@
 - **双协议支持** — 同时提供 RESTful HTTP API 和 gRPC 服务
 - **大文件分段传输** — 支持并发分段上传/下载（Multipart Upload/Parallel Download），GB 级文件传输效率显著提升
 - **增量哈希校验** — 顺序上传时边写边计算 SHA256，完成时无需重新读取文件
-- **多数据库支持** — SQLite（单机）和 PostgreSQL（生产），通过配置切换，SQL 方言自动翻译
+- **PostgreSQL 数据库** — 运行时统一使用 PostgreSQL，SQL 方言自动翻译（`?` → `$1, $2, ...`），预编译语句缓存
 - **分布式一致性** — Redis 分布式锁（SET NX + Lua 原子解锁）+ Redis 会话存储，支持多实例部署
 - **文件句柄缓存** — 上传会话保持临时文件打开，避免每次 chunk 的 open/close 开销
 - **预分配空间** — 创建上传会话时预分配文件空间（Truncate），减少文件系统碎片
@@ -43,7 +43,7 @@
 ├─────────────────────────────────────────────────────┤
 │              Storage & Database                      │
 │  ┌──────────────┐ ┌──────────────────────────────┐  │
-│  │ LocalStorage │ │  Database (SQLite/PostgreSQL) │  │
+│  │ LocalStorage │ │  Database (PostgreSQL)        │  │
 │  │ (sync.Map    │ │  - Dialect Translation        │  │
 │  │  path locks) │ │  - Prepared Stmt Cache        │  │
 │  └──────────────┘ └──────────────────────────────┘  │
@@ -66,7 +66,7 @@ fssvrgo/
 │   ├── config/            # 配置加载与校验
 │   ├── crypto/            # 加密服务 (AES-256-GCM)
 │   ├── database/          # 数据库层
-│   │   ├── database.go    #   连接管理 (SQLite/PostgreSQL)
+│   │   ├── database.go    #   连接管理 (PostgreSQL)
 │   │   ├── db.go          #   DB 封装 (预处理语句缓存)
 │   │   ├── dialect.go     #   SQL 方言翻译 (? → $1, $2, ...)
 │   │   ├── metadata.go    #   文件元数据 CRUD
@@ -270,35 +270,30 @@ curl -H "Range: bytes=0-1048575" \
 
 ## 性能
 
-测试环境：Intel Xeon Platinum 8457C, 本地文件系统, SQLite
+测试环境：PostgreSQL 16 + Redis 7，本地文件系统，3 实例集群；流式分块 256KB，每项 3 次取均值
 
-### 分段 vs 不分段
+### 上传 / 下载吞吐
 
-| 操作 | 协议 | 模式 | 并发 | 吞吐量 |
-|------|------|------|------|--------|
-| 上传 256MB | HTTP | 不分段 | 1 | 105.55 MB/s |
-| 上传 256MB | HTTP | 分段 | 4 | **117.28 MB/s** (+11%) |
-| 上传 256MB | gRPC | 不分段 | 1 | 128.53 MB/s |
-| 上传 256MB | gRPC | 分段 | 8 | **134.65 MB/s** (+5%) |
-| 下载 100MB | HTTP | 不分段 | 1 | 313.99 MB/s |
-| 下载 100MB | HTTP | 分段 | 4 | **503.62 MB/s** (+60%) |
-| 下载 100MB | gRPC | 不分段 | 1 | 820.93 MB/s |
-| 下载 100MB | gRPC | 分段 | 4 | **1309.00 MB/s** (+59%) |
-| 下载 256MB | gRPC | 分段 | 4 | **1375.40 MB/s** |
+| 文件大小 | HTTP 上传 | HTTP 下载 | gRPC 上传 | gRPC 下载 |
+|---------|-----------|-----------|-----------|-----------|
+| 1MB | 36.69 MB/s | 230.42 MB/s | 78.15 MB/s | 512.48 MB/s |
+| 10MB | 91.54 MB/s | 300.23 MB/s | 204.39 MB/s | 980.46 MB/s |
+| 50MB | 104.00 MB/s | 612.29 MB/s | 263.37 MB/s | 1119.69 MB/s |
 
-### HTTP vs gRPC
+### 流式上传 / 下载（256KB 分块）
 
-| 操作 | HTTP | gRPC | gRPC 加速 |
-|------|------|------|-----------|
-| 下载 100MB (分段 c=4) | 504 MB/s | 1309 MB/s | **2.60x** |
-| 下载 256MB (分段 c=4) | 410 MB/s | 1375 MB/s | **3.35x** |
+| 文件大小 | HTTP 流式上传 | HTTP 流式下载 | gRPC 流式上传 | gRPC 流式下载 |
+|---------|--------------|--------------|--------------|--------------|
+| 10MB | 32.96 MB/s | 74.99 MB/s | 114.50 MB/s | 112.80 MB/s |
+| 50MB | 37.38 MB/s | 85.21 MB/s | 138.24 MB/s | 139.18 MB/s |
 
 ### 关键结论
 
-- **下载场景**：分段传输全面优于不分段，gRPC 分段4并发比不分段快 59%~67%
-- **上传场景**：小文件不分段略优（会话开销），大文件分段开始占优
-- **最优并发数**：4 并发是最佳平衡点，超过后锁竞争增加
-- **gRPC 下载远快于 HTTP**：直连内存操作 vs 网络栈序列化，差距 2.6x~3.4x
+- **下载远快于上传**：读取路径更简单；50MB gRPC 下载比上传快约 4.25x
+- **gRPC 快于 HTTP**：各文件大小、各操作下快 1.5x~3.7x（gRPC 为进程内服务层调用，不含网络序列化，代表存储层上限）
+- **吞吐随文件增大提升**：小文件受固定请求/会话开销主导，10MB 以上进入高吞吐区间
+- **流式（256KB 分块）**：以内存效率与断点续传为主，此分块大小下单请求吞吐更高
+- 完整数据见 [PERFORMANCE_REPORT.md](PERFORMANCE_REPORT.md)
 
 ## 多实例部署
 
@@ -394,7 +389,7 @@ go test ./tests/ -bench=BenchmarkGRPC_SegmentedDownload -benchmem
 |------|------|
 | HTTP 框架 | Gin |
 | gRPC | google.golang.org/grpc |
-| 数据库 | SQLite (modernc.org/sqlite) / PostgreSQL (lib/pq) |
+| 数据库 | PostgreSQL (lib/pq) |
 | 分布式锁/会话 | Redis (go-redis/v9) |
 | 日志 | Zap |
 | 指标 | Prometheus client_golang |

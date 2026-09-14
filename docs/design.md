@@ -27,7 +27,7 @@
 ├─────────────────────────────────────────────────────┤
 │              Storage & Database                      │
 │  ┌──────────────┐ ┌──────────────────────────────┐  │
-│  │ LocalStorage │ │  Database (SQLite/PostgreSQL) │  │
+│  │ LocalStorage │ │  Database (PostgreSQL)        │  │
 │  │ (sync.Map    │ │  - Dialect Translation        │  │
 │  │  path locks) │ │  - Prepared Stmt Cache        │  │
 │  └──────────────┘ └──────────────────────────────┘  │
@@ -299,8 +299,7 @@ Client → CreateMultipartUpload → Pre-allocate Temp File
 |------|------|------|
 | HTTP 框架 | Gin | 高性能 HTTP 框架 |
 | gRPC | google.golang.org/grpc | 流式传输支持 |
-| 数据库 | SQLite (modernc.org/sqlite) | 纯 Go 实现，无 CGO 依赖 |
-| 数据库 | PostgreSQL (lib/pq) | 生产环境关系型数据库 |
+| 数据库 | PostgreSQL (lib/pq) | 运行时唯一数据库，单机与多实例统一 |
 | 分布式锁/会话 | Redis (go-redis/v9) | 分布式协调 |
 | 对象存储 | MinIO (minio-go/v7) | S3 兼容对象存储 |
 | 日志 | Zap | 高性能结构化日志 |
@@ -324,7 +323,7 @@ Client → CreateMultipartUpload → Pre-allocate Temp File
 server:        # 服务器配置（端口、并发、限制）
 tls:           # TLS/HTTPS 配置
 storage:       # 存储配置（local/minio）
-database:      # 数据库配置（sqlite/postgresql）
+database:      # 数据库配置（postgresql）
 logging:       # 日志配置（级别、格式、输出）
 cache:         # 缓存配置（类型、TTL、容量）
 redis:         # Redis 配置（地址、连接池）

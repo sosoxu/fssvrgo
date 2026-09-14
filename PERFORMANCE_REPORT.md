@@ -1,194 +1,173 @@
 # Go FileServer Performance Test Report
 
-**Generated:** 2026-05-29T00:45:23Z
-**Test Environment:** Linux sandbox (Go 1.21, SQLite WAL mode, Local Storage)
-**Total Tests:** 74 | **Passed:** 71 | **Failed:** 3
+**Generated:** 2026-09-11
+**Test Environment:** Linux, PostgreSQL 16 + Redis 7, Local Storage, 3-instance cluster
+**Test Suite:** `TestPostgreSQLRedis_Performance`
+**Result:** PASS (14.25s) | 1/1 test passed
 
-> Note: 3 concurrent upload/download tests failed with HTTP 500 due to server resource limits under extreme concurrency (50 simultaneous connections). All individual and streaming tests passed successfully, including 1GB file tests.
+> **Scope:** File sizes 1KB, 64KB, 256KB, 1MB, 10MB, 50MB. Each operation runs 3 iterations and reports the average. Streaming operations use 256KB chunks.
+>
+> **Protocol note:** HTTP rows measure the full HTTP stack (network request → server → storage). gRPC rows (`Upload`/`Download`/`StreamUpload`/`StreamDownload`) call the service/transfer layer in-process and therefore exclude network serialization — they represent the ceiling of the storage layer, not a wire-level gRPC measurement.
+>
+> **Caveat:** HTTP streaming download returned 0 bytes for files smaller than one chunk (1KB, 64KB) due to a limitation of the test helper; those entries are marked N/A below.
 
 ---
 
 ## 1. HTTP Upload
 
-Tests single-request file upload via HTTP POST multipart/form-data.
+Single-request file upload via HTTP POST multipart/form-data.
 
 | File Size | Duration | Throughput (MB/s) | Status |
 |-----------|----------|-------------------|--------|
-| 1KB | 2ms | 0.52 | ✅ |
-| 4KB | 1ms | 2.95 | ✅ |
-| 16KB | 1ms | 13.18 | ✅ |
-| 64KB | 1ms | 42.92 | ✅ |
-| 256KB | 3ms | 75.88 | ✅ |
-| 1MB | 10ms | 101.91 | ✅ |
-| 4MB | 29ms | 140.20 | ✅ |
-| 16MB | 119ms | 134.86 | ✅ |
-| 64MB | 713ms | 89.78 | ✅ |
-| 256MB | 4.156s | 61.60 | ✅ |
-| 512MB | 9.14s | 56.02 | ✅ |
-| 1GB | 20.463s | 50.04 | ✅ |
+| 1KB | 6.25ms | 0.16 | ✅ |
+| 64KB | 6.96ms | 8.98 | ✅ |
+| 256KB | 10.17ms | 24.58 | ✅ |
+| 1MB | 27.26ms | 36.69 | ✅ |
+| 10MB | 109.25ms | 91.54 | ✅ |
+| 50MB | 480.78ms | 104.00 | ✅ |
 
-**Analysis:** HTTP upload throughput peaks at 4MB (~140 MB/s) and gradually decreases for larger files due to disk I/O and memory management overhead. 1GB upload completes in ~20s at 50 MB/s.
+**Analysis:** HTTP upload throughput scales with file size; small files are dominated by fixed request overhead (0.16 MB/s at 1KB), reaching ~104 MB/s at 50MB.
 
 ---
 
 ## 2. HTTP Download
 
-Tests single-request file download via HTTP GET.
+Single-request file download via HTTP GET.
 
 | File Size | Duration | Throughput (MB/s) | Status |
 |-----------|----------|-------------------|--------|
-| 1KB | 1ms | 1.91 | ✅ |
-| 4KB | 1ms | 2.74 | ✅ |
-| 16KB | 0ms | 35.12 | ✅ |
-| 64KB | 0ms | 152.94 | ✅ |
-| 256KB | 1ms | 451.06 | ✅ |
-| 1MB | 1ms | 1012.24 | ✅ |
-| 4MB | 3ms | 1552.27 | ✅ |
-| 16MB | 7ms | 2225.77 | ✅ |
-| 64MB | 52ms | 1233.64 | ✅ |
-| 256MB | 203ms | 1259.02 | ✅ |
-| 512MB | 567ms | 903.54 | ✅ |
-| 1GB | 673ms | 1520.60 | ✅ |
+| 1KB | 1.17ms | 0.83 | ✅ |
+| 64KB | 1.54ms | 40.51 | ✅ |
+| 256KB | 2.50ms | 99.89 | ✅ |
+| 1MB | 4.34ms | 230.42 | ✅ |
+| 10MB | 33.31ms | 300.23 | ✅ |
+| 50MB | 81.66ms | 612.29 | ✅ |
 
-**Analysis:** HTTP download is significantly faster than upload, with peak throughput at 16MB (~2226 MB/s). Even 1GB downloads complete in under 1 second. The high throughput is due to efficient streaming with `io.Copy` to discard, minimizing memory overhead.
+**Analysis:** HTTP download is consistently faster than upload, reaching 612 MB/s at 50MB. Streaming with `io.Copy` keeps memory overhead low.
 
 ---
 
-## 3. HTTP Streaming Upload (Chunked)
+## 3. HTTP Streaming Upload (Chunked, 256KB chunks)
 
-Tests chunked file upload via HTTP: create session → upload chunks (PUT) → complete session.
-
-| File Size | Chunk Size | Duration | Throughput (MB/s) | Status |
-|-----------|------------|----------|-------------------|--------|
-| 1MB | 256KB | 14ms | 70.46 | ✅ |
-| 16MB | 1MB | 82ms | 194.88 | ✅ |
-| 64MB | 4MB | 267ms | 239.29 | ✅ |
-| 256MB | 8MB | 1.27s | 201.55 | ✅ |
-| 512MB | 16MB | 2.452s | 208.78 | ✅ |
-| 1GB | 32MB | 5.407s | 189.38 | ✅ |
-
-**Analysis:** Streaming upload significantly outperforms single-request upload for large files. 1GB streaming upload (5.4s, 189 MB/s) is ~3.8x faster than single-request upload (20.5s, 50 MB/s). Larger chunk sizes improve throughput by reducing HTTP overhead.
-
----
-
-## 4. HTTP Streaming Download (Chunked)
-
-Tests chunked file download via HTTP Range requests.
-
-| File Size | Chunk Size | Duration | Throughput (MB/s) | Status |
-|-----------|------------|----------|-------------------|--------|
-| 1MB | 256KB | 3ms | 385.44 | ✅ |
-| 16MB | 1MB | 20ms | 808.97 | ✅ |
-| 64MB | 4MB | 75ms | 857.42 | ✅ |
-| 256MB | 8MB | 286ms | 895.96 | ✅ |
-| 512MB | 16MB | 834ms | 614.26 | ✅ |
-| 1GB | 32MB | 1.239s | 826.34 | ✅ |
-
-**Analysis:** Streaming download maintains high throughput across all file sizes. 1GB streaming download completes in ~1.2s at 826 MB/s, which is slower than single-request download but provides better memory efficiency and resumability.
-
----
-
-## 5. gRPC Service Layer Upload
-
-Tests direct FileManager.UploadFile() call (in-process, no network overhead). Capped at 256MB due to in-memory []byte requirement.
+Create session → upload chunks (PUT) → complete session.
 
 | File Size | Duration | Throughput (MB/s) | Status |
 |-----------|----------|-------------------|--------|
-| 1KB | 1ms | 0.82 | ✅ |
-| 4KB | 1ms | 5.64 | ✅ |
-| 16KB | 1ms | 18.13 | ✅ |
-| 64KB | 1ms | 81.70 | ✅ |
-| 256KB | 1ms | 208.36 | ✅ |
-| 1MB | 2ms | 403.45 | ✅ |
-| 4MB | 8ms | 478.27 | ✅ |
-| 16MB | 28ms | 577.75 | ✅ |
-| 64MB | 105ms | 606.73 | ✅ |
-| 256MB | 425ms | 602.93 | ✅ |
+| 1KB | 10.50ms | 0.09 | ✅ |
+| 64KB | 13.17ms | 4.74 | ✅ |
+| 256KB | 18.42ms | 13.57 | ✅ |
+| 1MB | 50.53ms | 19.79 | ✅ |
+| 10MB | 303.36ms | 32.96 | ✅ |
+| 50MB | 1.338s | 37.38 | ✅ |
 
-**Analysis:** gRPC service layer upload is significantly faster than HTTP upload, reaching 600+ MB/s for large files. This represents the raw service performance without HTTP/network overhead.
+**Analysis:** With 256KB chunks, streaming upload is slower than single-request upload because per-chunk session/HTTP overhead dominates. Larger chunk sizes would narrow this gap.
 
 ---
 
-## 6. gRPC Service Layer Download
+## 4. HTTP Streaming Download (Chunked, 256KB chunks)
 
-Tests direct FileManager.DownloadFile() call (in-process, no network overhead). Capped at 256MB.
+Chunked file download via HTTP Range requests.
 
 | File Size | Duration | Throughput (MB/s) | Status |
 |-----------|----------|-------------------|--------|
-| 1KB | 0ms | 4.47 | ✅ |
-| 4KB | 0ms | 20.27 | ✅ |
-| 16KB | 0ms | 76.72 | ✅ |
-| 64KB | 0ms | 215.47 | ✅ |
-| 256KB | 0ms | 557.53 | ✅ |
-| 1MB | 1ms | 1050.95 | ✅ |
-| 4MB | 3ms | 1433.47 | ✅ |
-| 16MB | 16ms | 988.74 | ✅ |
-| 64MB | 47ms | 1354.45 | ✅ |
-| 256MB | 166ms | 1542.23 | ✅ |
+| 1KB | — | — | ⚠️ N/A (helper < chunk) |
+| 64KB | — | — | ⚠️ N/A (helper < chunk) |
+| 256KB | 3.46ms | 72.35 | ✅ |
+| 1MB | 14.92ms | 67.01 | ✅ |
+| 10MB | 133.35ms | 74.99 | ✅ |
+| 50MB | 586.75ms | 85.21 | ✅ |
 
-**Analysis:** gRPC service layer download achieves exceptional throughput (1000-1542 MB/s), demonstrating the raw performance of the Go file storage layer. 256MB downloads in 166ms.
+**Analysis:** HTTP streaming download is stable at 67–85 MB/s for files ≥ 256KB. Small files below the chunk size are not exercised by the test helper.
 
 ---
 
-## 7. gRPC Streaming Upload
+## 5. gRPC (Service Layer) Upload
 
-Tests FileTransferService streaming upload (create session → upload chunks → complete). Uses temp file for large files (>64MB).
+Direct `FileManager.UploadFile()` call — in-process, no network overhead.
 
-| File Size | Chunk Size | Duration | Throughput (MB/s) | Status |
-|-----------|------------|----------|-------------------|--------|
-| 1MB | 256KB | 4ms | 268.74 | ✅ |
-| 16MB | 1MB | 35ms | 460.14 | ✅ |
-| 64MB | 4MB | 126ms | 506.63 | ✅ |
-| 256MB | 8MB | 645ms | 396.71 | ✅ |
-| 512MB | 16MB | 1.263s | 405.45 | ✅ |
-| 1GB | 32MB | 2.501s | 409.43 | ✅ |
+| File Size | Duration | Throughput (MB/s) | Status |
+|-----------|----------|-------------------|--------|
+| 1KB | 2.78ms | 0.35 | ✅ |
+| 64KB | 4.51ms | 13.85 | ✅ |
+| 256KB | 6.54ms | 38.23 | ✅ |
+| 1MB | 12.80ms | 78.15 | ✅ |
+| 10MB | 48.93ms | 204.39 | ✅ |
+| 50MB | 189.85ms | 263.37 | ✅ |
 
-**Analysis:** gRPC streaming upload outperforms HTTP streaming upload by ~2x for large files. 1GB gRPC streaming upload (2.5s, 409 MB/s) vs HTTP streaming upload (5.4s, 189 MB/s). This is because gRPC streaming avoids HTTP multipart encoding overhead.
-
----
-
-## 8. gRPC Streaming Download
-
-Tests FileTransferService streaming download (create session → download chunks → complete).
-
-| File Size | Chunk Size | Duration | Throughput (MB/s) | Status |
-|-----------|------------|----------|-------------------|--------|
-| 1MB | 256KB | 1ms | 674.54 | ✅ |
-| 16MB | 1MB | 11ms | 1488.42 | ✅ |
-| 64MB | 4MB | 50ms | 1276.33 | ✅ |
-| 256MB | 8MB | 148ms | 1729.74 | ✅ |
-| 512MB | 16MB | 287ms | 1784.34 | ✅ |
-| 1GB | 32MB | 626ms | 1635.48 | ✅ |
-
-**Analysis:** gRPC streaming download achieves the highest throughput among all download methods. 1GB downloads in 626ms at 1635 MB/s. This demonstrates the efficiency of the Go transfer service's chunked reading mechanism.
+**Analysis:** The service layer reaches 263 MB/s at 50MB, roughly 2.2–2.5x faster than the HTTP path, isolating the cost of the HTTP stack.
 
 ---
 
-## 9. Concurrent Upload
+## 6. gRPC (Service Layer) Download
 
-Tests concurrent HTTP file uploads with multiple goroutines.
+Direct `FileManager.DownloadFile()` call — in-process, no network overhead.
 
-| File Size | Concurrency | Duration | Throughput (MB/s) | Status |
-|-----------|-------------|----------|-------------------|--------|
-| 1MB | x10 | - | - | ❌ 2 errors: status 500 |
-| 1MB | x50 | - | - | ❌ 17 errors: status 500 |
-| 16MB | x10 | 515ms | 310.75 | ✅ |
+| File Size | Duration | Throughput (MB/s) | Status |
+|-----------|----------|-------------------|--------|
+| 1KB | 314µs | 3.11 | ✅ |
+| 64KB | 442µs | 141.42 | ✅ |
+| 256KB | 965µs | 259.20 | ✅ |
+| 1MB | 1.95ms | 512.48 | ✅ |
+| 10MB | 10.20ms | 980.46 | ✅ |
+| 50MB | 44.66ms | 1119.69 | ✅ |
 
-**Analysis:** Low concurrency (x10) with larger files works well. High concurrency (x50) with small files triggers server rate limiting or resource exhaustion. The 16MB x10 test achieved 310 MB/s aggregate throughput.
+**Analysis:** The fastest path in the suite — 50MB downloads in 44.7ms at 1119.69 MB/s, demonstrating the raw throughput of the Go storage layer.
 
 ---
 
-## 10. Concurrent Download
+## 7. gRPC Streaming Upload (256KB chunks)
 
-Tests concurrent HTTP file downloads with multiple goroutines.
+`FileTransferService` session → chunk upload → complete.
 
-| File Size | Concurrency | Duration | Throughput (MB/s) | Status |
-|-----------|-------------|----------|-------------------|--------|
-| 1MB | x10 | 11ms | 937.54 | ✅ |
-| 1MB | x50 | - | - | ❌ upload failed with status 500 |
-| 16MB | x10 | 77ms | 2066.72 | ✅ |
+| File Size | Duration | Throughput (MB/s) | Status |
+|-----------|----------|-------------------|--------|
+| 1KB | 6.70ms | 0.15 | ✅ |
+| 64KB | 8.17ms | 7.65 | ✅ |
+| 256KB | 10.21ms | 24.50 | ✅ |
+| 1MB | 22.30ms | 44.84 | ✅ |
+| 10MB | 87.33ms | 114.50 | ✅ |
+| 50MB | 361.69ms | 138.24 | ✅ |
 
-**Analysis:** Concurrent downloads perform well at moderate concurrency. The 1MB x50 failure is due to the upload step (preparing the file for download) hitting server limits, not the download itself. 16MB x10 achieved 2067 MB/s aggregate throughput.
+**Analysis:** In-process streaming upload reaches 138 MB/s at 50MB — 3.7x faster than HTTP streaming upload, reflecting the absence of HTTP chunk encoding overhead.
+
+---
+
+## 8. gRPC Streaming Download (256KB chunks)
+
+`FileTransferService` session → chunk download → complete.
+
+| File Size | Duration | Throughput (MB/s) | Status |
+|-----------|----------|-------------------|--------|
+| 1KB | 675µs | 1.45 | ✅ |
+| 64KB | 690µs | 90.61 | ✅ |
+| 256KB | 1.82ms | 137.19 | ✅ |
+| 1MB | 8.40ms | 119.07 | ✅ |
+| 10MB | 88.65ms | 112.80 | ✅ |
+| 50MB | 359.24ms | 139.18 | ✅ |
+
+**Analysis:** gRPC streaming download is stable at 112–139 MB/s for larger files, with the 1KB case limited by fixed session setup cost.
+
+---
+
+## HTTP vs gRPC Comparison
+
+| File Size | Operation | HTTP (MB/s) | gRPC (MB/s) | gRPC Speedup |
+|-----------|-----------|-------------|-------------|--------------|
+| 1KB | Upload | 0.16 | 0.35 | 2.24x |
+| 1KB | Download | 0.83 | 3.11 | 3.74x |
+| 1KB | Stream Upload | 0.09 | 0.15 | 1.57x |
+| 64KB | Upload | 8.98 | 13.85 | 1.54x |
+| 64KB | Download | 40.51 | 141.42 | 3.49x |
+| 256KB | Upload | 24.58 | 38.23 | 1.55x |
+| 256KB | Download | 99.89 | 259.20 | 2.59x |
+| 1MB | Upload | 36.69 | 78.15 | 2.13x |
+| 1MB | Download | 230.42 | 512.48 | 2.22x |
+| 10MB | Upload | 91.54 | 204.39 | 2.23x |
+| 10MB | Download | 300.23 | 980.46 | 3.27x |
+| 50MB | Upload | 104.00 | 263.37 | 2.53x |
+| 50MB | Download | 612.29 | 1119.69 | 1.83x |
+
+**gRPC (service layer) is faster than HTTP across every size and operation**, by 1.5x–3.7x. The largest gaps appear on downloads of medium files (10MB: 3.27x).
 
 ---
 
@@ -196,48 +175,42 @@ Tests concurrent HTTP file downloads with multiple goroutines.
 
 | Metric | Value |
 |--------|-------|
-| **Min Throughput** | 0.52 MB/s (1KB HTTP Upload) |
-| **Max Throughput** | 2225.77 MB/s (16MB HTTP Download) |
-| **Avg Throughput** | 580.18 MB/s |
-| **Median Throughput** | 403.45 MB/s |
-| **Tests Passed** | 71/74 (95.9%) |
+| **Min Throughput** | 0.09 MB/s (1KB HTTP Stream Upload) |
+| **Max Throughput** | 1119.69 MB/s (50MB gRPC Download) |
+| **Avg Throughput** | 141.37 MB/s |
+| **Median Throughput** | 73.67 MB/s |
+| **Tests Passed** | 1/1 (100%) |
 
 ---
 
 ## Key Findings
 
-### 1. Upload Performance Comparison (1GB file)
+### 1. Protocol Comparison (50MB)
 | Method | Duration | Throughput |
 |--------|----------|------------|
-| HTTP Single Request | 20.5s | 50 MB/s |
-| HTTP Streaming (32MB chunks) | 5.4s | 189 MB/s |
-| gRPC Streaming (32MB chunks) | 2.5s | 409 MB/s |
+| HTTP Upload | 480.78ms | 104.00 MB/s |
+| HTTP Download | 81.66ms | 612.29 MB/s |
+| HTTP Stream Upload | 1.338s | 37.38 MB/s |
+| HTTP Stream Download | 586.75ms | 85.21 MB/s |
+| gRPC Upload | 189.85ms | 263.37 MB/s |
+| gRPC Download | 44.66ms | 1119.69 MB/s |
+| gRPC Stream Upload | 361.69ms | 138.24 MB/s |
+| gRPC Stream Download | 359.24ms | 139.18 MB/s |
 
-**Streaming upload is 3.8x faster than single-request upload. gRPC streaming is 8.2x faster.**
-
-### 2. Download Performance Comparison (1GB file)
-| Method | Duration | Throughput |
-|--------|----------|------------|
-| HTTP Single Request | 673ms | 1521 MB/s |
-| HTTP Streaming (32MB chunks) | 1.2s | 826 MB/s |
-| gRPC Streaming (32MB chunks) | 626ms | 1635 MB/s |
-
-**gRPC streaming download is the fastest method for 1GB files. HTTP single-request download is also very fast due to efficient streaming.**
+### 2. Download vs Upload
+Download is consistently faster than upload for the same protocol and size — the read path is simpler and avoids multipart parsing and write amplification. At 50MB, gRPC download is 4.25x faster than gRPC upload.
 
 ### 3. Small File Performance
-- Files ≤ 256KB: throughput ranges from 0.5-450 MB/s (HTTP overhead dominates)
-- Files 1-16MB: sweet spot for single-request uploads (100-140 MB/s)
-- Files > 64MB: streaming methods significantly outperform single-request
+- Files ≤ 256KB: throughput is dominated by fixed request/session overhead (0.09–260 MB/s).
+- Files 1–10MB: throughput climbs steadily as overhead is amortized (19.79–980.46 MB/s).
+- Files ≥ 10MB: sustained high throughput (up to 1119.69 MB/s).
 
-### 4. gRPC vs HTTP
-- gRPC service layer (in-process): 400-1542 MB/s (no network overhead)
-- gRPC streaming: 268-1784 MB/s (chunk-based, memory efficient)
-- HTTP single-request: 0.5-2226 MB/s (varies widely by file size)
-- HTTP streaming: 70-896 MB/s (consistent, memory efficient)
+### 4. Streaming vs Single Request
+- With 256KB chunks, single-request upload outperforms chunked upload (per-chunk overhead); larger chunks would change this trade-off.
+- Streaming's value is memory efficiency and resumability rather than peak throughput at this chunk size.
 
 ### 5. Recommendations
-- **Small files (< 16MB):** Use HTTP single-request upload/download for simplicity
-- **Large files (> 64MB):** Use streaming upload/download for better throughput and memory efficiency
-- **Maximum throughput:** Use gRPC streaming for both upload and download
-- **Concurrent operations:** Limit concurrency to ≤10 for stable performance
-- **1GB files:** gRPC streaming upload (2.5s) and download (626ms) provide the best performance
+- **Small files (< 1MB):** single-request HTTP upload/download for simplicity.
+- **Large files (> 10MB):** prefer larger chunk sizes for streaming to reduce per-chunk overhead.
+- **Maximum throughput:** use the gRPC/transfer service path directly.
+- **Downloads:** always faster than uploads — size chunk/concurrency around the download path when tuning.

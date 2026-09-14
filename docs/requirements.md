@@ -59,10 +59,10 @@ fssvrgo 是一个高性能分布式文件存储服务，支持 HTTP 和 gRPC 双
 
 ### 2.5 数据库支持
 
-- **SQLite**：单机部署，使用 `modernc.org/sqlite`（纯 Go 实现）
-- **PostgreSQL**：生产环境，使用 `lib/pq` 驱动
+- **PostgreSQL**：运行时唯一支持的数据库，单机与多实例部署统一使用，驱动为 `lib/pq`
 - SQL 方言自动翻译（`?` → `$1, $2, ...`）
 - Prepared Statement 缓存减少 SQL 解析开销
+- 配置校验 `database.type` 仅接受 `postgresql`；SQLite 方言实现仅保留供单元测试与方言翻译层测试使用，不参与运行时部署
 
 ### 2.6 分布式支持
 
@@ -124,8 +124,8 @@ fssvrgo 是一个高性能分布式文件存储服务，支持 HTTP 和 gRPC 双
 
 ### 4.1 单机部署
 
-- SQLite + 本地文件系统
-- 最小依赖，开箱即用
+- PostgreSQL + 本地文件系统
+- 最小依赖：单个 PostgreSQL 实例即可，无需 Redis/etcd
 
 ### 4.2 多实例部署
 
@@ -133,24 +133,24 @@ fssvrgo 是一个高性能分布式文件存储服务，支持 HTTP 和 gRPC 双
 - 分布式锁保证跨实例互斥
 - 会话存储在 Redis 保证任意实例可恢复
 
-## 5. 待实现需求
+## 5. 需求实现状态
 
-以下需求已有配置定义或部分代码实现，但尚未完整落地：
+以下需求均已落地并在 `cmd/fsserver/main.go` 中完成装配，仅高并发稳定性仍在持续优化：
 
-| 需求 | 状态 | Issue |
-|------|------|-------|
-| HTTPS/TLS 双端口监听 | 配置已定义，未实现 | #2 |
-| etcd 集成 | 配置已定义，未实现 | #3 |
-| 服务发现机制 | 配置已定义，未实现 | #4 |
-| 数据一致性级别控制 | 配置已定义，未实现 | #5 |
-| JWT Token 认证 | 配置已定义，未实现 | #6 |
-| API Key 管理 API | 数据库已建表，无端点 | #7 |
-| 审计日志持久化和查询 | 数据库已建表，未持久化 | #8 |
-| 目录删除和重命名 HTTP API | 服务层已实现，无端点 | #9 |
-| gRPC 认证拦截器 | 未实现 | #10 |
-| gRPC 指标采集 | 未实现 | #11 |
-| 流式上传/下载加密 | 未实现 | #12 |
-| 缓存自动清理和 Redis 后端 | 部分实现 | #13 |
-| 软删除数据清理机制 | 未实现 | #14 |
-| 高并发稳定性修复 | 部分失败 | #15 |
-| 程序入口 main.go | 未创建 | #16 |
+| 需求 | 状态 | 实现位置 | Issue |
+|------|------|----------|-------|
+| HTTPS/TLS 双端口监听 | 已实现 | `api/http/server.go`（TLS 启用时 HTTP 与 HTTPS 同时监听） | #2 |
+| etcd 集成 | 已实现 | `internal/etcd/`、`main.go` | #3 |
+| 服务发现机制 | 已实现 | `internal/discovery/`、`main.go` | #4 |
+| 数据一致性级别控制 | 已实现 | `internal/consistency/` | #5 |
+| JWT Token 认证 | 已实现 | `internal/auth/jwt.go`、`/api/v1/auth/token`、`/refresh` | #6 |
+| API Key 管理 API | 已实现 | `/api/v1/api-keys` CRUD（admin 权限） | #7 |
+| 审计日志持久化和查询 | 已实现 | `internal/database/audit_writer.go`、`GET /api/v1/audit-logs` | #8 |
+| 目录删除和重命名 HTTP API | 已实现 | `DELETE/PATCH /api/v1/directories/*path` | #9 |
+| gRPC 认证拦截器 | 已实现 | `api/grpc/server.go`（认证 + RBAC 授权） | #10 |
+| gRPC 指标采集 | 已实现 | `api/grpc/server.go` 指标拦截器 | #11 |
+| 流式上传/下载加密 | 已实现 | `internal/service/transfer/` + `CryptoService` | #12 |
+| 缓存自动清理和 Redis 后端 | 已实现 | `internal/cache/` | #13 |
+| 软删除数据清理机制 | 已实现 | `internal/database/cleanup.go` | #14 |
+| 高并发稳定性 | 部分实现 | 极端 50 并发小文件仍可能出现 HTTP 500 | #15 |
+| 程序入口 main.go | 已实现 | `cmd/fsserver/main.go` | #16 |
